@@ -434,7 +434,7 @@ object EmaCrossRetestEngine {
         val closed = wins + losses
         val winRate = if (closed > 0) wins.toDouble() / closed else 0.0
         return BacktestStats(
-            trades = closed + open,
+            trades = closed + openTrades,
             wins = wins,
             losses = losses,
             open = openTrades,

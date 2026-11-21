@@ -13,6 +13,7 @@ import com.example.domain.signal.AiSignalSecondOpinion
 import com.example.domain.signal.AiUiState
 import com.example.domain.signal.SignalConfidence
 import com.example.domain.signal.SignalDirection
+import com.example.domain.signal.SignalStrategy
 import com.example.domain.signal.TradeSignal
 import com.example.ui.navigation.InstrumentDetailRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
