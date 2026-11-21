@@ -1,0 +1,535 @@
+package com.example.ui.screens.chart
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.domain.analysis.ChartAnalysis
+import com.example.domain.analysis.DivergenceKind
+import com.example.domain.analysis.EmaCrossSetup
+import com.example.domain.analysis.LiquiditySide
+import com.example.domain.analysis.LiquidityStatus
+import com.example.domain.analysis.SetupState
+import com.example.domain.analysis.ZoneKind
+import com.example.domain.signal.SignalDirection
+import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+
+/** Colours used by the chart canvases (resolved from the theme by the caller). */
+data class ChartPalette(
+    val bull: Color,
+    val bear: Color,
+    val amber: Color,
+    val violet: Color,
+    val cyan: Color,
+    val grid: Color,
+    val text: Color,
+    val muted: Color,
+    val primary: Color
+)
+
+/** Visible window shared by the price and the lower pane so they stay aligned. */
+data class ChartWindow(val start: Int, val end: Int) {
+    val count: Int get() = (end - start).coerceAtLeast(1)
+
+    companion object {
+        fun of(total: Int, visibleBars: Int, panBars: Int): ChartWindow {
+            if (total <= 0) return ChartWindow(0, 0)
+            val end = (total - panBars).coerceIn(1, total)
+            val start = (end - visibleBars).coerceAtLeast(0)
+            return ChartWindow(start, end)
+        }
+    }
+}
+
+private const val AXIS_DP = 58
+
+private fun fmtPrice(v: Double): String = when {
+    abs(v) >= 1000 -> String.format(Locale.US, "%.1f", v)
+    abs(v) >= 10 -> String.format(Locale.US, "%.2f", v)
+    else -> String.format(Locale.US, "%.4f", v)
+}
+
+private fun DrawScope.safeText(
+    tm: TextMeasurer,
+    text: String,
+    x: Float,
+    y: Float,
+    color: Color,
+    sizeSp: Int = 9
+) {
+    // drawText throws if the remaining layout space is negative, so clamp inside the canvas.
+    val maxX = (size.width - 36f).coerceAtLeast(0f)
+    val maxY = (size.height - 14f).coerceAtLeast(0f)
+    val cx = x.coerceIn(0f, maxX)
+    val cy = y.coerceIn(0f, maxY)
+    drawText(
+        textMeasurer = tm,
+        text = text,
+        topLeft = Offset(cx, cy),
+        style = TextStyle(color = color, fontSize = sizeSp.sp),
+        maxLines = 1
+    )
+}
+
+private fun DrawScope.seriesPath(
+    values: List<Double?>,
+    window: ChartWindow,
+    x: (Int) -> Float,
+    y: (Double) -> Float
+): Path {
+    val path = Path()
+    var penDown = false
+    for (i in window.start until window.end) {
+        val v = values.getOrNull(i)
+        if (v == null || v.isNaN()) {
+            penDown = false
+            continue
+        }
+        if (!penDown) {
+            path.moveTo(x(i), y(v))
+            penDown = true
+        } else {
+            path.lineTo(x(i), y(v))
+        }
+    }
+    return path
+}
+
+private fun DrawScope.hLine(
+    yPos: Float,
+    fromX: Float,
+    toX: Float,
+    color: Color,
+    width: Float = 1.2f,
+    dashed: Boolean = false
+) {
+    if (yPos < 0f || yPos > size.height) return
+    drawLine(
+        color = color,
+        start = Offset(fromX, yPos),
+        end = Offset(toX, yPos),
+        strokeWidth = width,
+        pathEffect = if (dashed) PathEffect.dashPathEffect(floatArrayOf(10f, 8f)) else null
+    )
+}
+
+@Composable
+fun PriceChartCanvas(
+    analysis: ChartAnalysis,
+    overlays: ChartOverlays,
+    window: ChartWindow,
+    focusSetup: EmaCrossSetup?,
+    palette: ChartPalette,
+    modifier: Modifier = Modifier
+) {
+    val tm = rememberTextMeasurer()
+    Canvas(modifier = modifier) {
+        val candles = analysis.candles
+        if (candles.isEmpty() || window.end <= window.start) return@Canvas
+        val axisW = AXIS_DP.dp.toPx()
+        val chartW = size.width - axisW
+        val barW = chartW / window.count
+
+        var hi = Double.NEGATIVE_INFINITY
+        var lo = Double.POSITIVE_INFINITY
+        for (i in window.start until window.end) {
+            hi = max(hi, candles[i].high)
+            lo = min(lo, candles[i].low)
+        }
+        if (!hi.isFinite() || !lo.isFinite()) return@Canvas
+        val pad = (hi - lo).coerceAtLeast(hi * 0.001) * 0.08
+        hi += pad
+        lo -= pad
+        val span = (hi - lo).coerceAtLeast(1e-9)
+        val xOf: (Int) -> Float = { i -> ((i - window.start) + 0.5f) * barW }
+        val yOf: (Double) -> Float = { p -> ((hi - p) / span * size.height).toFloat() }
+
+        // Grid + price axis
+        for (k in 0..4) {
+            val p = lo + span * k / 4.0
+            val yy = yOf(p)
+            hLine(yy, 0f, chartW, palette.grid, 0.8f)
+            safeText(tm, fmtPrice(p), chartW + 4f, yy - 7f, palette.muted)
+        }
+
+        // Premium / discount shading of the dealing range
+        val range = analysis.smc.dealingRange
+        if (overlays.premiumDiscount && range != null) {
+            val eqY = yOf(range.equilibrium)
+            val topY = yOf(range.high).coerceAtLeast(0f)
+            val botY = yOf(range.low).coerceAtMost(size.height)
+            drawRect(palette.bear.copy(alpha = 0.06f), Offset(0f, topY), Size(chartW, (eqY - topY).coerceAtLeast(0f)))
+            drawRect(palette.bull.copy(alpha = 0.06f), Offset(0f, eqY), Size(chartW, (botY - eqY).coerceAtLeast(0f)))
+            hLine(eqY, 0f, chartW, palette.muted, 1f, dashed = true)
+            safeText(tm, "EQ", 4f, eqY - 12f, palette.muted)
+            safeText(tm, "Premium", 4f, topY + 2f, palette.bear)
+            safeText(tm, "Discount", 4f, botY - 14f, palette.bull)
+        }
+
+        // Pivots + CPR
+        val pv = analysis.pivots
+        if (overlays.pivots && pv != null) {
+            val tcY = yOf(pv.cprTop)
+            val bcY = yOf(pv.cprBottom)
+            drawRect(palette.primary.copy(alpha = 0.08f), Offset(0f, min(tcY, bcY)), Size(chartW, abs(bcY - tcY)))
+            pv.namedLevels().forEach { (name, level) ->
+                val c = when {
+                    name.startsWith("R") -> palette.bear
+                    name.startsWith("S") -> palette.bull
+                    else -> palette.primary
+                }
+                val yy = yOf(level)
+                hLine(yy, 0f, chartW, c.copy(alpha = 0.7f), if (name == "P") 1.6f else 1f, dashed = name != "P")
+                safeText(tm, name, chartW - 22f, yy - 12f, c)
+            }
+        }
+
+        // Volume profile (right-anchored histogram)
+        val vp = analysis.volumeProfile
+        if (overlays.volumeProfile && vp != null && vp.maxBinVolume > 0) {
+            val maxLen = chartW * 0.22f
+            vp.bins.forEach { bin ->
+                val top = yOf(bin.priceHigh)
+                val bottom = yOf(bin.priceLow)
+                val len = (bin.volume / vp.maxBinVolume * maxLen).toFloat()
+                val buyLen = if (bin.volume > 0) (bin.buyVolume / bin.volume).toFloat() * len else 0f
+                val isPoc = vp.poc in bin.priceLow..bin.priceHigh
+                val h = (bottom - top - 1f).coerceAtLeast(1f)
+                drawRect(palette.bull.copy(alpha = if (isPoc) 0.45f else 0.22f), Offset(chartW - len, top), Size(buyLen, h))
+                drawRect(palette.bear.copy(alpha = if (isPoc) 0.45f else 0.22f), Offset(chartW - len + buyLen, top), Size(len - buyLen, h))
+            }
+            hLine(yOf(vp.poc), 0f, chartW, palette.amber, 1.4f)
+            safeText(tm, "POC", 4f, yOf(vp.poc) - 12f, palette.amber)
+            hLine(yOf(vp.valueAreaHigh), 0f, chartW, palette.amber.copy(alpha = 0.5f), 1f, dashed = true)
+            hLine(yOf(vp.valueAreaLow), 0f, chartW, palette.amber.copy(alpha = 0.5f), 1f, dashed = true)
+        }
+
+        // SMC zones: order blocks, supply/demand bases, FVGs
+        if (overlays.smcZones) {
+            analysis.smc.zones
+                .filter { it.isActive && it.originIndex < window.end }
+                .takeLast(16)
+                .forEach { z ->
+                    val left = xOf(max(z.originIndex, window.start)) - barW / 2f
+                    val top = yOf(z.top)
+                    val bottom = yOf(z.bottom)
+                    val base = when (z.kind) {
+                        ZoneKind.BULLISH_FVG, ZoneKind.BEARISH_FVG -> palette.violet
+                        else -> if (z.isBullish) palette.bull else palette.bear
+                    }
+                    val alpha = if (z.mitigated) 0.07f else 0.15f
+                    drawRect(base.copy(alpha = alpha), Offset(left, top), Size((chartW - left).coerceAtLeast(0f), (bottom - top).coerceAtLeast(1f)))
+                    if (z.institutional) {
+                        drawRect(palette.amber.copy(alpha = 0.8f), Offset(left, top), Size((chartW - left).coerceAtLeast(0f), (bottom - top).coerceAtLeast(1f)), style = Stroke(1.2f))
+                    }
+                    val kindTag = when (z.kind) {
+                        ZoneKind.DEMAND_OB -> "Demand OB"
+                        ZoneKind.SUPPLY_OB -> "Supply OB"
+                        ZoneKind.DEMAND_BASE -> "Demand"
+                        ZoneKind.SUPPLY_BASE -> "Supply"
+                        ZoneKind.BULLISH_FVG -> "FVG+"
+                        ZoneKind.BEARISH_FVG -> "FVG-"
+                    }
+                    val tag = if (z.institutional) "$kindTag ★" else kindTag
+                    safeText(tm, tag, left + 2f, top, base, 8)
+                }
+        }
+
+        // Higher-timeframe shadow candles behind the chart candles
+        if (overlays.htfShadow && analysis.htfCandles.isNotEmpty()) {
+            analysis.htfCandles
+                .filter { it.lastBaseIndex >= window.start && it.firstBaseIndex < window.end }
+                .forEach { h ->
+                    val c = h.candle
+                    val left = xOf(max(h.firstBaseIndex, window.start)) - barW / 2f
+                    val right = xOf(min(h.lastBaseIndex, window.end - 1)) + barW / 2f
+                    val bull = c.close >= c.open
+                    val col = if (bull) palette.bull else palette.bear
+                    val bodyTop = yOf(max(c.open, c.close))
+                    val bodyBottom = yOf(min(c.open, c.close))
+                    val mid = (left + right) / 2f
+                    drawLine(col.copy(alpha = 0.35f), Offset(mid, yOf(c.high)), Offset(mid, yOf(c.low)), strokeWidth = 2f)
+                    drawRect(col.copy(alpha = 0.10f), Offset(left, bodyTop), Size(right - left, (bodyBottom - bodyTop).coerceAtLeast(1f)))
+                    drawRect(
+                        col.copy(alpha = if (h.isComplete) 0.45f else 0.25f),
+                        Offset(left, bodyTop),
+                        Size(right - left, (bodyBottom - bodyTop).coerceAtLeast(1f)),
+                        style = Stroke(1f, pathEffect = if (h.isComplete) null else PathEffect.dashPathEffect(floatArrayOf(6f, 5f)))
+                    )
+                }
+        }
+
+        // Candles
+        val bodyW = (barW * 0.7f).coerceAtLeast(1f)
+        for (i in window.start until window.end) {
+            val c = candles[i]
+            val bull = c.close >= c.open
+            val col = if (bull) palette.bull else palette.bear
+            val cx = xOf(i)
+            drawLine(col, Offset(cx, yOf(c.high)), Offset(cx, yOf(c.low)), strokeWidth = 1f)
+            val top = yOf(max(c.open, c.close))
+            val bottom = yOf(min(c.open, c.close))
+            drawRect(col, Offset(cx - bodyW / 2f, top), Size(bodyW, (bottom - top).coerceAtLeast(1f)))
+        }
+
+        // EMAs
+        if (overlays.ema921) {
+            drawPath(seriesPath(analysis.ema9, window, xOf, yOf), palette.cyan, style = Stroke(1.6f))
+            drawPath(seriesPath(analysis.ema21, window, xOf, yOf), palette.amber, style = Stroke(1.6f))
+        }
+        if (overlays.ema50200) {
+            drawPath(seriesPath(analysis.ema50, window, xOf, yOf), palette.violet, style = Stroke(1.8f))
+            drawPath(seriesPath(analysis.ema200, window, xOf, yOf), palette.text.copy(alpha = 0.8f), style = Stroke(2f))
+        }
+
+        // VWAP + σ bands
+        if (overlays.vwap) {
+            drawPath(seriesPath(analysis.vwap.map { it?.vwap }, window, xOf, yOf), palette.primary, style = Stroke(1.8f))
+        }
+        if (overlays.vwapBands) {
+            listOf(1.0 to 0.55f, 2.0 to 0.4f, 3.0 to 0.25f).forEach { (m, a) ->
+                val dash = Stroke(1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f)))
+                drawPath(seriesPath(analysis.vwap.map { it?.upper(m) }, window, xOf, yOf), palette.primary.copy(alpha = a), style = dash)
+                drawPath(seriesPath(analysis.vwap.map { it?.lower(m) }, window, xOf, yOf), palette.primary.copy(alpha = a), style = dash)
+            }
+        }
+
+        // Liquidity pools
+        if (overlays.liquidity) {
+            analysis.smc.liquidity.forEach { lv ->
+                val from = lv.sourceIndices.maxOrNull() ?: return@forEach
+                if (from >= window.end) return@forEach
+                val swept = lv.status != LiquidityStatus.PENDING
+                val col = (if (lv.side == LiquiditySide.BUY_SIDE) palette.bear else palette.bull)
+                    .copy(alpha = if (swept) 0.35f else 0.85f)
+                val yy = yOf(lv.price)
+                hLine(yy, xOf(max(from, window.start)), chartW, col, 1.1f, dashed = true)
+                val statusTag = when (lv.status) {
+                    LiquidityStatus.PENDING -> "pending"
+                    LiquidityStatus.SWEPT -> "swept"
+                    LiquidityStatus.BROKEN -> "broken"
+                }
+                val sideTag = if (lv.side == LiquiditySide.BUY_SIDE) "BSL" else "SSL"
+                val tag = "$sideTag ${lv.name} • $statusTag"
+                safeText(tm, tag, xOf(max(from, window.start)) + 2f, yy - 12f, col, 8)
+            }
+        }
+
+        // Market structure: BOS / CHoCH
+        if (overlays.structure) {
+            analysis.smc.structureBreaks
+                .filter { it.index in window.start until window.end }
+                .takeLast(8)
+                .forEach { br ->
+                    val col = if (br.bullish) palette.bull else palette.bear
+                    val yy = yOf(br.level)
+                    hLine(yy, xOf(max(br.swingIndex, window.start)), xOf(br.index), col, 1.2f, dashed = !br.isChoch)
+                    safeText(tm, if (br.isChoch) "CHoCH" else "BOS", xOf(br.index) - 30f, if (br.bullish) yy - 13f else yy + 1f, col, 8)
+                }
+        }
+
+        // Divergence lines (price pane)
+        if (overlays.divergences) {
+            analysis.divergences
+                .filter { it.fromIndex >= window.start && it.toIndex < window.end }
+                .forEach { d ->
+                    val col = if (d.kind.bullish) palette.bull else palette.bear
+                    val effect = when (d.kind) {
+                        DivergenceKind.VOLUME_BULLISH, DivergenceKind.VOLUME_BEARISH -> PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
+                        DivergenceKind.DELTA_BULLISH, DivergenceKind.DELTA_BEARISH -> PathEffect.dashPathEffect(floatArrayOf(2f, 5f))
+                        else -> null
+                    }
+                    drawLine(col, Offset(xOf(d.fromIndex), yOf(d.fromPrice)), Offset(xOf(d.toIndex), yOf(d.toPrice)), strokeWidth = 2f, pathEffect = effect)
+                    val tag = when (d.kind) {
+                        DivergenceKind.RSI_REGULAR_BULLISH, DivergenceKind.RSI_REGULAR_BEARISH -> "RSI div"
+                        DivergenceKind.RSI_HIDDEN_BULLISH, DivergenceKind.RSI_HIDDEN_BEARISH -> "RSI hid"
+                        DivergenceKind.VOLUME_BULLISH, DivergenceKind.VOLUME_BEARISH -> "Vol div"
+                        DivergenceKind.DELTA_BULLISH, DivergenceKind.DELTA_BEARISH -> "Δ div"
+                    }
+                    safeText(tm, tag, xOf(d.toIndex) + 2f, yOf(d.toPrice) + (if (d.kind.bullish) 2f else -13f), col, 8)
+                }
+        }
+
+        // Focused EMA crossover-retest setup levels
+        val s = focusSetup
+        if (overlays.setupLevels && s != null && s.state != SetupState.INVALIDATED && s.state != SetupState.EXPIRED) {
+            val isLong = s.direction == SignalDirection.LONG
+            if (s.crossIndex in window.start until window.end) {
+                val markY = yOf(if (isLong) s.crossHigh else s.crossLow)
+                drawCircle(palette.amber, radius = 4f, center = Offset(xOf(s.crossIndex), markY))
+                safeText(tm, "X", xOf(s.crossIndex) - 3f, markY + (if (isLong) -14f else 3f), palette.amber, 8)
+            }
+            val fromX = xOf(max(s.crossIndex, window.start))
+            hLine(yOf(s.triggerLevel), fromX, chartW, palette.amber, 1.4f, dashed = true)
+            safeText(tm, "Trigger ${fmtPrice(s.triggerLevel)}", fromX + 2f, yOf(s.triggerLevel) - 12f, palette.amber, 8)
+            s.entry?.let { e ->
+                hLine(yOf(e), fromX, chartW, palette.text, 1.4f)
+                safeText(tm, "Entry", chartW - 34f, yOf(e) - 12f, palette.text, 8)
+            }
+            s.stopLoss?.let { sl ->
+                hLine(yOf(sl), fromX, chartW, palette.bear, 1.4f)
+                safeText(tm, "SL", chartW - 20f, yOf(sl) + 1f, palette.bear, 8)
+            }
+            s.targets.forEach { t ->
+                val yy = yOf(t.price)
+                if (yy in 0f..size.height) {
+                    hLine(yy, fromX, chartW, palette.bull.copy(alpha = 0.55f), 0.9f, dashed = true)
+                    safeText(tm, t.label, chartW - 34f, yy - 11f, palette.bull, 8)
+                }
+            }
+        }
+
+        // Last price marker
+        val last = candles[window.end - 1].close
+        val lastY = yOf(last)
+        hLine(lastY, 0f, chartW, palette.primary.copy(alpha = 0.6f), 1f, dashed = true)
+        drawRect(palette.primary, Offset(chartW, lastY - 8f), Size(axisW, 16f))
+        safeText(tm, fmtPrice(last), chartW + 3f, lastY - 7f, Color.White)
+    }
+}
+
+@Composable
+fun LowerPaneCanvas(
+    analysis: ChartAnalysis,
+    pane: LowerPane,
+    window: ChartWindow,
+    showDivergences: Boolean,
+    palette: ChartPalette,
+    modifier: Modifier = Modifier
+) {
+    val tm = rememberTextMeasurer()
+    Canvas(modifier = modifier) {
+        val candles = analysis.candles
+        if (candles.isEmpty() || window.end <= window.start) return@Canvas
+        val axisW = AXIS_DP.dp.toPx()
+        val chartW = size.width - axisW
+        val barW = chartW / window.count
+        val xOf: (Int) -> Float = { i -> ((i - window.start) + 0.5f) * barW }
+        hLine(0.5f, 0f, size.width, palette.grid, 1f)
+
+        fun scaleOf(values: List<Double?>, symmetric: Boolean = false): Pair<Double, Double>? {
+            var mx = Double.NEGATIVE_INFINITY
+            var mn = Double.POSITIVE_INFINITY
+            for (i in window.start until window.end) {
+                val v = values.getOrNull(i) ?: continue
+                mx = max(mx, v)
+                mn = min(mn, v)
+            }
+            if (!mx.isFinite() || !mn.isFinite()) return null
+            if (symmetric) {
+                val m = max(abs(mx), abs(mn)).coerceAtLeast(1e-9)
+                return -m to m
+            }
+            if (mx <= mn) return (mn - 1.0) to (mx + 1.0)
+            return mn to mx
+        }
+
+        fun yFor(range: Pair<Double, Double>): (Double) -> Float = { v ->
+            val (mn, mx) = range
+            (size.height - ((v - mn) / (mx - mn)) * (size.height - 6f) - 3f).toFloat()
+        }
+
+        when (pane) {
+            LowerPane.VOLUME -> {
+                val vols = candles.map<com.example.domain.signal.Candle, Double?> { it.volume }
+                val range = scaleOf(vols)?.let { 0.0 to it.second } ?: return@Canvas
+                val y = yFor(range)
+                val bodyW = (barW * 0.7f).coerceAtLeast(1f)
+                for (i in window.start until window.end) {
+                    val c = candles[i]
+                    val ma = analysis.volumeMa20.getOrNull(i)
+                    val above = ma != null && c.volume > ma
+                    val col = (if (c.close >= c.open) palette.bull else palette.bear).copy(alpha = if (above) 0.95f else 0.4f)
+                    val top = y(c.volume)
+                    drawRect(col, Offset(xOf(i) - bodyW / 2f, top), Size(bodyW, (size.height - top).coerceAtLeast(1f)))
+                }
+                drawPath(seriesPath(analysis.volumeMa20, window, xOf, y), palette.amber, style = Stroke(1.5f))
+                safeText(tm, "Vol • MA20 (bright = above MA)", 4f, 2f, palette.muted)
+            }
+            LowerPane.RSI -> {
+                val range = 0.0 to 100.0
+                val y = yFor(range)
+                hLine(y(70.0), 0f, chartW, palette.bear.copy(alpha = 0.6f), 1f, dashed = true)
+                hLine(y(30.0), 0f, chartW, palette.bull.copy(alpha = 0.6f), 1f, dashed = true)
+                hLine(y(50.0), 0f, chartW, palette.grid, 0.8f)
+                drawPath(seriesPath(analysis.rsi14, window, xOf, y), palette.violet, style = Stroke(1.6f))
+                if (showDivergences) {
+                    analysis.divergences
+                        .filter { it.kind.name.startsWith("RSI") && it.fromIndex >= window.start && it.toIndex < window.end }
+                        .forEach { d ->
+                            val col = if (d.kind.bullish) palette.bull else palette.bear
+                            drawLine(col, Offset(xOf(d.fromIndex), y(d.fromOsc)), Offset(xOf(d.toIndex), y(d.toOsc)), strokeWidth = 2f)
+                        }
+                }
+                val last = analysis.rsi14.getOrNull(window.end - 1)
+                safeText(tm, "RSI 14 ${last?.let { String.format(Locale.US, "%.1f", it) } ?: "--"}", 4f, 2f, palette.muted)
+            }
+            LowerPane.OBV -> {
+                val obv = analysis.obv.map<Double, Double?> { it }
+                val range = scaleOf(obv) ?: return@Canvas
+                drawPath(seriesPath(obv, window, xOf, yFor(range)), palette.cyan, style = Stroke(1.6f))
+                safeText(tm, "On-Balance Volume", 4f, 2f, palette.muted)
+            }
+            LowerPane.ELDER -> {
+                val range = scaleOf(analysis.elderForce13, symmetric = true) ?: return@Canvas
+                val y = yFor(range)
+                val zero = y(0.0)
+                hLine(zero, 0f, chartW, palette.grid, 1f)
+                val bodyW = (barW * 0.7f).coerceAtLeast(1f)
+                for (i in window.start until window.end) {
+                    val v = analysis.elderForce13.getOrNull(i) ?: continue
+                    val yy = y(v)
+                    val col = if (v >= 0) palette.bull else palette.bear
+                    drawRect(col.copy(alpha = 0.75f), Offset(xOf(i) - bodyW / 2f, min(yy, zero)), Size(bodyW, abs(zero - yy).coerceAtLeast(1f)))
+                }
+                safeText(tm, "Elder Force Index (13)", 4f, 2f, palette.muted)
+            }
+            LowerPane.DELTA -> {
+                val deltas = analysis.deltas.map<Double, Double?> { it }
+                val range = scaleOf(deltas, symmetric = true) ?: return@Canvas
+                val y = yFor(range)
+                val zero = y(0.0)
+                hLine(zero, 0f, chartW, palette.grid, 1f)
+                val bodyW = (barW * 0.7f).coerceAtLeast(1f)
+                for (i in window.start until window.end) {
+                    val v = analysis.deltas.getOrNull(i) ?: continue
+                    val yy = y(v)
+                    val col = if (v >= 0) palette.bull else palette.bear
+                    drawRect(col.copy(alpha = 0.7f), Offset(xOf(i) - bodyW / 2f, min(yy, zero)), Size(bodyW, abs(zero - yy).coerceAtLeast(1f)))
+                }
+                val cvd = analysis.cumulativeDelta.map<Double, Double?> { it }
+                scaleOf(cvd)?.let { r -> drawPath(seriesPath(cvd, window, xOf, yFor(r)), palette.amber, style = Stroke(1.6f)) }
+                safeText(
+                    tm,
+                    if (analysis.orderFlow.usesTrueDelta) "Delta (aggressor) • CVD" else "Delta (estimated from bar) • CVD",
+                    4f, 2f, palette.muted
+                )
+            }
+            LowerPane.ATR -> {
+                val combined = analysis.atr7.zip(analysis.atr14) { a, b -> if (a == null) b else if (b == null) a else max(a, b) }
+                val range = scaleOf(combined)?.let { (it.first * 0.9) to (it.second * 1.05) } ?: return@Canvas
+                val y = yFor(range)
+                drawPath(seriesPath(analysis.atr7, window, xOf, y), palette.cyan, style = Stroke(1.5f))
+                drawPath(seriesPath(analysis.atr14, window, xOf, y), palette.amber, style = Stroke(1.5f))
+                val a7 = analysis.atr7.getOrNull(window.end - 1)
+                val a14 = analysis.atr14.getOrNull(window.end - 1)
+                safeText(tm, "ATR7 ${a7?.let { fmtPrice(it) } ?: "--"} • ATR14 ${a14?.let { fmtPrice(it) } ?: "--"}", 4f, 2f, palette.muted)
+            }
+        }
+    }
+}

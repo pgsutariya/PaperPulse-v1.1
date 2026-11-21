@@ -1,0 +1,6 @@
+{
+  "name": "PaperPulse",
+  "description": "Paper-trading terminal for Indian (NSE, BSE, MCX) and Crypto markets with advanced risk controls, trailing SL/target, OCO, GTT/GTD validity, and trade journal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

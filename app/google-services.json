@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "480279571678",
+    "project_id": "gen-lang-client-0838830368",
+    "storage_bucket": "gen-lang-client-0838830368.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:480279571678:android:0c0a6a14af2f3138ce664f",
+        "android_client_info": {
+          "package_name": "com.aistudio.paperpulse.trdkpx"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCDwBnWEDpWGi5QxAU75rVM2FiDROTN42M"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

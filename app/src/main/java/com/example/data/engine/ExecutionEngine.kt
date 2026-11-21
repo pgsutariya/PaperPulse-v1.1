@@ -1,0 +1,400 @@
+package com.example.data.engine
+
+import androidx.room.withTransaction
+import com.example.data.local.InstrumentDao
+import com.example.data.local.InstrumentEntity
+import com.example.data.local.OrderDao
+import com.example.data.local.OrderEntity
+import com.example.data.local.PaperPulseDatabase
+import com.example.data.local.PositionDao
+import com.example.data.local.PositionEntity
+import com.example.data.repository.MarketDataRepository
+import com.example.data.repository.TradingPreferencesRepository
+import com.example.domain.engine.MarketClock
+import com.example.domain.engine.RiskMath
+import com.example.domain.model.ExitReason
+import com.example.domain.model.OrderSide
+import com.example.domain.model.OrderStatus
+import com.example.domain.model.OrderType
+import com.example.domain.model.ProductType
+import com.example.domain.model.TradingConfig
+import com.example.domain.model.ValidityState
+import com.example.domain.model.ValidityType
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.math.BigDecimal
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * Persistent paper-trading execution engine.
+ * Evaluates on every LTP tick and 1s clock heartbeat:
+ * 1. Pending entry orders (LIMIT / SL-M / SL-L / TGT-M / TGT-L / BRACKET)
+ * 2. SL triggers
+ * 3. Target triggers
+ * 4. Trailing Stop Loss ratcheting (never retraces)
+ * 5. Trailing Target arming, ratcheting, and pullback exit
+ * 6. DAY / GTT / GTD validity expiry
+ * 7. Intraday 15:15 IST auto square-off
+ */
+@Singleton
+class ExecutionEngine @Inject constructor(
+    private val database: PaperPulseDatabase,
+    private val instrumentDao: InstrumentDao,
+    private val orderDao: OrderDao,
+    private val positionDao: PositionDao,
+    private val ledgerService: TradingLedgerService,
+    private val marketDataRepository: MarketDataRepository,
+    private val prefsRepository: TradingPreferencesRepository,
+    private val appScope: CoroutineScope
+) {
+    private val evaluationMutex = Mutex()
+
+    private val _engineEvents = MutableSharedFlow<String>(extraBufferCapacity = 32)
+    val engineEvents: SharedFlow<String> = _engineEvents.asSharedFlow()
+
+    @Volatile
+    private var started = false
+
+    fun start() {
+        if (started) return
+        started = true
+
+        // Tick-driven evaluation
+        appScope.launch(Dispatchers.IO) {
+            marketDataRepository.ticks.collect { tick ->
+                evaluateTick(tick.symbol, tick.ltp, tick.timestampMillis)
+            }
+        }
+
+        // 1-second heartbeat for validity expiry & 15:15 IST intraday square-off
+        appScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(1000L)
+                evaluateTimeEvents(System.currentTimeMillis())
+            }
+        }
+    }
+
+    suspend fun evaluateTick(symbol: String, ltp: BigDecimal, nowMillis: Long) {
+        evaluationMutex.withLock {
+            val config = prefsRepository.getConfig()
+            val instrument = instrumentDao.getBySymbol(symbol) ?: return
+
+            // 1. Check validity expiry first so expired orders do not fill
+            expireOrdersForTime(nowMillis)
+
+            // 2. Evaluate pending entry orders for this symbol
+            val pendingEntries = orderDao.getPendingForSymbol(symbol)
+                .filter { it.legRole == null || it.legRole == "ENTRY" }
+            for (order in pendingEntries) {
+                if (shouldFillPendingEntry(order, ltp)) {
+                    val execPrice = ltp
+                    val filled = ledgerService.fillEntryOrder(order, execPrice, instrument, config, nowMillis)
+                    _engineEvents.tryEmit(
+                        if (filled) {
+                            "${order.side.name} ${order.symbol} filled @ ${RiskMath.formatPrice(execPrice, instrument.segment)}"
+                        } else {
+                            "${order.side.name} ${order.symbol} rejected: insufficient margin"
+                        }
+                    )
+                }
+            }
+
+            // 3. Evaluate open positions for this symbol (TSL, SL, Target, Trailing Target)
+            val positions = positionDao.getBySymbol(symbol)
+            for (pos in positions) {
+                evaluatePositionRisk(pos, instrument, ltp, config, nowMillis)
+            }
+        }
+    }
+
+    suspend fun evaluateTimeEvents(nowMillis: Long) {
+        evaluationMutex.withLock {
+            val config = prefsRepository.getConfig()
+            expireOrdersForTime(nowMillis)
+
+            val openPositions = positionDao.getAllOnce()
+            for (pos in openPositions) {
+                if (pos.productType == ProductType.INTRADAY &&
+                    MarketClock.isIntradaySquareOffTime(pos.segment, nowMillis)
+                ) {
+                    val ltp = instrumentDao.getBySymbol(pos.symbol)?.ltp ?: pos.averageEntryPrice
+                    ledgerService.closePosition(
+                        position = pos,
+                        rawExitPrice = ltp,
+                        exitReason = ExitReason.INTRADAY_SQUARE_OFF,
+                        triggeredLegRole = null,
+                        config = config,
+                        nowMillis = nowMillis
+                    )
+                    _engineEvents.tryEmit("15:15 IST auto square-off: ${pos.symbol}")
+                }
+            }
+
+            // Cancel untriggered DAY orders when session square-off is active
+            val pendingOrders = orderDao.getByStatus(OrderStatus.PENDING)
+            for (order in pendingOrders) {
+                if (order.validityType == ValidityType.DAY &&
+                    MarketClock.isIntradaySquareOffTime(order.segment, nowMillis)
+                ) {
+                    orderDao.upsert(
+                        order.copy(
+                            status = OrderStatus.CANCELLED,
+                            validityState = ValidityState.EXPIRED,
+                            statusReason = "Session close auto-cancel (DAY)",
+                            updatedAtMillis = nowMillis
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Allows user/QA to immediately simulate the 15:15 IST Intraday Square-Off event
+     * regardless of wall-clock time, while preserving Carry Forward positions & GTT/GTD legs.
+     */
+    suspend fun triggerSimulatedSquareOff(): Int {
+        return evaluationMutex.withLock {
+            val nowMillis = System.currentTimeMillis()
+            val config = prefsRepository.getConfig()
+            var squaredOffCount = 0
+
+            val openPositions = positionDao.getAllOnce()
+            for (pos in openPositions) {
+                if (pos.productType == ProductType.INTRADAY) {
+                    val ltp = instrumentDao.getBySymbol(pos.symbol)?.ltp ?: pos.averageEntryPrice
+                    ledgerService.closePosition(
+                        position = pos,
+                        rawExitPrice = ltp,
+                        exitReason = ExitReason.INTRADAY_SQUARE_OFF,
+                        triggeredLegRole = null,
+                        config = config,
+                        nowMillis = nowMillis
+                    )
+                    squaredOffCount++
+                }
+            }
+
+            // Auto-cancel all untriggered DAY orders (preserving GTT/GTD for Carry Forward)
+            val pendingOrders = orderDao.getByStatus(OrderStatus.PENDING)
+            for (order in pendingOrders) {
+                if (order.validityType == ValidityType.DAY || order.productType == ProductType.INTRADAY) {
+                    orderDao.upsert(
+                        order.copy(
+                            status = OrderStatus.CANCELLED,
+                            validityState = ValidityState.EXPIRED,
+                            statusReason = "Intraday 15:15 IST square-off",
+                            updatedAtMillis = nowMillis
+                        )
+                    )
+                }
+            }
+            if (squaredOffCount > 0) {
+                _engineEvents.tryEmit("Squared off $squaredOffCount Intraday position(s) at 15:15 IST")
+            }
+            squaredOffCount
+        }
+    }
+
+    private suspend fun expireOrdersForTime(nowMillis: Long) {
+        val activePending = orderDao.getByStatus(OrderStatus.PENDING)
+        for (order in activePending) {
+            if (nowMillis >= order.expiresAtMillis) {
+                database.withTransaction {
+                    orderDao.upsert(
+                        order.copy(
+                            status = OrderStatus.CANCELLED,
+                            validityState = ValidityState.EXPIRED,
+                            statusReason = "Expired (${order.validityType.label})",
+                            updatedAtMillis = nowMillis
+                        )
+                    )
+                    // Detach from open Carry Forward position if this was an SL or Target leg
+                    if (order.legRole == "SL" || order.legRole == "TARGET") {
+                        val positions = positionDao.getBySymbol(order.symbol)
+                        for (pos in positions) {
+                            if (pos.slOrderId == order.id) {
+                                positionDao.upsert(pos.copy(slOrderId = null, activeSlPrice = null, isTslEnabled = false))
+                            } else if (pos.targetOrderId == order.id) {
+                                positionDao.upsert(pos.copy(targetOrderId = null, activeTargetPrice = null, isTrailingTargetEnabled = false))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun shouldFillPendingEntry(order: OrderEntity, ltp: BigDecimal): Boolean {
+        val isBuy = order.side == OrderSide.BUY
+        return when (order.orderType) {
+            OrderType.MARKET -> true
+            OrderType.LIMIT, OrderType.BRACKET -> {
+                val limit = order.limitPrice ?: return false
+                if (isBuy) ltp <= limit else ltp >= limit
+            }
+            OrderType.SL_M -> {
+                val trigger = order.triggerPrice ?: return false
+                if (isBuy) ltp >= trigger else ltp <= trigger
+            }
+            OrderType.SL_L -> {
+                val trigger = order.triggerPrice ?: return false
+                val limit = order.limitPrice ?: trigger
+                if (isBuy) ltp >= trigger && ltp <= limit else ltp <= trigger && ltp >= limit
+            }
+            OrderType.TGT_M -> {
+                val trigger = order.triggerPrice ?: return false
+                if (isBuy) ltp <= trigger else ltp >= trigger
+            }
+            OrderType.TGT_L -> {
+                val trigger = order.triggerPrice ?: return false
+                val limit = order.limitPrice ?: trigger
+                if (isBuy) ltp <= trigger && ltp <= limit else ltp >= trigger && ltp >= limit
+            }
+        }
+    }
+
+    private suspend fun evaluatePositionRisk(
+        pos: PositionEntity,
+        instrument: InstrumentEntity,
+        ltp: BigDecimal,
+        config: TradingConfig,
+        nowMillis: Long
+    ) {
+        val isLong = pos.side == OrderSide.BUY
+        var workingPos = pos
+
+        // 1. Trailing Stop Loss ratcheting (strictly favourable, never retraces)
+        if (workingPos.isTslEnabled && workingPos.activeSlPrice != null) {
+            val ratchetedSl = RiskMath.calculateTrailingSl(
+                currentSl = workingPos.activeSlPrice,
+                ltp = ltp,
+                isLong = isLong,
+                trailMode = workingPos.tslTrailMode,
+                trailValue = workingPos.tslTrailValue,
+                tickSize = instrument.tickSize
+            )
+            val newBest = if (isLong) {
+                if (ltp > workingPos.tslBestPrice) ltp else workingPos.tslBestPrice
+            } else {
+                if (ltp < workingPos.tslBestPrice) ltp else workingPos.tslBestPrice
+            }
+            if (ratchetedSl != workingPos.activeSlPrice || newBest != workingPos.tslBestPrice) {
+                workingPos = workingPos.copy(
+                    activeSlPrice = ratchetedSl,
+                    tslBestPrice = newBest,
+                    updatedAtMillis = nowMillis
+                )
+                database.withTransaction {
+                    positionDao.upsert(workingPos)
+                    workingPos.slOrderId?.let { slId ->
+                        orderDao.getById(slId)?.let { slOrder ->
+                            orderDao.upsert(
+                                slOrder.copy(
+                                    triggerPrice = ratchetedSl,
+                                    statusReason = "TSL ratcheted @ ${RiskMath.formatPrice(ratchetedSl, instrument.segment)}",
+                                    updatedAtMillis = nowMillis
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Stop Loss trigger check
+        val slPrice = workingPos.activeSlPrice
+        if (slPrice != null) {
+            val slTriggered = if (isLong) ltp <= slPrice else ltp >= slPrice
+            if (slTriggered) {
+                val reason = if (workingPos.isTslEnabled) ExitReason.TSL_HIT else ExitReason.SL_HIT
+                ledgerService.closePosition(
+                    position = workingPos,
+                    rawExitPrice = ltp,
+                    exitReason = reason,
+                    triggeredLegRole = "SL",
+                    config = config,
+                    nowMillis = nowMillis
+                )
+                _engineEvents.tryEmit("${reason.label}: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}")
+                return
+            }
+        }
+
+        // 3. Target & Trailing Target check
+        val targetPrice = workingPos.activeTargetPrice ?: return
+        if (workingPos.isTrailingTargetEnabled) {
+            val update = RiskMath.evaluateTrailingTarget(
+                ltp = ltp,
+                initialTarget = targetPrice,
+                isLong = isLong,
+                alreadyActivated = workingPos.trailingTargetActivated,
+                currentPeak = workingPos.trailingTargetPeakPrice,
+                currentExitTrigger = workingPos.trailingTargetExitTrigger,
+                trailMode = workingPos.trailingTargetTrailMode,
+                trailValue = workingPos.trailingTargetTrailValue,
+                tickSize = instrument.tickSize
+            )
+            if (update.shouldExitNow) {
+                ledgerService.closePosition(
+                    position = workingPos,
+                    rawExitPrice = ltp,
+                    exitReason = ExitReason.TRAILING_TARGET_HIT,
+                    triggeredLegRole = "TARGET",
+                    config = config,
+                    nowMillis = nowMillis
+                )
+                _engineEvents.tryEmit("Trailing Target Hit: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}")
+                return
+            }
+            if (update.activated != workingPos.trailingTargetActivated ||
+                update.peakPrice != workingPos.trailingTargetPeakPrice ||
+                update.exitTrigger != workingPos.trailingTargetExitTrigger
+            ) {
+                workingPos = workingPos.copy(
+                    trailingTargetActivated = update.activated,
+                    trailingTargetPeakPrice = update.peakPrice,
+                    trailingTargetExitTrigger = update.exitTrigger,
+                    updatedAtMillis = nowMillis
+                )
+                database.withTransaction {
+                    positionDao.upsert(workingPos)
+                    val triggerStr = update.exitTrigger?.let { RiskMath.formatPrice(it, instrument.segment) } ?: "--"
+                    workingPos.targetOrderId?.let { tgtId ->
+                        orderDao.getById(tgtId)?.let { tgtOrder ->
+                            orderDao.upsert(
+                                tgtOrder.copy(
+                                    statusReason = if (update.activated) "Trailing Target exit @ $triggerStr" else tgtOrder.statusReason,
+                                    updatedAtMillis = nowMillis
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            val targetHit = if (isLong) ltp >= targetPrice else ltp <= targetPrice
+            if (targetHit) {
+                ledgerService.closePosition(
+                    position = workingPos,
+                    rawExitPrice = ltp,
+                    exitReason = ExitReason.TARGET_HIT,
+                    triggeredLegRole = "TARGET",
+                    config = config,
+                    nowMillis = nowMillis
+                )
+                _engineEvents.tryEmit("Target Hit: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}")
+            }
+        }
+    }
+}

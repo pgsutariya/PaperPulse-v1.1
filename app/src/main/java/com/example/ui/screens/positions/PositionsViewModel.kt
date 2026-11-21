@@ -1,0 +1,180 @@
+package com.example.ui.screens.positions
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.data.feed.live.FeedType
+import com.example.data.feed.live.SegmentBadgeMode
+import com.example.data.feed.live.SegmentFeedStatus
+import com.example.data.repository.MarketDataRepository
+import com.example.data.repository.TradingRepository
+import com.example.domain.engine.RiskMath
+import com.example.domain.model.AccountState
+import com.example.domain.model.Instrument
+import com.example.domain.model.MarketSegment
+import com.example.domain.model.OrderSide
+import com.example.domain.model.Position
+import com.example.domain.model.TrailMode
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import java.math.BigDecimal
+import javax.inject.Inject
+
+data class PositionWithLivePnl(
+    val position: Position,
+    val ltp: BigDecimal,
+    val unrealisedPnl: BigDecimal,
+    val supportsCarryForward: Boolean,
+    val feedBadge: SegmentBadgeMode = SegmentBadgeMode.SIMULATED
+)
+
+data class PositionsUiState(
+    val items: List<PositionWithLivePnl> = emptyList(),
+    val totalUnrealisedPnl: BigDecimal = BigDecimal.ZERO,
+    val realisedPnl: BigDecimal = BigDecimal.ZERO,
+    val riskControlsSuspended: Boolean = false,
+    val suspendedBannerMessage: String = "",
+    val liveStatusMessage: String = ""
+)
+
+@HiltViewModel
+class PositionsViewModel @Inject constructor(
+    private val tradingRepository: TradingRepository,
+    private val marketDataRepository: MarketDataRepository
+) : ViewModel() {
+
+    private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    val messages: SharedFlow<String> = _messages.asSharedFlow()
+
+    private val feedHealthFlow = combine(
+        marketDataRepository.segmentStatuses,
+        marketDataRepository.riskControlsSuspended,
+        marketDataRepository.suspendedBannerMessage,
+        marketDataRepository.liveStatusMessage
+    ) { statuses, suspended, bannerMsg, msg -> FeedHealthData(statuses, suspended, bannerMsg, msg) }
+
+    val uiState: StateFlow<PositionsUiState> = combine(
+        tradingRepository.positions,
+        marketDataRepository.instruments,
+        tradingRepository.accountState,
+        feedHealthFlow
+    ) { positions: List<Position>,
+        instruments: List<Instrument>,
+        account: AccountState,
+        health: FeedHealthData ->
+        val instMap: Map<String, Instrument> = instruments.associateBy { it.symbol }
+        val segStatuses = health.statuses
+        var totalUnrealised = BigDecimal.ZERO
+        val enriched = positions.map { pos ->
+            val inst = instMap[pos.symbol]
+            val ltp = inst?.ltp ?: pos.averageEntryPrice
+            val pnl = RiskMath.calculateUnrealisedPnl(
+                entryPrice = pos.averageEntryPrice,
+                ltp = ltp,
+                quantity = pos.quantity,
+                isLong = pos.side == OrderSide.BUY
+            )
+            totalUnrealised = totalUnrealised.add(pnl)
+            PositionWithLivePnl(
+                position = pos,
+                ltp = ltp,
+                unrealisedPnl = pnl,
+                supportsCarryForward = inst?.supportsCarryForward ?: true,
+                feedBadge = segStatuses[pos.segment]?.badge ?: SegmentBadgeMode.SIMULATED
+            )
+        }
+        PositionsUiState(
+            items = enriched,
+            totalUnrealisedPnl = totalUnrealised,
+            realisedPnl = account.realisedPnl,
+            riskControlsSuspended = health.suspended,
+            suspendedBannerMessage = health.bannerMsg,
+            liveStatusMessage = health.msg
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = PositionsUiState()
+    )
+
+    fun saveInlineRiskControls(
+        positionId: String,
+        slPrice: BigDecimal?,
+        targetPrice: BigDecimal?,
+        isTslEnabled: Boolean,
+        tslMode: TrailMode,
+        tslValue: BigDecimal,
+        isTrailingTargetEnabled: Boolean,
+        trailingTargetMode: TrailMode,
+        trailingTargetValue: BigDecimal
+    ) {
+        viewModelScope.launch {
+            val res = tradingRepository.updatePositionRiskControls(
+                positionId = positionId,
+                newSlPrice = slPrice,
+                newTargetPrice = targetPrice,
+                isTslEnabled = isTslEnabled,
+                tslMode = tslMode,
+                tslValue = tslValue,
+                isTrailingTargetEnabled = isTrailingTargetEnabled,
+                trailingTargetMode = trailingTargetMode,
+                trailingTargetValue = trailingTargetValue
+            )
+            res.onSuccess { _messages.emit("Updated OCO risk controls") }
+                .onFailure { _messages.emit(it.message ?: "Failed to update risk controls") }
+        }
+    }
+
+    fun convertToCarryForward(positionId: String) {
+        viewModelScope.launch {
+            tradingRepository.convertProductToCarryForward(positionId)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Conversion failed") }
+        }
+    }
+
+    fun exitPosition(positionId: String) {
+        viewModelScope.launch {
+            tradingRepository.exitPositionAtMarket(positionId)
+                .onSuccess { _messages.emit("Position squared off at market") }
+                .onFailure { _messages.emit(it.message ?: "Exit failed") }
+        }
+    }
+
+    fun simulateIntradaySquareOff() {
+        viewModelScope.launch {
+            val count = tradingRepository.triggerSimulatedSquareOff()
+            _messages.emit(
+                if (count > 0) "15:15 IST Square-Off executed for $count Intraday position(s)"
+                else "No open Intraday positions; DAY orders cancelled"
+            )
+        }
+    }
+
+    fun reconnectFeed() {
+        viewModelScope.launch {
+            marketDataRepository.reconnectActiveFeed()
+            _messages.emit("Reconnecting live price feed...")
+        }
+    }
+
+    fun switchToSimulatedFeed() {
+        viewModelScope.launch {
+            marketDataRepository.setActiveFeed(FeedType.SIMULATED)
+            _messages.emit("Switched suspended segments to Simulated Feed")
+        }
+    }
+
+    private data class FeedHealthData(
+        val statuses: Map<MarketSegment, SegmentFeedStatus>,
+        val suspended: Boolean,
+        val bannerMsg: String,
+        val msg: String
+    )
+}
