@@ -1,19 +1,26 @@
 package com.example.data.signal
 
+import com.example.data.history.HistoricalCandleRepository
 import com.example.data.local.InstrumentDao
 import com.example.data.local.SavedSignalDao
 import com.example.data.local.SignalDao
+import com.example.data.local.SignalEntity
+import com.example.data.local.SignalRecordDao
+import com.example.data.local.SignalRecordEntity
 import com.example.data.local.toDomain
 import com.example.data.local.toEntity
 import com.example.data.local.toSavedEntity
-import com.example.data.history.HistoricalCandleRepository
+import com.example.data.notifications.TradeNotificationManager
 import com.example.data.repository.MarketDataRepository
+import com.example.domain.engine.RiskMath
 import com.example.domain.model.Instrument
+import com.example.domain.signal.SignalAccuracyStats
 import com.example.domain.signal.SignalConfidence
 import com.example.domain.signal.SignalContext
 import com.example.domain.signal.SignalDirection
 import com.example.domain.signal.SignalEngine
-import com.example.domain.signal.SignalStrategy
+import com.example.domain.signal.SignalOutcome
+import com.example.domain.signal.SignalRecord
 import com.example.domain.signal.Timeframe
 import com.example.domain.signal.TradeSignal
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +33,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.math.BigDecimal
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -44,9 +52,11 @@ class SignalRepository @Inject constructor(
     private val candleAggregator: CandleAggregator,
     private val signalDao: SignalDao,
     private val savedSignalDao: SavedSignalDao,
+    private val signalRecordDao: SignalRecordDao,
     private val signalEngine: SignalEngine,
     private val appScope: CoroutineScope,
-    private val historicalCandles: HistoricalCandleRepository
+    private val historicalCandles: HistoricalCandleRepository,
+    private val notificationManager: TradeNotificationManager
 ) {
     private val instrumentCache = ConcurrentHashMap<String, Instrument>()
     private val lastEvalMillis = ConcurrentHashMap<String, Long>()
@@ -97,6 +107,20 @@ class SignalRepository @Inject constructor(
         }
     }
 
+    val signalRecords: Flow<List<SignalRecord>> = signalRecordDao.observeAll().map { entities ->
+        entities.map { it.toDomain() }
+    }
+
+    val signalAccuracy: Flow<SignalAccuracyStats> = signalRecords.map { records ->
+        SignalAccuracyStats(
+            totalResolved = records.size,
+            t1Hits = records.count { it.outcome == SignalOutcome.HIT_T1 },
+            t2Hits = records.count { it.outcome == SignalOutcome.HIT_T2 },
+            slHits = records.count { it.outcome == SignalOutcome.HIT_SL },
+            expiredCount = records.count { it.outcome == SignalOutcome.EXPIRED }
+        )
+    }
+
     fun observeSignalsForSymbol(symbol: String): Flow<List<SignalUiItem>> = combine(
         signalDao.observeForSymbol(symbol),
         savedSignalDao.observeSavedIds(),
@@ -121,9 +145,8 @@ class SignalRepository @Inject constructor(
                 candleAggregator.registerSegment(it.symbol, it.segment)
             }
             candleAggregator.warmUpFromDatabaseOrSeed(universe)
-            // Initial scan once on warmed-up candles
+            archiveAndPruneExpired(System.currentTimeMillis())
             universe.forEach { evaluateSymbol(it, Instant.now()) }
-            // Replace synthetic warm-up bars with real exchange history where available, then rescan.
             backfillHistory(universe)
         }
 
@@ -138,14 +161,16 @@ class SignalRepository @Inject constructor(
                         candleAggregator.registerSegment(tick.symbol, inst.segment)
                     }
                 }
+                val tickNowMillis = tick.timestampMillis.takeIf { it > 0L } ?: System.currentTimeMillis()
+                // Track active signal performance (T1 / T2 / SL) and remove resolved signals from active noise
+                evaluateActiveSignalOutcomes(tick.symbol, tick.ltp, tickNowMillis)
+
                 val completed = candleAggregator.onTick(tick)
                 if (completed.isNotEmpty() && inst != null) {
-                    val now = Instant.ofEpochMilli(
-                        tick.timestampMillis.takeIf { it > 0L } ?: System.currentTimeMillis()
-                    )
+                    val now = Instant.ofEpochMilli(tickNowMillis)
                     val prevEval = lastEvalMillis[tick.symbol] ?: 0L
-                    if (now.toEpochMilli() - prevEval >= MIN_EVAL_INTERVAL_MS) {
-                        lastEvalMillis[tick.symbol] = now.toEpochMilli()
+                    if (tickNowMillis - prevEval >= MIN_EVAL_INTERVAL_MS) {
+                        lastEvalMillis[tick.symbol] = tickNowMillis
                         evaluateSymbol(inst.copy(ltp = tick.ltp), now)
                     }
                 }
@@ -153,12 +178,121 @@ class SignalRepository @Inject constructor(
         }
     }
 
+    /**
+     * Checks live LTP against active signals for [symbol].
+     * - Immediately archives HIT_SL, HIT_T1, or HIT_T2 in signal_records and removes from active signals.
+     * - Also upgrades recent HIT_T1 records to HIT_T2 if price continues to target2.
+     */
+    private suspend fun evaluateActiveSignalOutcomes(symbol: String, ltp: BigDecimal, nowMillis: Long) {
+        val active = signalDao.getActiveForSymbol(symbol)
+        for (entity in active) {
+            if (entity.expiresAtMillis != null && entity.expiresAtMillis <= nowMillis) {
+                archiveSignal(entity, SignalOutcome.EXPIRED, ltp, nowMillis)
+                signalDao.deleteById(entity.id)
+                continue
+            }
+            val isLong = entity.direction == SignalDirection.LONG
+            val outcome = when {
+                isLong && ltp <= entity.stopLoss -> SignalOutcome.HIT_SL
+                !isLong && ltp >= entity.stopLoss -> SignalOutcome.HIT_SL
+                isLong && ltp >= entity.target2 -> SignalOutcome.HIT_T2
+                !isLong && ltp <= entity.target2 -> SignalOutcome.HIT_T2
+                isLong && ltp >= entity.target1 -> SignalOutcome.HIT_T1
+                !isLong && ltp <= entity.target1 -> SignalOutcome.HIT_T1
+                else -> null
+            }
+            if (outcome != null) {
+                archiveSignal(entity, outcome, ltp, nowMillis)
+                signalDao.deleteById(entity.id)
+                notificationManager.notifySignalEvent(
+                    title = "Signal ${outcome.label}: ${entity.symbol}",
+                    body = "${entity.direction.name} ${entity.strategy.shortLabel} (${entity.timeframe.label}) reached ${RiskMath.formatPrice(ltp, entity.segment)}"
+                )
+            }
+        }
+
+        // Upgrade recent T1-hit records to T2-hit if price keeps running to Target 2 within 24h
+        val t1Records = signalRecordDao.getT1HitForSymbol(symbol)
+        for (rec in t1Records) {
+            if (nowMillis - rec.resolvedAtMillis > 24 * 60 * 60_000L) continue
+            val isLong = rec.direction == SignalDirection.LONG
+            val hitT2 = if (isLong) ltp >= rec.target2 else ltp <= rec.target2
+            if (hitT2) {
+                val pnlPct = computeSignalPnlPercent(rec.entryPrice, ltp, isLong)
+                signalRecordDao.upsert(
+                    rec.copy(
+                        outcome = SignalOutcome.HIT_T2,
+                        resolvedPrice = ltp,
+                        pnlPercent = pnlPct,
+                        resolvedAtMillis = nowMillis
+                    )
+                )
+                notificationManager.notifySignalEvent(
+                    title = "Signal Target 2 Hit: ${rec.symbol}",
+                    body = "${rec.direction.name} ${rec.strategy.shortLabel} extended to T2 @ ${RiskMath.formatPrice(ltp, rec.segment)}"
+                )
+            }
+        }
+    }
+
+    private suspend fun archiveAndPruneExpired(nowMillis: Long) {
+        val expired = signalDao.getExpired(nowMillis)
+        for (entity in expired) {
+            if (entity.userStatus != "DISMISSED") {
+                val ltp = instrumentCache[entity.symbol]?.ltp ?: entity.entryPrice
+                archiveSignal(entity, SignalOutcome.EXPIRED, ltp, nowMillis)
+            }
+        }
+        signalDao.deleteExpired(nowMillis)
+    }
+
+    private suspend fun archiveSignal(
+        entity: SignalEntity,
+        outcome: SignalOutcome,
+        resolvedPrice: BigDecimal,
+        nowMillis: Long
+    ) {
+        val isLong = entity.direction == SignalDirection.LONG
+        val pnlPct = computeSignalPnlPercent(entity.entryPrice, resolvedPrice, isLong)
+        signalRecordDao.upsert(
+            SignalRecordEntity(
+                id = entity.id,
+                symbol = entity.symbol,
+                segment = entity.segment,
+                instrumentType = entity.instrumentType,
+                strategy = entity.strategy,
+                direction = entity.direction,
+                timeframe = entity.timeframe,
+                entryPrice = entity.entryPrice,
+                stopLoss = entity.stopLoss,
+                target1 = entity.target1,
+                target2 = entity.target2,
+                resolvedPrice = resolvedPrice,
+                outcome = outcome,
+                pnlPercent = pnlPct,
+                confidence = entity.confidence,
+                generatedAtMillis = entity.generatedAtMillis,
+                resolvedAtMillis = nowMillis
+            )
+        )
+    }
+
+    private fun computeSignalPnlPercent(entry: BigDecimal, exit: BigDecimal, isLong: Boolean): Double {
+        if (entry <= BigDecimal.ZERO) return 0.0
+        val diff = if (isLong) exit.toDouble() - entry.toDouble() else entry.toDouble() - exit.toDouble()
+        return (diff / entry.toDouble()) * 100.0
+    }
+
+    suspend fun clearSignalHistory() {
+        signalRecordDao.clearAll()
+    }
+
     suspend fun refreshAllSignals() {
         val universe = instrumentDao.getAllOnce().map { it.toDomain() }
         universe.forEach { instrumentCache[it.symbol] = it }
         candleAggregator.warmUpFromDatabaseOrSeed(universe)
         val now = Instant.now()
-        signalDao.deleteExpired(now.toEpochMilli())
+        archiveAndPruneExpired(now.toEpochMilli())
         universe.forEach { evaluateSymbol(it, now) }
     }
 
@@ -183,10 +317,6 @@ class SignalRepository @Inject constructor(
         return candleAggregator.getCandles(symbol, includeInProgress = true)[timeframe].orEmpty()
     }
 
-    /**
-     * Loads real exchange history for one symbol/timeframe (used by the chart). Cached for a few
-     * minutes so switching timeframes back and forth does not hammer the APIs.
-     */
     suspend fun loadHistory(symbol: String, timeframe: Timeframe, force: Boolean = false): Result<Int> {
         val inst = getInstrumentSnapshot(symbol)
             ?: return Result.failure(IllegalArgumentException("Unknown symbol $symbol"))
@@ -216,10 +346,7 @@ class SignalRepository @Inject constructor(
             var anyLoaded = false
             for (tf in BACKFILL_TIMEFRAMES) {
                 val res = loadHistory(inst.symbol, tf)
-                if (res.isFailure) {
-                    // No source for this instrument (e.g. no Angel One credentials): skip remaining TFs.
-                    break
-                }
+                if (res.isFailure) break
                 if ((res.getOrNull() ?: 0) > 0) anyLoaded = true
                 delay(BACKFILL_THROTTLE_MS)
             }
@@ -236,26 +363,33 @@ class SignalRepository @Inject constructor(
     }
 
     private suspend fun evaluateSymbol(instrument: Instrument, now: Instant) {
-        signalDao.deleteExpired(now.toEpochMilli())
-        // Evaluate on CLOSED candles only: the forming bar repaints and, right after a bucket roll,
-        // is a single-tick bar that would corrupt every crossover / pattern check.
+        archiveAndPruneExpired(now.toEpochMilli())
         val candlesByTf = candleAggregator.getCandles(instrument.symbol, includeInProgress = false)
         val context = SignalContext(
             symbol = instrument.symbol,
             segment = instrument.segment,
             candlesByTimeframe = candlesByTf,
             currentLtp = instrument.ltp,
-            now = now
+            now = now,
+            instrumentType = instrument.type
         )
         val generated = signalEngine.evaluate(context)
         if (generated.isEmpty()) return
 
-        generated.forEach { sig ->
+        val existingIds = signalDao.getActiveForSymbol(instrument.symbol).map { it.id }.toSet()
+        generated.forEach { rawSig ->
+            val sig = rawSig.copy(instrumentType = instrument.type)
             val dismissedAt = dismissedSignatures[signature(sig)]
             val suppressed = dismissedAt != null && (now.toEpochMilli() - dismissedAt) < DISMISS_COOLDOWN_MS
             if (!suppressed) {
                 signalDao.replacePreviousActive(sig.symbol, sig.strategy, sig.id)
                 signalDao.upsert(sig.toEntity("ACTIVE"))
+                if (sig.id !in existingIds && sig.confidence.rank >= SignalConfidence.MEDIUM.rank) {
+                    notificationManager.notifySignalEvent(
+                        title = "New ${sig.direction.name} Signal: ${sig.symbol}",
+                        body = "${sig.strategy.shortLabel} (${sig.timeframe.label}) • Entry ${RiskMath.formatPrice(sig.entryPrice, sig.segment)} • T1 ${RiskMath.formatPrice(sig.target1, sig.segment)} • SL ${RiskMath.formatPrice(sig.stopLoss, sig.segment)}"
+                    )
+                }
             }
         }
     }

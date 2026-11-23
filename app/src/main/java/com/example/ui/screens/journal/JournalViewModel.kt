@@ -8,6 +8,7 @@ import com.example.data.repository.TradingRepository
 import com.example.data.signal.SignalRepository
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.AccountState
+import com.example.domain.model.CapitalTransaction
 import com.example.domain.model.Instrument
 import com.example.domain.model.OrderSide
 import com.example.domain.model.Position
@@ -27,8 +28,11 @@ import javax.inject.Inject
 
 data class JournalUiState(
     val entries: List<TradeJournalEntry> = emptyList(),
+    val capitalTransactions: List<CapitalTransaction> = emptyList(),
     val grossPnl: BigDecimal = BigDecimal.ZERO,
     val totalCharges: BigDecimal = BigDecimal.ZERO,
+    val totalBrokerage: BigDecimal = BigDecimal.ZERO,
+    val totalTaxes: BigDecimal = BigDecimal.ZERO,
     val netRealisedPnl: BigDecimal = BigDecimal.ZERO,
     val unrealisedPnl: BigDecimal = BigDecimal.ZERO,
     val winRatePercent: Int = 0,
@@ -54,6 +58,7 @@ class JournalViewModel @Inject constructor(
         marketDataRepository.instruments,
         tradingRepository.accountState,
         signalRepository.activeSignals,
+        tradingRepository.capitalTransactions,
         _coachState
     ) { values ->
         @Suppress("UNCHECKED_CAST")
@@ -66,7 +71,9 @@ class JournalViewModel @Inject constructor(
         @Suppress("UNCHECKED_CAST")
         val signalItems = values[4] as List<com.example.data.signal.SignalUiItem>
         @Suppress("UNCHECKED_CAST")
-        val coachState = values[5] as AiUiState<String>
+        val capitalTxns = values[5] as List<CapitalTransaction>
+        @Suppress("UNCHECKED_CAST")
+        val coachState = values[6] as AiUiState<String>
 
         latestSnapshot = CoachSnapshot(
             account = account,
@@ -91,14 +98,21 @@ class JournalViewModel @Inject constructor(
 
         val gross = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.grossPnl) }
         val charges = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
+        val brokerage = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.brokerage) }
+        val taxes = entries.fold(BigDecimal.ZERO) { acc, e ->
+            acc.add(e.sttCtt).add(e.exchangeCharges).add(e.sebiCharges).add(e.stampDuty).add(e.gst)
+        }
         val net = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
         val wins = entries.count { it.netPnl > BigDecimal.ZERO }
         val winRate = if (entries.isEmpty()) 0 else (wins * 100) / entries.size
 
         JournalUiState(
             entries = entries,
+            capitalTransactions = capitalTxns,
             grossPnl = gross,
             totalCharges = charges,
+            totalBrokerage = brokerage,
+            totalTaxes = taxes,
             netRealisedPnl = net,
             unrealisedPnl = unrealised,
             winRatePercent = winRate,

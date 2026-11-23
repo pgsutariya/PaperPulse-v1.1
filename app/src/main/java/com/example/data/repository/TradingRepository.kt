@@ -39,7 +39,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class TradingRepository @Inject constructor(
+class TradingRepository private constructor(
     private val database: PaperPulseDatabase,
     private val instrumentDao: InstrumentDao,
     private val orderDao: OrderDao,
@@ -49,12 +49,52 @@ class TradingRepository @Inject constructor(
     private val accountDao: AccountDao,
     private val prefsRepository: TradingPreferencesRepository,
     private val ledgerService: TradingLedgerService,
-    private val executionEngine: ExecutionEngine
+    private val executionEngine: ExecutionEngine,
+    private val notificationManager: com.example.data.notifications.TradeNotificationManager?,
+    @Suppress("UNUSED_PARAMETER") internalTag: Boolean
 ) {
+    @Inject
+    constructor(
+        database: PaperPulseDatabase,
+        instrumentDao: InstrumentDao,
+        orderDao: OrderDao,
+        positionDao: PositionDao,
+        ocoLinkDao: OcoLinkDao,
+        tradeJournalDao: TradeJournalDao,
+        accountDao: AccountDao,
+        prefsRepository: TradingPreferencesRepository,
+        ledgerService: TradingLedgerService,
+        executionEngine: ExecutionEngine,
+        notificationManager: com.example.data.notifications.TradeNotificationManager
+    ) : this(
+        database, instrumentDao, orderDao, positionDao, ocoLinkDao,
+        tradeJournalDao, accountDao, prefsRepository, ledgerService,
+        executionEngine, notificationManager, true
+    )
+
+    constructor(
+        database: PaperPulseDatabase,
+        instrumentDao: InstrumentDao,
+        orderDao: OrderDao,
+        positionDao: PositionDao,
+        ocoLinkDao: OcoLinkDao,
+        tradeJournalDao: TradeJournalDao,
+        accountDao: AccountDao,
+        prefsRepository: TradingPreferencesRepository,
+        ledgerService: TradingLedgerService,
+        executionEngine: ExecutionEngine
+    ) : this(
+        database, instrumentDao, orderDao, positionDao, ocoLinkDao,
+        tradeJournalDao, accountDao, prefsRepository, ledgerService,
+        executionEngine, null, false
+    )
+
     val orders: Flow<List<Order>> = orderDao.observeAll().map { list -> list.map { it.toDomain() } }
     val positions: Flow<List<Position>> = positionDao.observeAll().map { list -> list.map { it.toDomain() } }
     val journalEntries: Flow<List<TradeJournalEntry>> = tradeJournalDao.observeAll().map { list -> list.map { it.toDomain() } }
     val accountState: Flow<AccountState> = accountDao.observeAccount().map { (it ?: SeedData.defaultAccount()).toDomain() }
+    val capitalTransactions: Flow<List<com.example.domain.model.CapitalTransaction>> =
+        database.capitalTransactionDao().observeAll().map { list -> list.map { it.toDomain() } }
 
     suspend fun placeOrder(request: OrderPlacementRequest): Result<String> {
         val instrument = instrumentDao.getBySymbol(request.symbol)
@@ -75,10 +115,11 @@ class TradingRepository @Inject constructor(
 
         val nowMillis = System.currentTimeMillis()
         if (request.productType == ProductType.INTRADAY &&
-            MarketClock.isIntradaySquareOffTime(instrument.segment, nowMillis)
+            MarketClock.isIntradaySquareOffTime(instrument.segment, instrument.type, nowMillis)
         ) {
+            val sqLabel = MarketClock.intradaySquareOffLabel(instrument.segment, instrument.type)
             return Result.failure(
-                IllegalStateException("Intraday (MIS) orders are blocked during the square-off window — use Carry Forward")
+                IllegalStateException("Intraday (MIS) orders are blocked during the $sqLabel square-off window — use Carry Forward")
             )
         }
         val config = prefsRepository.getConfig()
@@ -104,7 +145,19 @@ class TradingRepository @Inject constructor(
             segment = instrument.segment,
             gttDays = request.gttDays,
             gtdDateMillis = request.gtdDateMillis,
-            nowMillis = nowMillis
+            nowMillis = nowMillis,
+            instrumentType = instrument.type
+        )
+
+        val estTurnover = referencePrice.multiply(BigDecimal(request.quantity))
+        val estCharges = RiskMath.calculateOrderCharges(
+            segment = instrument.segment,
+            instrumentType = instrument.type,
+            productType = request.productType,
+            side = request.side,
+            turnover = estTurnover,
+            flatBrokeragePerOrder = config.flatBrokerage,
+            cryptoFeePercent = config.cryptoFeePercent
         )
 
         val orderId = UUID.randomUUID().toString()
@@ -140,22 +193,35 @@ class TradingRepository @Inject constructor(
             attachedTrailingTargetValue = if (request.targetEnabled && request.trailingTargetEnabled) request.trailingTargetValue else null,
             statusReason = "Waiting for ${request.orderType.label} trigger",
             createdAtMillis = nowMillis,
-            updatedAtMillis = nowMillis
+            updatedAtMillis = nowMillis,
+            lotSize = instrument.lotSize,
+            brokerage = estCharges.brokerage,
+            sttCtt = estCharges.sttCtt,
+            exchangeCharges = estCharges.exchangeCharges,
+            sebiCharges = estCharges.sebiCharges,
+            stampDuty = estCharges.stampDuty,
+            gst = estCharges.gst,
+            totalCharges = estCharges.total
         )
 
         val immediateFill = request.orderType == OrderType.MARKET ||
             (request.orderType == OrderType.BRACKET && request.limitPrice == null)
 
+        val qtyLabel = RiskMath.formatQtyWithLots(request.quantity, instrument.lotSize)
         return if (immediateFill) {
             val filled = ledgerService.fillEntryOrder(entryOrder, instrument.ltp, instrument, config, nowMillis)
             if (filled) {
-                Result.success("Executed ${request.side.name} ${request.quantity} ${instrument.symbol}")
+                val msg = "Executed ${request.side.name} ${instrument.symbol} • Qty $qtyLabel @ ${RiskMath.formatPrice(instrument.ltp, instrument.segment)}"
+                notificationManager?.notifyTradeActivity("Trade Executed", msg)
+                Result.success(msg)
             } else {
                 Result.failure(IllegalStateException("Order rejected at fill: insufficient margin"))
             }
         } else {
             orderDao.upsert(entryOrder)
-            Result.success("Placed ${request.orderType.label} order (${request.validityType.label})")
+            val msg = "Placed ${request.orderType.label} ${request.side.name} ${instrument.symbol} • Qty $qtyLabel (${request.validityType.label})"
+            notificationManager?.notifyTradeActivity("Pending Order Placed", msg)
+            Result.success(msg)
         }
     }
 
@@ -522,7 +588,322 @@ class TradingRepository @Inject constructor(
             config = config,
             nowMillis = System.currentTimeMillis()
         )
+        notificationManager?.notifyTradeActivity(
+            title = "Position Squared Off",
+            body = "Closed ${pos.symbol} (${RiskMath.formatQtyWithLots(pos.quantity, pos.lotSize)}) @ ${RiskMath.formatPrice(ltp, pos.segment)}"
+        )
         return Result.success(Unit)
+    }
+
+    /**
+     * Modifies a PENDING order (quantity, limitPrice, triggerPrice, attached SL/Target).
+     * If the pending order is an SL or TARGET leg linked to an open position, also keeps the position in sync.
+     */
+    suspend fun modifyPendingOrder(
+        orderId: String,
+        newQuantity: Int,
+        newLimitPrice: BigDecimal?,
+        newTriggerPrice: BigDecimal?,
+        newAttachedSlValue: BigDecimal? = null,
+        newAttachedTargetValue: BigDecimal? = null
+    ): Result<String> {
+        val nowMillis = System.currentTimeMillis()
+        var result: Result<String> = Result.failure(IllegalStateException("Pending order not found"))
+        database.withTransaction {
+            val existing = orderDao.getById(orderId) ?: return@withTransaction
+            if (existing.status != OrderStatus.PENDING) {
+                result = Result.failure(IllegalStateException("Only PENDING orders can be modified"))
+                return@withTransaction
+            }
+            val instrument = instrumentDao.getBySymbol(existing.symbol)
+            val tickSize = instrument?.tickSize ?: BigDecimal("0.05")
+            val lotSize = instrument?.lotSize ?: existing.lotSize.coerceAtLeast(1)
+
+            if (newQuantity <= 0) {
+                result = Result.failure(IllegalArgumentException("Quantity must be greater than zero"))
+                return@withTransaction
+            }
+            if (existing.instrumentType != InstrumentType.STOCK && lotSize > 1 && newQuantity % lotSize != 0) {
+                result = Result.failure(IllegalArgumentException("Quantity must be a multiple of lot size $lotSize"))
+                return@withTransaction
+            }
+
+            val roundedLimit = newLimitPrice?.takeIf { it > BigDecimal.ZERO }?.let { RiskMath.roundToTick(it, tickSize) }
+            val roundedTrigger = newTriggerPrice?.takeIf { it > BigDecimal.ZERO }?.let { RiskMath.roundToTick(it, tickSize) }
+
+            val config = prefsRepository.getConfig()
+            val refPrice = roundedLimit ?: roundedTrigger ?: instrument?.ltp ?: BigDecimal.ONE
+            val estCharges = RiskMath.calculateOrderCharges(
+                segment = existing.segment,
+                instrumentType = existing.instrumentType,
+                productType = existing.productType,
+                side = existing.side,
+                turnover = refPrice.multiply(BigDecimal(newQuantity)),
+                flatBrokeragePerOrder = config.flatBrokerage,
+                cryptoFeePercent = config.cryptoFeePercent
+            )
+
+            val updated = existing.copy(
+                quantity = newQuantity,
+                limitPrice = roundedLimit,
+                triggerPrice = roundedTrigger,
+                attachedSlValue = newAttachedSlValue ?: existing.attachedSlValue,
+                attachedTargetValue = newAttachedTargetValue ?: existing.attachedTargetValue,
+                statusReason = "Modified by user",
+                updatedAtMillis = nowMillis,
+                lotSize = lotSize,
+                brokerage = estCharges.brokerage,
+                sttCtt = estCharges.sttCtt,
+                exchangeCharges = estCharges.exchangeCharges,
+                sebiCharges = estCharges.sebiCharges,
+                stampDuty = estCharges.stampDuty,
+                gst = estCharges.gst,
+                totalCharges = estCharges.total
+            )
+            orderDao.upsert(updated)
+
+            // Keep open position risk prices in sync if this is an SL/Target protective leg
+            if ((existing.legRole == "SL" || existing.legRole == "TARGET") && roundedTrigger != null) {
+                positionDao.getBySymbol(existing.symbol).forEach { pos ->
+                    if (pos.slOrderId == existing.id) {
+                        positionDao.upsert(pos.copy(activeSlPrice = roundedTrigger, updatedAtMillis = nowMillis))
+                    } else if (pos.targetOrderId == existing.id) {
+                        positionDao.upsert(pos.copy(activeTargetPrice = roundedTrigger, updatedAtMillis = nowMillis))
+                    }
+                }
+            }
+
+            val priceLabel = roundedLimit ?: roundedTrigger
+            val msg = "Updated ${existing.symbol} pending order • Qty ${RiskMath.formatQtyWithLots(newQuantity, lotSize)}" +
+                (priceLabel?.let { " @ ${RiskMath.formatPrice(it, existing.segment)}" } ?: "")
+            result = Result.success(msg)
+        }
+        result.getOrNull()?.let { msg ->
+            notificationManager?.notifyTradeActivity("Pending Order Updated", msg)
+        }
+        return result
+    }
+
+    /**
+     * Averages (scales into) an open running position with additional quantity at live LTP.
+     * Recalculates weighted average entry price, reserves incremental margin, updates linked SL/Target quantities,
+     * and records an executed AVERAGE order with itemized brokerage & statutory taxes.
+     */
+    suspend fun averageRunningPosition(
+        positionId: String,
+        additionalQuantity: Int
+    ): Result<String> {
+        val nowMillis = System.currentTimeMillis()
+        val config = prefsRepository.getConfig()
+        var result: Result<String> = Result.failure(IllegalStateException("Position not found"))
+        database.withTransaction {
+            val pos = positionDao.getById(positionId) ?: return@withTransaction
+            val instrument = instrumentDao.getBySymbol(pos.symbol)
+                ?: run {
+                    result = Result.failure(IllegalStateException("Instrument ${pos.symbol} unavailable"))
+                    return@withTransaction
+                }
+            val lotSize = instrument.lotSize.coerceAtLeast(1)
+            if (additionalQuantity <= 0) {
+                result = Result.failure(IllegalArgumentException("Additional quantity must be greater than zero"))
+                return@withTransaction
+            }
+            if (pos.instrumentType != InstrumentType.STOCK && lotSize > 1 && additionalQuantity % lotSize != 0) {
+                result = Result.failure(IllegalArgumentException("Quantity must be a multiple of lot size $lotSize"))
+                return@withTransaction
+            }
+
+            val fillPrice = RiskMath.applySlippage(
+                price = instrument.ltp,
+                side = pos.side,
+                slippageBps = config.slippageBps,
+                tickSize = instrument.tickSize
+            )
+            val extraMargin = ledgerService.computeRequiredMargin(
+                productType = pos.productType,
+                price = fillPrice,
+                quantity = additionalQuantity,
+                instrumentType = pos.instrumentType
+            )
+            val account = accountDao.getAccount() ?: SeedData.defaultAccount()
+            if (account.availableMargin < extraMargin) {
+                result = Result.failure(
+                    IllegalStateException(
+                        "Insufficient margin to average: need ${RiskMath.formatPortfolioInr(extraMargin)}, available ${RiskMath.formatPortfolioInr(account.availableMargin)}"
+                    )
+                )
+                return@withTransaction
+            }
+
+            val oldCost = pos.averageEntryPrice.multiply(BigDecimal(pos.quantity))
+            val addCost = fillPrice.multiply(BigDecimal(additionalQuantity))
+            val newQty = pos.quantity + additionalQuantity
+            val newAvg = oldCost.add(addCost).divide(
+                BigDecimal(newQty),
+                maxOf(instrument.tickSize.scale(), 2),
+                java.math.RoundingMode.HALF_UP
+            )
+
+            val avgCharges = RiskMath.calculateOrderCharges(
+                segment = pos.segment,
+                instrumentType = pos.instrumentType,
+                productType = pos.productType,
+                side = pos.side,
+                turnover = addCost,
+                flatBrokeragePerOrder = config.flatBrokerage,
+                cryptoFeePercent = config.cryptoFeePercent
+            )
+
+            // Log executed averaging order
+            orderDao.upsert(
+                OrderEntity(
+                    id = UUID.randomUUID().toString(),
+                    symbol = pos.symbol,
+                    segment = pos.segment,
+                    instrumentType = pos.instrumentType,
+                    side = pos.side,
+                    orderType = OrderType.MARKET,
+                    productType = pos.productType,
+                    quantity = additionalQuantity,
+                    limitPrice = null,
+                    triggerPrice = null,
+                    filledPrice = fillPrice,
+                    status = OrderStatus.EXECUTED,
+                    validityType = pos.validityType,
+                    gttDays = pos.gttDays,
+                    expiresAtMillis = pos.expiresAtMillis,
+                    validityState = ValidityState.TRIGGERED,
+                    ocoGroupId = pos.ocoGroupId,
+                    parentOrderId = null,
+                    legRole = "AVERAGE",
+                    attachedSlMode = null,
+                    attachedSlValue = null,
+                    attachedTargetMode = null,
+                    attachedTargetValue = null,
+                    attachedTslEnabled = false,
+                    attachedTslMode = null,
+                    attachedTslValue = null,
+                    attachedTrailingTargetEnabled = false,
+                    attachedTrailingTargetMode = null,
+                    attachedTrailingTargetValue = null,
+                    statusReason = "Averaged position • New Avg ${RiskMath.formatPrice(newAvg, pos.segment)}",
+                    createdAtMillis = nowMillis,
+                    updatedAtMillis = nowMillis,
+                    lotSize = lotSize,
+                    brokerage = avgCharges.brokerage,
+                    sttCtt = avgCharges.sttCtt,
+                    exchangeCharges = avgCharges.exchangeCharges,
+                    sebiCharges = avgCharges.sebiCharges,
+                    stampDuty = avgCharges.stampDuty,
+                    gst = avgCharges.gst,
+                    totalCharges = avgCharges.total
+                )
+            )
+
+            // Update position quantity and weighted average entry price
+            positionDao.upsert(
+                pos.copy(
+                    quantity = newQty,
+                    averageEntryPrice = newAvg,
+                    lotSize = lotSize,
+                    updatedAtMillis = nowMillis
+                )
+            )
+
+            // Sync linked pending SL & Target orders to the new total quantity
+            listOfNotNull(pos.slOrderId, pos.targetOrderId).forEach { legId ->
+                orderDao.getById(legId)?.takeIf { it.status == OrderStatus.PENDING }?.let { leg ->
+                    orderDao.upsert(leg.copy(quantity = newQty, lotSize = lotSize, updatedAtMillis = nowMillis))
+                }
+            }
+
+            accountDao.updateBalances(
+                margin = account.availableMargin.subtract(extraMargin).max(BigDecimal.ZERO),
+                realised = account.realisedPnl
+            )
+
+            val msg = "Averaged ${pos.symbol}: +${RiskMath.formatQtyWithLots(additionalQuantity, lotSize)} @ ${RiskMath.formatPrice(fillPrice, pos.segment)} → New Avg ${RiskMath.formatPrice(newAvg, pos.segment)}"
+            result = Result.success(msg)
+        }
+        result.getOrNull()?.let { msg ->
+            notificationManager?.notifyTradeActivity("Position Averaged", msg)
+        }
+        return result
+    }
+
+    suspend fun addCapital(amount: BigDecimal, note: String = "Capital top-up"): Result<String> {
+        if (amount <= BigDecimal.ZERO) {
+            return Result.failure(IllegalArgumentException("Amount must be greater than zero"))
+        }
+        val rounded = amount.setScale(2, java.math.RoundingMode.HALF_UP)
+        val now = System.currentTimeMillis()
+        var newBalance = BigDecimal.ZERO
+        database.withTransaction {
+            val account = accountDao.getAccount() ?: SeedData.defaultAccount()
+            val updatedCapital = account.virtualCapital.add(rounded)
+            val updatedMargin = account.availableMargin.add(rounded)
+            newBalance = updatedCapital
+            accountDao.upsert(
+                account.copy(
+                    virtualCapital = updatedCapital,
+                    availableMargin = updatedMargin
+                )
+            )
+            database.capitalTransactionDao().insert(
+                com.example.data.local.CapitalTransactionEntity(
+                    id = UUID.randomUUID().toString(),
+                    type = com.example.domain.model.CapitalTransactionType.ADD,
+                    amount = rounded,
+                    balanceAfter = updatedCapital,
+                    note = note.ifBlank { "Added virtual funds" },
+                    timestampMillis = now
+                )
+            )
+        }
+        val msg = "Added ${RiskMath.formatPortfolioInr(rounded)} • Capital now ${RiskMath.formatPortfolioInr(newBalance)}"
+        notificationManager?.notifyTradeActivity("Funds Added", msg)
+        return Result.success(msg)
+    }
+
+    suspend fun reduceCapital(amount: BigDecimal, note: String = "Capital withdrawal"): Result<String> {
+        if (amount <= BigDecimal.ZERO) {
+            return Result.failure(IllegalArgumentException("Amount must be greater than zero"))
+        }
+        val rounded = amount.setScale(2, java.math.RoundingMode.HALF_UP)
+        val now = System.currentTimeMillis()
+        var result: Result<String> = Result.failure(IllegalStateException("Insufficient available margin"))
+        database.withTransaction {
+            val account = accountDao.getAccount() ?: SeedData.defaultAccount()
+            if (rounded > account.availableMargin) {
+                result = Result.failure(
+                    IllegalStateException("Cannot withdraw more than available free margin (${RiskMath.formatPortfolioInr(account.availableMargin)})")
+                )
+                return@withTransaction
+            }
+            val updatedCapital = account.virtualCapital.subtract(rounded).max(BigDecimal.ZERO)
+            val updatedMargin = account.availableMargin.subtract(rounded).max(BigDecimal.ZERO)
+            accountDao.upsert(
+                account.copy(
+                    virtualCapital = updatedCapital,
+                    availableMargin = updatedMargin
+                )
+            )
+            database.capitalTransactionDao().insert(
+                com.example.data.local.CapitalTransactionEntity(
+                    id = UUID.randomUUID().toString(),
+                    type = com.example.domain.model.CapitalTransactionType.REDUCE,
+                    amount = rounded,
+                    balanceAfter = updatedCapital,
+                    note = note.ifBlank { "Withdrew virtual funds" },
+                    timestampMillis = now
+                )
+            )
+            result = Result.success("Reduced ${RiskMath.formatPortfolioInr(rounded)} • Capital now ${RiskMath.formatPortfolioInr(updatedCapital)}")
+        }
+        result.getOrNull()?.let { msg ->
+            notificationManager?.notifyTradeActivity("Funds Reduced", msg)
+        }
+        return result
     }
 
     suspend fun triggerSimulatedSquareOff(): Int = executionEngine.triggerSimulatedSquareOff()
@@ -531,13 +912,36 @@ class TradingRepository @Inject constructor(
         tradeJournalDao.updateNotes(entryId, notes)
     }
 
-    suspend fun resetPaperAccount() {
+    suspend fun resetPaperAccount(newCapital: BigDecimal = SeedData.INITIAL_CAPITAL) {
+        val targetCapital = newCapital.max(BigDecimal("1000.00")).setScale(2, java.math.RoundingMode.HALF_UP)
+        val now = System.currentTimeMillis()
         database.withTransaction {
             positionDao.clearAll()
             orderDao.clearAll()
             ocoLinkDao.clearAll()
             tradeJournalDao.clearAll()
-            accountDao.upsert(SeedData.defaultAccount())
+            accountDao.upsert(
+                com.example.data.local.AccountStateEntity(
+                    id = 1,
+                    virtualCapital = targetCapital,
+                    availableMargin = targetCapital,
+                    realisedPnl = BigDecimal.ZERO
+                )
+            )
+            database.capitalTransactionDao().insert(
+                com.example.data.local.CapitalTransactionEntity(
+                    id = UUID.randomUUID().toString(),
+                    type = com.example.domain.model.CapitalTransactionType.RESET,
+                    amount = targetCapital,
+                    balanceAfter = targetCapital,
+                    note = "Paper account reset to ${RiskMath.formatPortfolioInr(targetCapital)}",
+                    timestampMillis = now
+                )
+            )
         }
+        notificationManager?.notifyTradeActivity(
+            title = "Paper Account Reset",
+            body = "Account reset to ${RiskMath.formatPortfolioInr(targetCapital)}"
+        )
     }
 }

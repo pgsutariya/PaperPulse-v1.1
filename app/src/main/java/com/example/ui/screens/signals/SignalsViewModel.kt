@@ -3,16 +3,21 @@ package com.example.ui.screens.signals
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.AiMarketRepository
+import com.example.data.repository.TradingPreferencesRepository
 import com.example.data.signal.SignalRepository
 import com.example.data.signal.SignalUiItem
+import com.example.domain.model.InstrumentType
 import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
 import com.example.domain.model.ProductType
 import com.example.domain.model.ValidityType
 import com.example.domain.signal.AiSignalSecondOpinion
 import com.example.domain.signal.AiUiState
+import com.example.domain.signal.SignalAccuracyStats
+import com.example.domain.signal.SignalAssetCategory
 import com.example.domain.signal.SignalConfidence
 import com.example.domain.signal.SignalDirection
+import com.example.domain.signal.SignalRecord
 import com.example.domain.signal.SignalStrategy
 import com.example.domain.signal.TradeSignal
 import com.example.ui.navigation.InstrumentDetailRoute
@@ -27,12 +32,14 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 enum class SignalsTab(val label: String) {
-    ACTIVE("Active Signals"),
-    SAVED("Saved")
+    ACTIVE("Active"),
+    SAVED("Saved"),
+    HISTORY("Performance")
 }
 
 data class SignalsFilterState(
     val tab: SignalsTab = SignalsTab.ACTIVE,
+    val assetCategory: SignalAssetCategory = SignalAssetCategory.ALL,
     val strategy: SignalStrategy? = null,
     val direction: SignalDirection? = null,
     val segment: MarketSegment? = null,
@@ -42,8 +49,12 @@ data class SignalsFilterState(
 data class SignalsUiState(
     val filters: SignalsFilterState = SignalsFilterState(),
     val items: List<SignalUiItem> = emptyList(),
+    val historyRecords: List<SignalRecord> = emptyList(),
+    val accuracyStats: SignalAccuracyStats = SignalAccuracyStats(),
     val activeCount: Int = 0,
     val savedCount: Int = 0,
+    val historyCount: Int = 0,
+    val signalNotificationsEnabled: Boolean = true,
     val selectedItem: SignalUiItem? = null,
     val selectedAiState: AiUiState<AiSignalSecondOpinion> = AiUiState.Idle,
     val isRefreshing: Boolean = false
@@ -52,7 +63,8 @@ data class SignalsUiState(
 @HiltViewModel
 class SignalsViewModel @Inject constructor(
     private val signalRepository: SignalRepository,
-    private val aiMarketRepository: AiMarketRepository
+    private val aiMarketRepository: AiMarketRepository,
+    private val prefsRepository: TradingPreferencesRepository
 ) : ViewModel() {
 
     private val _filters = MutableStateFlow(SignalsFilterState())
@@ -63,39 +75,59 @@ class SignalsViewModel @Inject constructor(
     private val selectionAndRefresh = combine(
         _selectedId,
         _isRefreshing,
-        _aiStates
-    ) { selectedId, refreshing, aiStates ->
-        Triple(selectedId, refreshing, aiStates)
+        _aiStates,
+        prefsRepository.configFlow
+    ) { selectedId, refreshing, aiStates, config ->
+        MetaBits(selectedId, refreshing, aiStates, config.signalNotificationsEnabled)
     }
+
+    private val historyFlow = combine(
+        signalRepository.signalRecords,
+        signalRepository.signalAccuracy
+    ) { records, stats -> records to stats }
 
     val uiState: StateFlow<SignalsUiState> = combine(
         signalRepository.activeSignals,
         signalRepository.savedSignals,
+        historyFlow,
         _filters,
         selectionAndRefresh
-    ) { active, saved, filters, selMeta ->
-        val (selectedId, refreshing, aiStates) = selMeta
+    ) { active, saved, historyPair, filters, meta ->
+        val (records, stats) = historyPair
         val source = when (filters.tab) {
             SignalsTab.ACTIVE -> active
             SignalsTab.SAVED -> saved
+            SignalsTab.HISTORY -> emptyList()
         }
-        val filtered = source.filter { item ->
+        val filteredSignals = source.filter { item ->
             val sig = item.signal
-            (filters.strategy == null || sig.strategy == filters.strategy) &&
+            matchesAssetCategory(sig.symbol, sig.segment, sig.instrumentType, sig.strategy, filters.assetCategory) &&
+                (filters.strategy == null || sig.strategy == filters.strategy) &&
                 (filters.direction == null || sig.direction == filters.direction) &&
                 (filters.segment == null || sig.segment == filters.segment) &&
                 (filters.confidence == null || sig.confidence == filters.confidence)
         }
-        val selected = (active + saved).firstOrNull { it.signal.id == selectedId }
-        val selectedAi = selected?.let { aiStates[it.signal.id] } ?: AiUiState.Idle
+        val filteredRecords = records.filter { rec ->
+            matchesAssetCategory(rec.symbol, rec.segment, rec.instrumentType, rec.strategy, filters.assetCategory) &&
+                (filters.strategy == null || rec.strategy == filters.strategy) &&
+                (filters.direction == null || rec.direction == filters.direction) &&
+                (filters.segment == null || rec.segment == filters.segment) &&
+                (filters.confidence == null || rec.confidence == filters.confidence)
+        }
+        val selected = (active + saved).firstOrNull { it.signal.id == meta.selectedId }
+        val selectedAi = selected?.let { meta.aiStates[it.signal.id] } ?: AiUiState.Idle
         SignalsUiState(
             filters = filters,
-            items = filtered,
+            items = filteredSignals,
+            historyRecords = filteredRecords,
+            accuracyStats = stats,
             activeCount = active.size,
             savedCount = saved.size,
+            historyCount = records.size,
+            signalNotificationsEnabled = meta.signalNotificationsEnabled,
             selectedItem = selected,
             selectedAiState = selectedAi,
-            isRefreshing = refreshing
+            isRefreshing = meta.refreshing
         )
     }.stateIn(
         scope = viewModelScope,
@@ -104,6 +136,7 @@ class SignalsViewModel @Inject constructor(
     )
 
     fun setTab(tab: SignalsTab) = _filters.update { it.copy(tab = tab) }
+    fun setAssetCategory(category: SignalAssetCategory) = _filters.update { it.copy(assetCategory = category) }
     fun setStrategyFilter(strategy: SignalStrategy?) = _filters.update {
         it.copy(strategy = if (it.strategy == strategy) null else strategy)
     }
@@ -115,6 +148,18 @@ class SignalsViewModel @Inject constructor(
     }
     fun setConfidenceFilter(confidence: SignalConfidence?) = _filters.update {
         it.copy(confidence = if (it.confidence == confidence) null else confidence)
+    }
+
+    fun toggleSignalNotifications(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepository.updateSignalNotificationsEnabled(enabled)
+        }
+    }
+
+    fun clearSignalHistory() {
+        viewModelScope.launch {
+            signalRepository.clearSignalHistory()
+        }
     }
 
     fun selectSignal(item: SignalUiItem?) {
@@ -179,4 +224,42 @@ class SignalsViewModel @Inject constructor(
             prefillValidity = validity.name
         )
     }
+
+    private fun matchesAssetCategory(
+        symbol: String,
+        segment: MarketSegment,
+        instrumentType: InstrumentType,
+        strategy: SignalStrategy,
+        category: SignalAssetCategory
+    ): Boolean {
+        val upper = symbol.uppercase()
+        val isIndexName = upper.contains("NIFTY") || upper.contains("SENSEX") || upper.contains("FINNIFTY") || upper.contains("MIDCP")
+        return when (category) {
+            SignalAssetCategory.ALL -> true
+            SignalAssetCategory.STOCK ->
+                (segment == MarketSegment.NSE || segment == MarketSegment.BSE) &&
+                    instrumentType == InstrumentType.STOCK && !isIndexName
+            SignalAssetCategory.INDEX ->
+                (segment == MarketSegment.NSE || segment == MarketSegment.BSE) && isIndexName
+            SignalAssetCategory.FNO ->
+                (segment == MarketSegment.NSE || segment == MarketSegment.BSE) &&
+                    (instrumentType == InstrumentType.FUTURES || instrumentType == InstrumentType.OPTIONS)
+            SignalAssetCategory.MCX ->
+                segment == MarketSegment.MCX
+            SignalAssetCategory.CRYPTO ->
+                segment == MarketSegment.CRYPTO && instrumentType == InstrumentType.STOCK
+            SignalAssetCategory.CRYPTO_FNO ->
+                segment == MarketSegment.CRYPTO &&
+                    (instrumentType == InstrumentType.FUTURES || instrumentType == InstrumentType.OPTIONS || upper.contains("PERP"))
+            SignalAssetCategory.BTST_STBT ->
+                strategy == SignalStrategy.BTST_STBT
+        }
+    }
+
+    private data class MetaBits(
+        val selectedId: String?,
+        val refreshing: Boolean,
+        val aiStates: Map<String, AiUiState<AiSignalSecondOpinion>>,
+        val signalNotificationsEnabled: Boolean
+    )
 }

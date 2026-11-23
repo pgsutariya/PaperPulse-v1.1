@@ -11,6 +11,9 @@ import com.example.data.feed.live.SegmentFeedStatus
 import com.example.data.repository.MarketDataRepository
 import com.example.data.repository.TradingPreferencesRepository
 import com.example.data.repository.TradingRepository
+import com.example.domain.engine.RiskMath
+import com.example.domain.model.AccountState
+import com.example.domain.model.CapitalTransaction
 import com.example.domain.model.Instrument
 import com.example.domain.model.MarketSegment
 import com.example.domain.model.TradingConfig
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
+import java.net.URLEncoder
 import javax.inject.Inject
 
 data class FeedSettingsUiState(
@@ -38,6 +42,8 @@ data class FeedSettingsUiState(
     val riskControlsSuspended: Boolean = false,
     val suspendedBannerMessage: String = "",
     val instruments: List<Instrument> = emptyList(),
+    val accountState: AccountState = AccountState(BigDecimal("1000000"), BigDecimal("1000000"), BigDecimal.ZERO),
+    val capitalTransactions: List<CapitalTransaction> = emptyList(),
     val angelDiagnosticLoading: Boolean = false,
     val angelDiagnosticResult: String? = null
 )
@@ -68,9 +74,11 @@ class FeedSettingsViewModel @Inject constructor(
     private val safetyStateFlow = combine(
         marketDataRepository.segmentStatuses,
         marketDataRepository.riskControlsSuspended,
-        marketDataRepository.suspendedBannerMessage
-    ) { segStatuses, suspended, bannerMsg ->
-        Triple(segStatuses, suspended, bannerMsg)
+        marketDataRepository.suspendedBannerMessage,
+        tradingRepository.accountState,
+        tradingRepository.capitalTransactions
+    ) { segStatuses, suspended, bannerMsg, account, capTxns ->
+        SafetyAndCapitalSnapshot(segStatuses, suspended, bannerMsg, account, capTxns)
     }
 
     val uiState: StateFlow<FeedSettingsUiState> = combine(
@@ -87,10 +95,12 @@ class FeedSettingsViewModel @Inject constructor(
             feedStatuses = live.feedMap,
             liveConnectionStatus = live.connStatus,
             liveStatusMessage = live.statusMsg,
-            segmentStatuses = safety.first,
-            riskControlsSuspended = safety.second,
-            suspendedBannerMessage = safety.third,
+            segmentStatuses = safety.statuses,
+            riskControlsSuspended = safety.suspended,
+            suspendedBannerMessage = safety.bannerMsg,
             instruments = instruments,
+            accountState = safety.account,
+            capitalTransactions = safety.capitalTransactions,
             angelDiagnosticLoading = diag.first,
             angelDiagnosticResult = diag.second
         )
@@ -99,6 +109,69 @@ class FeedSettingsViewModel @Inject constructor(
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = FeedSettingsUiState()
     )
+
+    fun buildBrokerOAuthUrl(broker: String, apiKey: String): String {
+        val cleanKey = apiKey.trim()
+        val encodedRedirect = URLEncoder.encode("paperpulse://broker-callback?broker=$broker", "UTF-8")
+        return when (broker) {
+            "angel" -> if (cleanKey.isNotEmpty()) {
+                "https://smartapi.angelbroking.com/publisher-login?api_key=$cleanKey&state=paperpulse"
+            } else {
+                "https://smartapi.angelbroking.com/enable-totp"
+            }
+            "kite" -> if (cleanKey.isNotEmpty()) {
+                "https://kite.zerodha.com/connect/login?v=3&api_key=$cleanKey"
+            } else {
+                "https://developers.kite.trade/"
+            }
+            "upstox" -> if (cleanKey.isNotEmpty()) {
+                "https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=$cleanKey&redirect_uri=$encodedRedirect"
+            } else {
+                "https://account.upstox.com/developer/apps"
+            }
+            else -> "https://smartapi.angelbroking.com/"
+        }
+    }
+
+    fun toggleTradeNotifications(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepository.updateNotificationsEnabled(enabled)
+            _messages.emit(if (enabled) "Trade activity notifications enabled" else "Trade activity notifications muted")
+        }
+    }
+
+    fun toggleSignalNotifications(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepository.updateSignalNotificationsEnabled(enabled)
+            _messages.emit(if (enabled) "Signal alerts enabled" else "Signal alerts muted")
+        }
+    }
+
+    fun toggleFreePublicMarketFeed(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepository.updateUseFreePublicMarketFeed(enabled)
+            _messages.emit(
+                if (enabled) "Free Public NSE/BSE/MCX/Crypto quote feed enabled"
+                else "Switched to offline simulated price generator"
+            )
+        }
+    }
+
+    fun addCapital(amount: BigDecimal, note: String) {
+        viewModelScope.launch {
+            tradingRepository.addCapital(amount, note)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Failed to add capital") }
+        }
+    }
+
+    fun reduceCapital(amount: BigDecimal, note: String) {
+        viewModelScope.launch {
+            tradingRepository.reduceCapital(amount, note)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Failed to reduce capital") }
+        }
+    }
 
     fun testAngelOneConnection(settings: BrokerFeedSettings) {
         viewModelScope.launch {
@@ -134,7 +207,6 @@ class FeedSettingsViewModel @Inject constructor(
 
     fun toggleSegmentEnabled(segment: MarketSegment, currentConfig: SegmentFeedConfig) {
         if (currentConfig.isEnabled) {
-            // Disable only this segment's feed type cleanly
             val updated = marketDataRepository.brokerSettings.value.segmentConfigs.toMutableMap()
             updated[segment] = currentConfig.copy(isEnabled = false)
             viewModelScope.launch {
@@ -211,14 +283,14 @@ class FeedSettingsViewModel @Inject constructor(
     fun triggerSquareOff() {
         viewModelScope.launch {
             val count = tradingRepository.triggerSimulatedSquareOff()
-            _messages.emit("15:15 IST Square-Off completed ($count position(s) closed)")
+            _messages.emit("Intraday Square-Off (15:15 Eq/Fut • 15:40 Opt) completed ($count position(s) closed)")
         }
     }
 
-    fun resetAccount() {
+    fun resetAccount(newCapital: BigDecimal = BigDecimal("1000000.00")) {
         viewModelScope.launch {
-            tradingRepository.resetPaperAccount()
-            _messages.emit("Paper trading account reset to ₹10,00,000.00")
+            tradingRepository.resetPaperAccount(newCapital)
+            _messages.emit("Paper trading account reset to ${RiskMath.formatPortfolioInr(newCapital)}")
         }
     }
 
@@ -228,5 +300,13 @@ class FeedSettingsViewModel @Inject constructor(
         val feedMap: Map<FeedType, LiveConnectionStatus>,
         val connStatus: LiveConnectionStatus,
         val statusMsg: String
+    )
+
+    private data class SafetyAndCapitalSnapshot(
+        val statuses: Map<MarketSegment, SegmentFeedStatus>,
+        val suspended: Boolean,
+        val bannerMsg: String,
+        val account: AccountState,
+        val capitalTransactions: List<CapitalTransaction>
     )
 }

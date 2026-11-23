@@ -1,6 +1,7 @@
 package com.example.data.repository
 
 import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -30,6 +31,9 @@ class TradingPreferencesRepository @Inject constructor(
         val TICK_INTERVAL_MS = longPreferencesKey("tick_interval_ms")
         val BROKER_WS_URL = stringPreferencesKey("broker_ws_url")
         val BROKER_CLIENT_ID = stringPreferencesKey("broker_client_id")
+        val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
+        val SIGNAL_NOTIFICATIONS_ENABLED = booleanPreferencesKey("signal_notifications_enabled")
+        val USE_FREE_PUBLIC_FEED = booleanPreferencesKey("use_free_public_feed")
     }
 
     // Feed token kept strictly in memory only so sensitive credentials are never persisted
@@ -47,7 +51,10 @@ class TradingPreferencesRepository @Inject constructor(
             tickIntervalMs = prefs[Keys.TICK_INTERVAL_MS] ?: 1000L,
             brokerWsUrl = prefs[Keys.BROKER_WS_URL] ?: "",
             brokerClientId = prefs[Keys.BROKER_CLIENT_ID] ?: "",
-            brokerFeedToken = sessionFeedToken
+            brokerFeedToken = sessionFeedToken,
+            notificationsEnabled = prefs[Keys.NOTIFICATIONS_ENABLED] ?: true,
+            signalNotificationsEnabled = prefs[Keys.SIGNAL_NOTIFICATIONS_ENABLED] ?: true,
+            useFreePublicMarketFeed = prefs[Keys.USE_FREE_PUBLIC_FEED] ?: true
         )
     }
 
@@ -62,6 +69,18 @@ class TradingPreferencesRepository @Inject constructor(
             it[Keys.FLAT_BROKERAGE] = flatBrokerage.max(BigDecimal.ZERO).toPlainString()
             it[Keys.CRYPTO_FEE_PCT] = cryptoFeePct.max(BigDecimal.ZERO).toPlainString()
         }
+    }
+
+    suspend fun updateNotificationsEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.NOTIFICATIONS_ENABLED] = enabled }
+    }
+
+    suspend fun updateSignalNotificationsEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.SIGNAL_NOTIFICATIONS_ENABLED] = enabled }
+    }
+
+    suspend fun updateUseFreePublicMarketFeed(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.USE_FREE_PUBLIC_FEED] = enabled }
     }
 
     suspend fun updateFeedSettings(

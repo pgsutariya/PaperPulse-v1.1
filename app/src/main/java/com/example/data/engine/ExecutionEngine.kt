@@ -46,7 +46,7 @@ import javax.inject.Singleton
  * 7. Intraday 15:15 IST auto square-off
  */
 @Singleton
-class ExecutionEngine @Inject constructor(
+class ExecutionEngine private constructor(
     private val database: PaperPulseDatabase,
     private val instrumentDao: InstrumentDao,
     private val orderDao: OrderDao,
@@ -54,8 +54,41 @@ class ExecutionEngine @Inject constructor(
     private val ledgerService: TradingLedgerService,
     private val marketDataRepository: MarketDataRepository,
     private val prefsRepository: TradingPreferencesRepository,
-    private val appScope: CoroutineScope
+    private val appScope: CoroutineScope,
+    private val notificationManager: com.example.data.notifications.TradeNotificationManager?,
+    @Suppress("UNUSED_PARAMETER") internalTag: Boolean
 ) {
+    @Inject
+    constructor(
+        database: PaperPulseDatabase,
+        instrumentDao: InstrumentDao,
+        orderDao: OrderDao,
+        positionDao: PositionDao,
+        ledgerService: TradingLedgerService,
+        marketDataRepository: MarketDataRepository,
+        prefsRepository: TradingPreferencesRepository,
+        appScope: CoroutineScope,
+        notificationManager: com.example.data.notifications.TradeNotificationManager
+    ) : this(
+        database, instrumentDao, orderDao, positionDao, ledgerService,
+        marketDataRepository, prefsRepository, appScope,
+        notificationManager, true
+    )
+
+    constructor(
+        database: PaperPulseDatabase,
+        instrumentDao: InstrumentDao,
+        orderDao: OrderDao,
+        positionDao: PositionDao,
+        ledgerService: TradingLedgerService,
+        marketDataRepository: MarketDataRepository,
+        prefsRepository: TradingPreferencesRepository,
+        appScope: CoroutineScope
+    ) : this(
+        database, instrumentDao, orderDao, positionDao, ledgerService,
+        marketDataRepository, prefsRepository, appScope, null, false
+    )
+
     private val evaluationMutex = Mutex()
 
     private val _engineEvents = MutableSharedFlow<String>(extraBufferCapacity = 32)
@@ -75,7 +108,7 @@ class ExecutionEngine @Inject constructor(
             }
         }
 
-        // 1-second heartbeat for validity expiry & 15:15 IST intraday square-off
+        // 1-second heartbeat for validity expiry & 15:15 Eq/Fut / 15:40 Options intraday square-off
         appScope.launch(Dispatchers.IO) {
             while (isActive) {
                 delay(1000L)
@@ -99,12 +132,15 @@ class ExecutionEngine @Inject constructor(
                 if (shouldFillPendingEntry(order, ltp)) {
                     val execPrice = ltp
                     val filled = ledgerService.fillEntryOrder(order, execPrice, instrument, config, nowMillis)
-                    _engineEvents.tryEmit(
-                        if (filled) {
-                            "${order.side.name} ${order.symbol} filled @ ${RiskMath.formatPrice(execPrice, instrument.segment)}"
-                        } else {
-                            "${order.side.name} ${order.symbol} rejected: insufficient margin"
-                        }
+                    val msg = if (filled) {
+                        "${order.side.name} ${order.symbol} (${RiskMath.formatQtyWithLots(order.quantity, instrument.lotSize)}) filled @ ${RiskMath.formatPrice(execPrice, instrument.segment)}"
+                    } else {
+                        "${order.side.name} ${order.symbol} rejected: insufficient margin"
+                    }
+                    _engineEvents.tryEmit(msg)
+                    notificationManager?.notifyTradeActivity(
+                        title = if (filled) "Order Executed" else "Order Rejected",
+                        body = msg
                     )
                 }
             }
@@ -125,7 +161,7 @@ class ExecutionEngine @Inject constructor(
             val openPositions = positionDao.getAllOnce()
             for (pos in openPositions) {
                 if (pos.productType == ProductType.INTRADAY &&
-                    MarketClock.isIntradaySquareOffTime(pos.segment, nowMillis)
+                    MarketClock.isIntradaySquareOffTime(pos.segment, pos.instrumentType, nowMillis)
                 ) {
                     val ltp = instrumentDao.getBySymbol(pos.symbol)?.ltp ?: pos.averageEntryPrice
                     ledgerService.closePosition(
@@ -136,7 +172,10 @@ class ExecutionEngine @Inject constructor(
                         config = config,
                         nowMillis = nowMillis
                     )
-                    _engineEvents.tryEmit("15:15 IST auto square-off: ${pos.symbol}")
+                    val sqTime = MarketClock.intradaySquareOffLabel(pos.segment, pos.instrumentType)
+                    val msg = "$sqTime auto square-off: ${pos.symbol} (${RiskMath.formatQtyWithLots(pos.quantity, pos.lotSize)})"
+                    _engineEvents.tryEmit(msg)
+                    notificationManager?.notifyTradeActivity("Intraday Auto Square-Off", msg)
                 }
             }
 
@@ -144,13 +183,13 @@ class ExecutionEngine @Inject constructor(
             val pendingOrders = orderDao.getByStatus(OrderStatus.PENDING)
             for (order in pendingOrders) {
                 if (order.validityType == ValidityType.DAY &&
-                    MarketClock.isIntradaySquareOffTime(order.segment, nowMillis)
+                    MarketClock.isIntradaySquareOffTime(order.segment, order.instrumentType, nowMillis)
                 ) {
                     orderDao.upsert(
                         order.copy(
                             status = OrderStatus.CANCELLED,
                             validityState = ValidityState.EXPIRED,
-                            statusReason = "Session close auto-cancel (DAY)",
+                            statusReason = "Session close auto-cancel (${MarketClock.intradaySquareOffLabel(order.segment, order.instrumentType)})",
                             updatedAtMillis = nowMillis
                         )
                     )
@@ -326,7 +365,9 @@ class ExecutionEngine @Inject constructor(
                     config = config,
                     nowMillis = nowMillis
                 )
-                _engineEvents.tryEmit("${reason.label}: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}")
+                val msg = "${reason.label}: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}"
+                _engineEvents.tryEmit(msg)
+                notificationManager?.notifyTradeActivity(reason.label, msg)
                 return
             }
         }
@@ -354,7 +395,9 @@ class ExecutionEngine @Inject constructor(
                     config = config,
                     nowMillis = nowMillis
                 )
-                _engineEvents.tryEmit("Trailing Target Hit: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}")
+                val msg = "Trailing Target Hit: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}"
+                _engineEvents.tryEmit(msg)
+                notificationManager?.notifyTradeActivity("Trailing Target Hit", msg)
                 return
             }
             if (update.activated != workingPos.trailingTargetActivated ||
@@ -393,7 +436,9 @@ class ExecutionEngine @Inject constructor(
                     config = config,
                     nowMillis = nowMillis
                 )
-                _engineEvents.tryEmit("Target Hit: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}")
+                val msg = "Target Hit: ${workingPos.symbol} @ ${RiskMath.formatPrice(ltp, instrument.segment)}"
+                _engineEvents.tryEmit(msg)
+                notificationManager?.notifyTradeActivity("Target Profit Hit", msg)
             }
         }
     }

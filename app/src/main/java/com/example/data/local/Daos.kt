@@ -172,6 +172,15 @@ interface SignalDao {
     @Query("UPDATE signals SET userStatus = :status WHERE id = :id")
     suspend fun updateStatus(id: String, status: String)
 
+    @Query("DELETE FROM signals WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("SELECT * FROM signals WHERE symbol = :symbol AND userStatus != 'DISMISSED'")
+    suspend fun getActiveForSymbol(symbol: String): List<SignalEntity>
+
+    @Query("SELECT * FROM signals WHERE expiresAtMillis IS NOT NULL AND expiresAtMillis <= :nowMillis")
+    suspend fun getExpired(nowMillis: Long): List<SignalEntity>
+
     @Query("DELETE FROM signals WHERE expiresAtMillis IS NOT NULL AND expiresAtMillis <= :nowMillis")
     suspend fun deleteExpired(nowMillis: Long)
 
@@ -192,4 +201,31 @@ interface SavedSignalDao {
 
     @Query("SELECT id FROM saved_signals")
     fun observeSavedIds(): Flow<List<String>>
+}
+
+@Dao
+interface CapitalTransactionDao {
+    @Query("SELECT * FROM capital_transactions ORDER BY timestampMillis DESC")
+    fun observeAll(): Flow<List<CapitalTransactionEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(tx: CapitalTransactionEntity)
+
+    @Query("DELETE FROM capital_transactions")
+    suspend fun clearAll()
+}
+
+@Dao
+interface SignalRecordDao {
+    @Query("SELECT * FROM signal_records ORDER BY resolvedAtMillis DESC")
+    fun observeAll(): Flow<List<SignalRecordEntity>>
+
+    @Query("SELECT * FROM signal_records WHERE symbol = :symbol AND outcome = 'HIT_T1'")
+    suspend fun getT1HitForSymbol(symbol: String): List<SignalRecordEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(record: SignalRecordEntity)
+
+    @Query("DELETE FROM signal_records")
+    suspend fun clearAll()
 }

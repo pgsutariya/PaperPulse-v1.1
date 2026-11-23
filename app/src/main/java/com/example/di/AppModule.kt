@@ -68,10 +68,12 @@ object AppModule {
     @Provides fun providePositionDao(db: PaperPulseDatabase): PositionDao = db.positionDao()
     @Provides fun provideOcoLinkDao(db: PaperPulseDatabase): OcoLinkDao = db.ocoLinkDao()
     @Provides fun provideTradeJournalDao(db: PaperPulseDatabase): TradeJournalDao = db.tradeJournalDao()
+    @Provides fun provideCapitalTransactionDao(db: PaperPulseDatabase): com.example.data.local.CapitalTransactionDao = db.capitalTransactionDao()
     @Provides fun provideAccountDao(db: PaperPulseDatabase): AccountDao = db.accountDao()
     @Provides fun provideCandleDao(db: PaperPulseDatabase): com.example.data.local.CandleDao = db.candleDao()
     @Provides fun provideSignalDao(db: PaperPulseDatabase): com.example.data.local.SignalDao = db.signalDao()
     @Provides fun provideSavedSignalDao(db: PaperPulseDatabase): com.example.data.local.SavedSignalDao = db.savedSignalDao()
+    @Provides fun provideSignalRecordDao(db: PaperPulseDatabase): com.example.data.local.SignalRecordDao = db.signalRecordDao()
 }
 
 @Module

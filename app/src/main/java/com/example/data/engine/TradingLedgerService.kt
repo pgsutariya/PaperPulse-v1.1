@@ -97,12 +97,30 @@ class TradingLedgerService @Inject constructor(
                 return@withTransaction false
             }
 
+            val entryTurnover = fillPrice.multiply(BigDecimal(order.quantity))
+            val entryCharges = RiskMath.calculateOrderCharges(
+                segment = order.segment,
+                instrumentType = order.instrumentType,
+                productType = order.productType,
+                side = order.side,
+                turnover = entryTurnover,
+                flatBrokeragePerOrder = config.flatBrokerage,
+                cryptoFeePercent = config.cryptoFeePercent
+            )
             val updatedOrder = order.copy(
                 filledPrice = fillPrice,
                 status = OrderStatus.EXECUTED,
                 validityState = ValidityState.TRIGGERED,
                 statusReason = "Filled @ ${RiskMath.formatPrice(fillPrice, instrument.segment)}",
-                updatedAtMillis = nowMillis
+                updatedAtMillis = nowMillis,
+                lotSize = instrument.lotSize,
+                brokerage = entryCharges.brokerage,
+                sttCtt = entryCharges.sttCtt,
+                exchangeCharges = entryCharges.exchangeCharges,
+                sebiCharges = entryCharges.sebiCharges,
+                stampDuty = entryCharges.stampDuty,
+                gst = entryCharges.gst,
+                totalCharges = entryCharges.total
             )
             orderDao.upsert(updatedOrder)
 
@@ -169,7 +187,8 @@ class TradingLedgerService @Inject constructor(
                         attachedTrailingTargetValue = null,
                         statusReason = if (order.attachedTslEnabled) "Trailing SL Armed" else "Protective SL",
                         createdAtMillis = nowMillis,
-                        updatedAtMillis = nowMillis
+                        updatedAtMillis = nowMillis,
+                        lotSize = instrument.lotSize
                     )
                 )
             }
@@ -208,7 +227,8 @@ class TradingLedgerService @Inject constructor(
                         attachedTrailingTargetValue = order.attachedTrailingTargetValue,
                         statusReason = if (order.attachedTrailingTargetEnabled) "Trailing Target Armed" else "Target Order",
                         createdAtMillis = nowMillis,
-                        updatedAtMillis = nowMillis
+                        updatedAtMillis = nowMillis,
+                        lotSize = instrument.lotSize
                     )
                 )
             }
@@ -255,7 +275,8 @@ class TradingLedgerService @Inject constructor(
                     gttDays = order.gttDays ?: 7,
                     expiresAtMillis = order.expiresAtMillis,
                     openedAtMillis = nowMillis,
-                    updatedAtMillis = nowMillis
+                    updatedAtMillis = nowMillis,
+                    lotSize = instrument.lotSize
                 )
             )
 
@@ -279,6 +300,7 @@ class TradingLedgerService @Inject constructor(
             val currentPos = positionDao.getById(position.id) ?: return@withTransaction
             val instrument = instrumentDao.getBySymbol(currentPos.symbol)
             val tickSize = instrument?.tickSize ?: BigDecimal("0.05")
+            val lotSize = instrument?.lotSize ?: currentPos.lotSize.coerceAtLeast(1)
             val exitSide = if (currentPos.side == OrderSide.BUY) OrderSide.SELL else OrderSide.BUY
 
             val exitPrice = RiskMath.applySlippage(
@@ -295,14 +317,28 @@ class TradingLedgerService @Inject constructor(
                 quantity = currentPos.quantity,
                 isLong = isLong
             )
-            val turnover = currentPos.averageEntryPrice.add(exitPrice)
-                .multiply(BigDecimal(currentPos.quantity))
-            val charges = RiskMath.calculateSimulatedCharges(
+            val entryTurnover = currentPos.averageEntryPrice.multiply(BigDecimal(currentPos.quantity))
+            val exitTurnover = exitPrice.multiply(BigDecimal(currentPos.quantity))
+            val exitLegCharges = RiskMath.calculateOrderCharges(
                 segment = currentPos.segment,
-                turnover = turnover,
+                instrumentType = currentPos.instrumentType,
+                productType = currentPos.productType,
+                side = exitSide,
+                turnover = exitTurnover,
                 flatBrokeragePerOrder = config.flatBrokerage,
                 cryptoFeePercent = config.cryptoFeePercent
             )
+            val roundTripCharges = RiskMath.calculateRoundTripCharges(
+                segment = currentPos.segment,
+                instrumentType = currentPos.instrumentType,
+                productType = currentPos.productType,
+                entrySide = currentPos.side,
+                entryTurnover = entryTurnover,
+                exitTurnover = exitTurnover,
+                flatBrokeragePerOrder = config.flatBrokerage,
+                cryptoFeePercent = config.cryptoFeePercent
+            )
+            val charges = roundTripCharges.total
             val netPnl = grossPnl.subtract(charges).setScale(2, RoundingMode.HALF_UP)
 
             // Handle OCO leg state transitions
@@ -318,7 +354,15 @@ class TradingLedgerService @Inject constructor(
                                 status = OrderStatus.EXECUTED,
                                 validityState = ValidityState.TRIGGERED,
                                 statusReason = exitReason.label,
-                                updatedAtMillis = nowMillis
+                                updatedAtMillis = nowMillis,
+                                lotSize = lotSize,
+                                brokerage = exitLegCharges.brokerage,
+                                sttCtt = exitLegCharges.sttCtt,
+                                exchangeCharges = exitLegCharges.exchangeCharges,
+                                sebiCharges = exitLegCharges.sebiCharges,
+                                stampDuty = exitLegCharges.stampDuty,
+                                gst = exitLegCharges.gst,
+                                totalCharges = exitLegCharges.total
                             )
                         )
                     }
@@ -341,7 +385,15 @@ class TradingLedgerService @Inject constructor(
                                 status = OrderStatus.EXECUTED,
                                 validityState = ValidityState.TRIGGERED,
                                 statusReason = exitReason.label,
-                                updatedAtMillis = nowMillis
+                                updatedAtMillis = nowMillis,
+                                lotSize = lotSize,
+                                brokerage = exitLegCharges.brokerage,
+                                sttCtt = exitLegCharges.sttCtt,
+                                exchangeCharges = exitLegCharges.exchangeCharges,
+                                sebiCharges = exitLegCharges.sebiCharges,
+                                stampDuty = exitLegCharges.stampDuty,
+                                gst = exitLegCharges.gst,
+                                totalCharges = exitLegCharges.total
                             )
                         )
                     }
@@ -357,7 +409,6 @@ class TradingLedgerService @Inject constructor(
                     }
                 }
                 else -> {
-                    // Manual exit or 15:15 IST square-off: cancel any pending protective legs & log exit order
                     slOrder?.takeIf { it.status == OrderStatus.PENDING }?.let {
                         orderDao.upsert(
                             it.copy(
@@ -411,7 +462,15 @@ class TradingLedgerService @Inject constructor(
                             attachedTrailingTargetValue = null,
                             statusReason = exitReason.label,
                             createdAtMillis = nowMillis,
-                            updatedAtMillis = nowMillis
+                            updatedAtMillis = nowMillis,
+                            lotSize = lotSize,
+                            brokerage = exitLegCharges.brokerage,
+                            sttCtt = exitLegCharges.sttCtt,
+                            exchangeCharges = exitLegCharges.exchangeCharges,
+                            sebiCharges = exitLegCharges.sebiCharges,
+                            stampDuty = exitLegCharges.stampDuty,
+                            gst = exitLegCharges.gst,
+                            totalCharges = exitLegCharges.total
                         )
                     )
                 }
@@ -449,7 +508,14 @@ class TradingLedgerService @Inject constructor(
                     exitReason = exitReason,
                     notes = "",
                     openedAtMillis = currentPos.openedAtMillis,
-                    closedAtMillis = nowMillis
+                    closedAtMillis = nowMillis,
+                    lotSize = lotSize,
+                    brokerage = roundTripCharges.brokerage,
+                    sttCtt = roundTripCharges.sttCtt,
+                    exchangeCharges = roundTripCharges.exchangeCharges,
+                    sebiCharges = roundTripCharges.sebiCharges,
+                    stampDuty = roundTripCharges.stampDuty,
+                    gst = roundTripCharges.gst
                 )
             )
         }

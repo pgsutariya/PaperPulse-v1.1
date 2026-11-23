@@ -9,6 +9,7 @@ import com.example.data.repository.MarketDataRepository
 import com.example.data.repository.TradingRepository
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.AccountState
+import com.example.domain.model.CapitalTransaction
 import com.example.domain.model.Instrument
 import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
@@ -38,6 +39,9 @@ data class PositionsUiState(
     val items: List<PositionWithLivePnl> = emptyList(),
     val totalUnrealisedPnl: BigDecimal = BigDecimal.ZERO,
     val realisedPnl: BigDecimal = BigDecimal.ZERO,
+    val virtualCapital: BigDecimal = BigDecimal.ZERO,
+    val availableMargin: BigDecimal = BigDecimal.ZERO,
+    val capitalTransactions: List<CapitalTransaction> = emptyList(),
     val riskControlsSuspended: Boolean = false,
     val suspendedBannerMessage: String = "",
     val liveStatusMessage: String = ""
@@ -63,10 +67,12 @@ class PositionsViewModel @Inject constructor(
         tradingRepository.positions,
         marketDataRepository.instruments,
         tradingRepository.accountState,
+        tradingRepository.capitalTransactions,
         feedHealthFlow
     ) { positions: List<Position>,
         instruments: List<Instrument>,
         account: AccountState,
+        capitalTxns: List<CapitalTransaction>,
         health: FeedHealthData ->
         val instMap: Map<String, Instrument> = instruments.associateBy { it.symbol }
         val segStatuses = health.statuses
@@ -93,6 +99,9 @@ class PositionsViewModel @Inject constructor(
             items = enriched,
             totalUnrealisedPnl = totalUnrealised,
             realisedPnl = account.realisedPnl,
+            virtualCapital = account.virtualCapital,
+            availableMargin = account.availableMargin,
+            capitalTransactions = capitalTxns,
             riskControlsSuspended = health.suspended,
             suspendedBannerMessage = health.bannerMsg,
             liveStatusMessage = health.msg
@@ -131,6 +140,37 @@ class PositionsViewModel @Inject constructor(
         }
     }
 
+    fun averagePosition(positionId: String, additionalQuantity: Int) {
+        viewModelScope.launch {
+            tradingRepository.averageRunningPosition(positionId, additionalQuantity)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Averaging failed") }
+        }
+    }
+
+    fun addCapital(amount: BigDecimal, note: String) {
+        viewModelScope.launch {
+            tradingRepository.addCapital(amount, note)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Failed to add funds") }
+        }
+    }
+
+    fun reduceCapital(amount: BigDecimal, note: String) {
+        viewModelScope.launch {
+            tradingRepository.reduceCapital(amount, note)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Failed to reduce funds") }
+        }
+    }
+
+    fun resetAccount(newCapital: BigDecimal) {
+        viewModelScope.launch {
+            tradingRepository.resetPaperAccount(newCapital)
+            _messages.emit("Paper account reset to ${RiskMath.formatPortfolioInr(newCapital)}")
+        }
+    }
+
     fun convertToCarryForward(positionId: String) {
         viewModelScope.launch {
             tradingRepository.convertProductToCarryForward(positionId)
@@ -151,7 +191,7 @@ class PositionsViewModel @Inject constructor(
         viewModelScope.launch {
             val count = tradingRepository.triggerSimulatedSquareOff()
             _messages.emit(
-                if (count > 0) "15:15 IST Square-Off executed for $count Intraday position(s)"
+                if (count > 0) "Intraday Square-Off (15:15 Eq/Fut • 15:40 Opt) executed for $count position(s)"
                 else "No open Intraday positions; DAY orders cancelled"
             )
         }

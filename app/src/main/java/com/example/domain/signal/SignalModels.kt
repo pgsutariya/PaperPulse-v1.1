@@ -67,6 +67,7 @@ enum class SignalStrategy(val label: String, val shortLabel: String) {
     SWING("Swing Heikin Ashi", "SWING"),
     REVERSAL("Reversal Confluence", "REVERSAL"),
     SWIG("Swig HTF+LTF Hybrid", "SWIG"),
+    BTST_STBT("BTST / STBT Overnight", "BTST/STBT"),
     EMA_9_21_SCALP("EMA 9/21 Retest • Scalping", "9/21 SCALP"),
     EMA_9_21_SNIPER("EMA 9/21 Retest • Sniper", "9/21 SNIPER"),
     EMA_9_21_INTRADAY("EMA 9/21 Retest • Intraday", "9/21 INTRA"),
@@ -83,7 +84,7 @@ enum class SignalStrategy(val label: String, val shortLabel: String) {
     /** Suggested paper-trading product for this strategy family. */
     val prefersCarryForward: Boolean
         get() = when (this) {
-            SWING, SWIG, EMA_50_200_SWING, EMA_50_200_SHORT_TERM,
+            SWING, SWIG, BTST_STBT, EMA_50_200_SWING, EMA_50_200_SHORT_TERM,
             EMA_50_200_INVESTING, EMA_50_200_LONG_TERM -> true
             else -> false
         }
@@ -107,10 +108,64 @@ enum class SignalLifecycleState {
     EXPIRED
 }
 
+enum class SignalOutcome(val label: String) {
+    HIT_T1("Target 1 Hit"),
+    HIT_T2("Target 2 Hit"),
+    HIT_SL("Stop Loss Hit"),
+    EXPIRED("Expired")
+}
+
+enum class SignalAssetCategory(val label: String) {
+    ALL("All"),
+    STOCK("Stock"),
+    INDEX("Index"),
+    FNO("F&O"),
+    MCX("MCX"),
+    CRYPTO("Crypto"),
+    CRYPTO_FNO("Crypto F&O"),
+    BTST_STBT("BTST / STBT")
+}
+
+data class SignalRecord(
+    val id: String,
+    val symbol: String,
+    val segment: MarketSegment,
+    val instrumentType: com.example.domain.model.InstrumentType,
+    val strategy: SignalStrategy,
+    val direction: SignalDirection,
+    val timeframe: Timeframe,
+    val entryPrice: BigDecimal,
+    val stopLoss: BigDecimal,
+    val target1: BigDecimal,
+    val target2: BigDecimal,
+    val resolvedPrice: BigDecimal,
+    val outcome: SignalOutcome,
+    val pnlPercent: Double,
+    val confidence: SignalConfidence,
+    val generatedAtMillis: Long,
+    val resolvedAtMillis: Long
+)
+
+data class SignalAccuracyStats(
+    val totalResolved: Int = 0,
+    val t1Hits: Int = 0,
+    val t2Hits: Int = 0,
+    val slHits: Int = 0,
+    val expiredCount: Int = 0
+) {
+    val wins: Int get() = t1Hits + t2Hits
+    val decidedCount: Int get() = wins + slHits
+    val accuracyPercent: Double
+        get() = if (decidedCount == 0) 0.0 else (wins.toDouble() / decidedCount.toDouble()) * 100.0
+    val expiryRatePercent: Double
+        get() = if (totalResolved == 0) 0.0 else (expiredCount.toDouble() / totalResolved.toDouble()) * 100.0
+}
+
 data class SignalFilterCriteria(
     val strategy: SignalStrategy? = null,
     val direction: SignalDirection? = null,
     val segment: MarketSegment? = null,
+    val assetCategory: SignalAssetCategory = SignalAssetCategory.ALL,
     val confidence: SignalConfidence? = null,
     val searchQuery: String = ""
 )
@@ -130,7 +185,8 @@ data class TradeSignal(
     val confidence: SignalConfidence,
     val reasons: List<String>,
     val generatedAt: Instant,
-    val expiresAt: Instant?
+    val expiresAt: Instant?,
+    val instrumentType: com.example.domain.model.InstrumentType = com.example.domain.model.InstrumentType.STOCK
 )
 
 data class SignalContext(
@@ -138,7 +194,8 @@ data class SignalContext(
     val segment: MarketSegment,
     val candlesByTimeframe: Map<Timeframe, List<Candle>>,
     val currentLtp: BigDecimal,
-    val now: Instant = Instant.now()
+    val now: Instant = Instant.now(),
+    val instrumentType: com.example.domain.model.InstrumentType = com.example.domain.model.InstrumentType.STOCK
 )
 
 interface StrategyEvaluator {

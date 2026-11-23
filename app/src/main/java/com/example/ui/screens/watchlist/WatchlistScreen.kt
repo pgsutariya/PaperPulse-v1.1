@@ -541,11 +541,16 @@ private fun InstrumentRowCard(
                     SegmentBadge(segment = instrument.segment)
                     InstrumentTypeBadge(type = instrument.type)
                     FeedHealthBadge(badge = feedBadge)
-                    if (instrument.lotSize > 1) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ) {
                         Text(
                             text = "LOT ${instrument.lotSize}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                         )
                     }
                 }

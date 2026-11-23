@@ -138,19 +138,60 @@ private data class TopLevelDestination(
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    @Inject
+    lateinit var credentialsStore: com.example.data.feed.live.SecureBrokerCredentialsStore
+
+    @Inject
+    lateinit var marketDataRepository: com.example.data.repository.MarketDataRepository
+
+    private var brokerCallbackMessage by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureAppCheck(this, intent)
+        handleBrokerDeepLink(intent)
         enableEdgeToEdge()
         setContent {
             var isDarkTheme by rememberSaveable { mutableStateOf(true) }
             PaperPulseTheme(darkTheme = isDarkTheme) {
                 PaperPulseApp(
                     isDarkTheme = isDarkTheme,
-                    onToggleTheme = { isDarkTheme = !isDarkTheme }
+                    onToggleTheme = { isDarkTheme = !isDarkTheme },
+                    brokerCallbackMessage = brokerCallbackMessage,
+                    onConsumeBrokerMessage = { brokerCallbackMessage = null }
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleBrokerDeepLink(intent)
+    }
+
+    private fun handleBrokerDeepLink(intent: android.content.Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme != "paperpulse" || data.host != "broker-callback") return
+        val broker = data.getQueryParameter("broker")?.lowercase().orEmpty()
+        val authToken = data.getQueryParameter("auth_token")
+            ?: data.getQueryParameter("access_token")
+            ?: data.getQueryParameter("request_token")
+            ?: data.getQueryParameter("code")
+        val clientCode = data.getQueryParameter("client_code") ?: data.getQueryParameter("clientcode")
+        if (authToken.isNullOrBlank()) return
+
+        val current = credentialsStore.getCurrent()
+        val updated = when {
+            broker.contains("upstox") -> current.copy(upstoxAccessToken = authToken)
+            broker.contains("kite") || broker.contains("zerodha") -> current.copy(kiteAccessToken = authToken)
+            else -> current.copy(
+                angelOneClientCode = clientCode?.takeIf { it.isNotBlank() } ?: current.angelOneClientCode
+            )
+        }
+        credentialsStore.updateSettings(updated)
+        brokerCallbackMessage = "Broker login callback received (${broker.ifBlank { "Live Feed" }}) — token saved"
     }
 }
 
@@ -159,6 +200,8 @@ class MainActivity : ComponentActivity() {
 fun PaperPulseApp(
     isDarkTheme: Boolean,
     onToggleTheme: () -> Unit,
+    brokerCallbackMessage: String? = null,
+    onConsumeBrokerMessage: () -> Unit = {},
     shellViewModel: MainShellViewModel = hiltViewModel()
 ) {
     val navController = rememberNavController()
@@ -171,6 +214,13 @@ fun PaperPulseApp(
     LaunchedEffect(Unit) {
         shellViewModel.engineEvents.collect { msg ->
             launch { snackbarHostState.showSnackbar(msg) }
+        }
+    }
+
+    LaunchedEffect(brokerCallbackMessage) {
+        brokerCallbackMessage?.let { msg ->
+            snackbarHostState.showSnackbar(msg)
+            onConsumeBrokerMessage()
         }
     }
 

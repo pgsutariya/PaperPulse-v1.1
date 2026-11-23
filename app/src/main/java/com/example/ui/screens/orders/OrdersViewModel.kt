@@ -6,12 +6,16 @@ import com.example.data.repository.TradingRepository
 import com.example.domain.model.Order
 import com.example.domain.model.OrderStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.math.BigDecimal
 import javax.inject.Inject
 
 enum class OrderFilterTab(val label: String) {
@@ -35,6 +39,8 @@ class OrdersViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val selectedTab = MutableStateFlow(OrderFilterTab.ALL)
+    private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    val messages: SharedFlow<String> = _messages.asSharedFlow()
 
     val uiState: StateFlow<OrdersUiState> = combine(
         tradingRepository.orders,
@@ -66,6 +72,31 @@ class OrdersViewModel @Inject constructor(
     fun cancelOrder(orderId: String) {
         viewModelScope.launch {
             tradingRepository.cancelOrder(orderId)
+            _messages.emit("Order cancelled")
+        }
+    }
+
+    fun modifyPendingOrder(
+        orderId: String,
+        newQuantity: Int,
+        newLimitPrice: BigDecimal?,
+        newTriggerPrice: BigDecimal?,
+        newAttachedSlValue: BigDecimal?,
+        newAttachedTargetValue: BigDecimal?
+    ) {
+        viewModelScope.launch {
+            tradingRepository.modifyPendingOrder(
+                orderId = orderId,
+                newQuantity = newQuantity,
+                newLimitPrice = newLimitPrice,
+                newTriggerPrice = newTriggerPrice,
+                newAttachedSlValue = newAttachedSlValue,
+                newAttachedTargetValue = newAttachedTargetValue
+            ).onSuccess { msg ->
+                _messages.emit(msg)
+            }.onFailure { err ->
+                _messages.emit(err.message ?: "Failed to modify pending order")
+            }
         }
     }
 }

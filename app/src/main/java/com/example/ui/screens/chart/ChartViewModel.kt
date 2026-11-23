@@ -100,7 +100,11 @@ data class ChartUiState(
     val isLoadingHistory: Boolean = false,
     val historyNote: String = "",
     val accountCapital: BigDecimal = BigDecimal.ZERO,
-    val riskPercent: Double = 1.0
+    val riskPercent: Double = 1.0,
+    val isExpanded: Boolean = false,
+    val measureMode: Boolean = false,
+    val measureStartIndex: Int? = null,
+    val measureEndIndex: Int? = null
 )
 
 private data class ComputedFrame(
@@ -132,6 +136,7 @@ class ChartViewModel @Inject constructor(
     private val _loading = MutableStateFlow(false)
     private val _historyNote = MutableStateFlow("")
     private val _riskPercent = MutableStateFlow(1.0)
+    private val _interactive = MutableStateFlow(InteractiveChartState())
 
     private var refreshJob: Job? = null
 
@@ -139,8 +144,8 @@ class ChartViewModel @Inject constructor(
         ViewSettings(tf, htf, ov, pane, bars)
     }
 
-    private val statusFlow = combine(_pan, _loading, _historyNote, _riskPercent) { pan, loading, note, risk ->
-        StatusBits(pan, loading, note, risk)
+    private val statusFlow = combine(_pan, _loading, _historyNote, _riskPercent, _interactive) { pan, loading, note, risk, inter ->
+        StatusBits(pan, loading, note, risk, inter)
     }
 
     val uiState: StateFlow<ChartUiState> = combine(
@@ -165,7 +170,11 @@ class ChartViewModel @Inject constructor(
             isLoadingHistory = status.loading,
             historyNote = status.note,
             accountCapital = account.availableMargin,
-            riskPercent = status.risk
+            riskPercent = status.risk,
+            isExpanded = status.interactive.isExpanded,
+            measureMode = status.interactive.measureMode,
+            measureStartIndex = status.interactive.measureStartIndex,
+            measureEndIndex = status.interactive.measureEndIndex
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ChartUiState(symbol = symbol))
 
@@ -209,11 +218,48 @@ class ChartViewModel @Inject constructor(
     }
 
     fun zoom(zoomIn: Boolean) = _visibleBars.update { bars ->
-        (if (zoomIn) bars - 20 else bars + 20).coerceIn(30, 480)
+        (if (zoomIn) bars - 20 else bars + 20).coerceIn(25, 480)
+    }
+
+    fun zoomByScale(scaleFactor: Float) {
+        if (scaleFactor <= 0f || !scaleFactor.isFinite()) return
+        _visibleBars.update { bars ->
+            (bars / scaleFactor).toInt().coerceIn(25, 480)
+        }
+    }
+
+    fun panByBars(deltaBars: Int, totalCandles: Int) {
+        val maxPan = (totalCandles - _visibleBars.value).coerceAtLeast(0)
+        _pan.update { cur -> (cur + deltaBars).coerceIn(0, maxPan) }
     }
 
     fun setPan(bars: Int) {
         _pan.value = bars.coerceAtLeast(0)
+    }
+
+    fun toggleExpanded() {
+        _interactive.update { it.copy(isExpanded = !it.isExpanded) }
+    }
+
+    fun toggleMeasureMode() {
+        _interactive.update {
+            if (it.measureMode) it.copy(measureMode = false, measureStartIndex = null, measureEndIndex = null)
+            else it.copy(measureMode = true, measureStartIndex = null, measureEndIndex = null)
+        }
+    }
+
+    fun onMeasureTap(candleIndex: Int) {
+        _interactive.update { st ->
+            when {
+                st.measureStartIndex == null -> st.copy(measureStartIndex = candleIndex, measureEndIndex = candleIndex)
+                st.measureEndIndex == null || st.measureEndIndex == st.measureStartIndex -> st.copy(measureEndIndex = candleIndex)
+                else -> st.copy(measureStartIndex = candleIndex, measureEndIndex = candleIndex)
+            }
+        }
+    }
+
+    fun clearMeasure() {
+        _interactive.update { it.copy(measureStartIndex = null, measureEndIndex = null) }
     }
 
     fun setRiskPercent(percent: Double) {
@@ -334,11 +380,19 @@ class ChartViewModel @Inject constructor(
         val bars: Int
     )
 
+    private data class InteractiveChartState(
+        val isExpanded: Boolean = false,
+        val measureMode: Boolean = false,
+        val measureStartIndex: Int? = null,
+        val measureEndIndex: Int? = null
+    )
+
     private data class StatusBits(
         val pan: Int,
         val loading: Boolean,
         val note: String,
-        val risk: Double
+        val risk: Double,
+        val interactive: InteractiveChartState
     )
 
     companion object {

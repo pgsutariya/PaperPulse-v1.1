@@ -232,6 +232,155 @@ object RiskMath {
         }
     }
 
+    data class OrderChargeBreakdown(
+        val brokerage: BigDecimal = BigDecimal.ZERO,
+        val sttCtt: BigDecimal = BigDecimal.ZERO,
+        val exchangeCharges: BigDecimal = BigDecimal.ZERO,
+        val sebiCharges: BigDecimal = BigDecimal.ZERO,
+        val stampDuty: BigDecimal = BigDecimal.ZERO,
+        val gst: BigDecimal = BigDecimal.ZERO
+    ) {
+        val total: BigDecimal
+            get() = brokerage
+                .add(sttCtt)
+                .add(exchangeCharges)
+                .add(sebiCharges)
+                .add(stampDuty)
+                .add(gst)
+                .setScale(2, RoundingMode.HALF_UP)
+
+        operator fun plus(other: OrderChargeBreakdown): OrderChargeBreakdown = OrderChargeBreakdown(
+            brokerage = brokerage.add(other.brokerage).setScale(2, RoundingMode.HALF_UP),
+            sttCtt = sttCtt.add(other.sttCtt).setScale(2, RoundingMode.HALF_UP),
+            exchangeCharges = exchangeCharges.add(other.exchangeCharges).setScale(2, RoundingMode.HALF_UP),
+            sebiCharges = sebiCharges.add(other.sebiCharges).setScale(2, RoundingMode.HALF_UP),
+            stampDuty = stampDuty.add(other.stampDuty).setScale(2, RoundingMode.HALF_UP),
+            gst = gst.add(other.gst).setScale(2, RoundingMode.HALF_UP)
+        )
+    }
+
+    /**
+     * Standard Indian (NSE / BSE / MCX) & Crypto itemized order charges and statutory taxes
+     * for a single executed order leg.
+     */
+    fun calculateOrderCharges(
+        segment: MarketSegment,
+        instrumentType: com.example.domain.model.InstrumentType,
+        productType: com.example.domain.model.ProductType,
+        side: OrderSide,
+        turnover: BigDecimal,
+        flatBrokeragePerOrder: BigDecimal = BigDecimal("20.00"),
+        cryptoFeePercent: BigDecimal = BigDecimal("0.10")
+    ): OrderChargeBreakdown {
+        if (turnover <= BigDecimal.ZERO) return OrderChargeBreakdown()
+
+        if (segment == MarketSegment.CRYPTO) {
+            val fee = turnover.multiply(cryptoFeePercent)
+                .divide(HUNDRED, 2, RoundingMode.HALF_UP)
+                .max(BigDecimal("0.01"))
+            return OrderChargeBreakdown(brokerage = fee)
+        }
+
+        val isSell = side == OrderSide.SELL
+        val isBuy = side == OrderSide.BUY
+
+        val brokerage: BigDecimal = when {
+            segment == MarketSegment.MCX ->
+                turnover.multiply(BigDecimal("0.0003")).min(flatBrokeragePerOrder).setScale(2, RoundingMode.HALF_UP)
+            instrumentType == com.example.domain.model.InstrumentType.OPTIONS ->
+                flatBrokeragePerOrder.setScale(2, RoundingMode.HALF_UP)
+            instrumentType == com.example.domain.model.InstrumentType.FUTURES ->
+                turnover.multiply(BigDecimal("0.0003")).min(flatBrokeragePerOrder).setScale(2, RoundingMode.HALF_UP)
+            productType == com.example.domain.model.ProductType.CARRY_FORWARD ->
+                BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP) // Standard ₹0 equity delivery brokerage
+            else ->
+                turnover.multiply(BigDecimal("0.0003")).min(flatBrokeragePerOrder).setScale(2, RoundingMode.HALF_UP)
+        }
+
+        // STT / CTT
+        val sttCtt: BigDecimal = when {
+            segment == MarketSegment.MCX ->
+                if (isSell) turnover.multiply(BigDecimal("0.0001")).setScale(2, RoundingMode.HALF_UP) else BigDecimal.ZERO.setScale(2)
+            instrumentType == com.example.domain.model.InstrumentType.OPTIONS ->
+                if (isSell) turnover.multiply(BigDecimal("0.001")).setScale(2, RoundingMode.HALF_UP) else BigDecimal.ZERO.setScale(2)
+            instrumentType == com.example.domain.model.InstrumentType.FUTURES ->
+                if (isSell) turnover.multiply(BigDecimal("0.0002")).setScale(2, RoundingMode.HALF_UP) else BigDecimal.ZERO.setScale(2)
+            productType == com.example.domain.model.ProductType.CARRY_FORWARD ->
+                turnover.multiply(BigDecimal("0.001")).setScale(2, RoundingMode.HALF_UP)
+            else -> // Equity Intraday: 0.025% on sell side
+                if (isSell) turnover.multiply(BigDecimal("0.00025")).setScale(2, RoundingMode.HALF_UP) else BigDecimal.ZERO.setScale(2)
+        }
+
+        // Exchange Transaction Charges
+        val exchangeRate: BigDecimal = when {
+            segment == MarketSegment.MCX -> BigDecimal("0.000021")
+            instrumentType == com.example.domain.model.InstrumentType.OPTIONS -> BigDecimal("0.0003503")
+            instrumentType == com.example.domain.model.InstrumentType.FUTURES -> BigDecimal("0.0000173")
+            segment == MarketSegment.BSE -> BigDecimal("0.0000375")
+            else -> BigDecimal("0.0000297") // NSE Cash
+        }
+        val exchangeCharges = turnover.multiply(exchangeRate).setScale(2, RoundingMode.HALF_UP)
+
+        // SEBI Turnover Charges: ₹10 per crore (0.000001)
+        val sebiCharges = turnover.multiply(BigDecimal("0.000001")).setScale(2, RoundingMode.HALF_UP)
+
+        // Stamp Duty (buy side only)
+        val stampRate: BigDecimal = when {
+            !isBuy -> BigDecimal.ZERO
+            segment == MarketSegment.MCX -> BigDecimal("0.00002")
+            instrumentType == com.example.domain.model.InstrumentType.OPTIONS -> BigDecimal("0.00003")
+            instrumentType == com.example.domain.model.InstrumentType.FUTURES -> BigDecimal("0.00002")
+            productType == com.example.domain.model.ProductType.CARRY_FORWARD -> BigDecimal("0.00015")
+            else -> BigDecimal("0.00003") // Equity Intraday
+        }
+        val stampDuty = turnover.multiply(stampRate).setScale(2, RoundingMode.HALF_UP)
+
+        // GST: 18% on (Brokerage + Exchange Charges + SEBI Charges)
+        val gst = brokerage.add(exchangeCharges).add(sebiCharges)
+            .multiply(BigDecimal("0.18"))
+            .setScale(2, RoundingMode.HALF_UP)
+
+        return OrderChargeBreakdown(
+            brokerage = brokerage,
+            sttCtt = sttCtt,
+            exchangeCharges = exchangeCharges,
+            sebiCharges = sebiCharges,
+            stampDuty = stampDuty,
+            gst = gst
+        )
+    }
+
+    fun calculateRoundTripCharges(
+        segment: MarketSegment,
+        instrumentType: com.example.domain.model.InstrumentType,
+        productType: com.example.domain.model.ProductType,
+        entrySide: OrderSide,
+        entryTurnover: BigDecimal,
+        exitTurnover: BigDecimal,
+        flatBrokeragePerOrder: BigDecimal = BigDecimal("20.00"),
+        cryptoFeePercent: BigDecimal = BigDecimal("0.10")
+    ): OrderChargeBreakdown {
+        val exitSide = if (entrySide == OrderSide.BUY) OrderSide.SELL else OrderSide.BUY
+        val entryLeg = calculateOrderCharges(
+            segment, instrumentType, productType, entrySide, entryTurnover, flatBrokeragePerOrder, cryptoFeePercent
+        )
+        val exitLeg = calculateOrderCharges(
+            segment, instrumentType, productType, exitSide, exitTurnover, flatBrokeragePerOrder, cryptoFeePercent
+        )
+        return entryLeg + exitLeg
+    }
+
+    fun formatQtyWithLots(quantity: Int, lotSize: Int): String {
+        val safeLot = lotSize.coerceAtLeast(1)
+        return if (safeLot > 1) {
+            val lots = quantity / safeLot
+            val lotWord = if (lots == 1) "lot" else "lots"
+            "$quantity ($lots $lotWord × $safeLot)"
+        } else {
+            "$quantity (Lot 1)"
+        }
+    }
+
     fun formatPrice(price: BigDecimal, segment: MarketSegment): String {
         val decimals = when {
             segment == MarketSegment.CRYPTO && price < BigDecimal("10") -> 4

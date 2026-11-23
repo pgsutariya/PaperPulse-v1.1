@@ -152,7 +152,7 @@ data class Order(
     val validityState: ValidityState,
     val ocoGroupId: String?,
     val parentOrderId: String?,
-    val legRole: String?, // ENTRY, SL, TARGET
+    val legRole: String?, // ENTRY, SL, TARGET, EXIT, AVERAGE
     val attachedSlMode: RiskInputMode?,
     val attachedSlValue: BigDecimal?,
     val attachedTargetMode: RiskInputMode?,
@@ -165,7 +165,15 @@ data class Order(
     val attachedTrailingTargetValue: BigDecimal?,
     val statusReason: String?,
     val createdAtMillis: Long,
-    val updatedAtMillis: Long
+    val updatedAtMillis: Long,
+    val lotSize: Int = 1,
+    val brokerage: BigDecimal = BigDecimal.ZERO,
+    val sttCtt: BigDecimal = BigDecimal.ZERO,
+    val exchangeCharges: BigDecimal = BigDecimal.ZERO,
+    val sebiCharges: BigDecimal = BigDecimal.ZERO,
+    val stampDuty: BigDecimal = BigDecimal.ZERO,
+    val gst: BigDecimal = BigDecimal.ZERO,
+    val totalCharges: BigDecimal = BigDecimal.ZERO
 )
 
 data class Position(
@@ -197,7 +205,8 @@ data class Position(
     val gttDays: Int,
     val expiresAtMillis: Long,
     val openedAtMillis: Long,
-    val updatedAtMillis: Long
+    val updatedAtMillis: Long,
+    val lotSize: Int = 1
 )
 
 data class TradeJournalEntry(
@@ -216,7 +225,29 @@ data class TradeJournalEntry(
     val exitReason: ExitReason,
     val notes: String,
     val openedAtMillis: Long,
-    val closedAtMillis: Long
+    val closedAtMillis: Long,
+    val lotSize: Int = 1,
+    val brokerage: BigDecimal = BigDecimal.ZERO,
+    val sttCtt: BigDecimal = BigDecimal.ZERO,
+    val exchangeCharges: BigDecimal = BigDecimal.ZERO,
+    val sebiCharges: BigDecimal = BigDecimal.ZERO,
+    val stampDuty: BigDecimal = BigDecimal.ZERO,
+    val gst: BigDecimal = BigDecimal.ZERO
+)
+
+enum class CapitalTransactionType(val label: String) {
+    ADD("Add Funds"),
+    REDUCE("Withdraw Funds"),
+    RESET("Account Reset")
+}
+
+data class CapitalTransaction(
+    val id: String,
+    val type: CapitalTransactionType,
+    val amount: BigDecimal,
+    val balanceAfter: BigDecimal,
+    val note: String,
+    val timestampMillis: Long
 )
 
 data class AccountState(
@@ -233,7 +264,10 @@ data class TradingConfig(
     val tickIntervalMs: Long = 1000L,
     val brokerWsUrl: String = "",
     val brokerClientId: String = "",
-    val brokerFeedToken: String = ""
+    val brokerFeedToken: String = "",
+    val notificationsEnabled: Boolean = true,
+    val signalNotificationsEnabled: Boolean = true,
+    val useFreePublicMarketFeed: Boolean = true
 )
 
 data class OrderPlacementRequest(

@@ -232,6 +232,11 @@ fun InstrumentDetailScreen(
                             Text("H: ${RiskMath.formatPrice(inst.dayHigh, inst.segment)}", style = MonoPriceSmall, color = tradingColors.bullish)
                             Text("L: ${RiskMath.formatPrice(inst.dayLow, inst.segment)}", style = MonoPriceSmall, color = tradingColors.bearish)
                             Text("Lot: ${inst.lotSize} • Tick: ${inst.tickSize}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = "Session: ${MarketClock.sessionWindowLabel(inst.segment, inst.type)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
                         }
                     }
 
@@ -389,7 +394,7 @@ fun InstrumentDetailScreen(
                         FilterChip(
                             selected = draft.productType == ProductType.INTRADAY,
                             onClick = { viewModel.setProductType(ProductType.INTRADAY) },
-                            label = { Text("Intraday (15:15 IST)") },
+                            label = { Text("Intraday (${MarketClock.intradaySquareOffLabel(inst.segment, inst.type)})") },
                             modifier = Modifier.weight(1f).testTag("product_intraday")
                         )
                         FilterChip(
@@ -427,6 +432,15 @@ fun InstrumentDetailScreen(
                         ) {
                             Icon(Icons.Rounded.Add, contentDescription = "Increase quantity")
                         }
+                    }
+                    val parsedQty = draft.quantityText.toIntOrNull() ?: 0
+                    if (parsedQty > 0) {
+                        Text(
+                            text = "Order Quantity: ${RiskMath.formatQtyWithLots(parsedQty, inst.lotSize)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
 
                     // Conditional Limit / Trigger inputs
@@ -661,7 +675,7 @@ fun InstrumentDetailScreen(
                     when (draft.validityType) {
                         ValidityType.DAY -> {
                             Text(
-                                text = "Valid for current session only. Untriggered legs auto-cancel at 15:15 IST square-off.",
+                                text = "Valid for current session only. Untriggered legs auto-cancel at ${MarketClock.intradaySquareOffLabel(inst.segment, inst.type)} square-off.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -740,6 +754,27 @@ fun InstrumentDetailScreen(
                             )
                         }
                     }
+                    val estCharges = remember(inst.segment, inst.type, draft.productType, draft.side, notional, state.config) {
+                        RiskMath.calculateOrderCharges(
+                            segment = inst.segment,
+                            instrumentType = inst.type,
+                            productType = draft.productType,
+                            side = draft.side,
+                            turnover = notional,
+                            flatBrokeragePerOrder = state.config.flatBrokerage,
+                            cryptoFeePercent = state.config.cryptoFeePercent
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Est. Charges & Taxes (This Leg)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(RiskMath.formatPrice(estCharges.total, inst.segment), style = MonoPriceSmall, color = tradingColors.amber)
+                    }
+                    val estTaxPart = estCharges.sttCtt.add(estCharges.exchangeCharges).add(estCharges.sebiCharges).add(estCharges.stampDuty).add(estCharges.gst)
+                    Text(
+                        text = "Brok ${RiskMath.formatPrice(estCharges.brokerage, inst.segment)} • STT/CTT ${RiskMath.formatPrice(estCharges.sttCtt, inst.segment)} • Exch/SEBI/Stamp/GST ${RiskMath.formatPrice(estTaxPart.subtract(estCharges.sttCtt), inst.segment)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Simulated Slippage", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("${state.config.slippageBps} bps", style = MonoPriceSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

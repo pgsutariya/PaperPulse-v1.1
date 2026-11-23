@@ -1,6 +1,8 @@
 package com.example.ui.screens.chart
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -10,6 +12,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -23,11 +26,14 @@ import com.example.domain.analysis.LiquiditySide
 import com.example.domain.analysis.LiquidityStatus
 import com.example.domain.analysis.SetupState
 import com.example.domain.analysis.ZoneKind
+import com.example.domain.engine.MarketClock
 import com.example.domain.signal.SignalDirection
+import java.time.Duration
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Colours used by the chart canvases (resolved from the theme by the caller). */
 data class ChartPalette(
@@ -135,14 +141,52 @@ fun PriceChartCanvas(
     window: ChartWindow,
     focusSetup: EmaCrossSetup?,
     palette: ChartPalette,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    measureMode: Boolean = false,
+    measureStartIndex: Int? = null,
+    measureEndIndex: Int? = null,
+    onMeasureTap: (Int) -> Unit = {},
+    onPinchZoom: (Float) -> Unit = {},
+    onPanBars: (Int) -> Unit = {}
 ) {
     val tm = rememberTextMeasurer()
-    Canvas(modifier = modifier) {
+    val interactiveModifier = modifier
+        .pointerInput(measureMode, window.start, window.end) {
+            if (measureMode) {
+                detectTapGestures { offset ->
+                    val axisW = AXIS_DP.dp.toPx()
+                    val chartW = (size.width - axisW).coerceAtLeast(1f)
+                    val barW = chartW / window.count
+                    val idx = (window.start + (offset.x / barW).toInt())
+                        .coerceIn(window.start, (window.end - 1).coerceAtLeast(window.start))
+                    onMeasureTap(idx)
+                }
+            }
+        }
+        .pointerInput(measureMode, window.count) {
+            if (!measureMode) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    if (abs(zoom - 1f) > 0.03f) {
+                        onPinchZoom(zoom)
+                    }
+                    val axisW = AXIS_DP.dp.toPx()
+                    val chartW = (size.width - axisW).coerceAtLeast(1f)
+                    val barW = (chartW / window.count).coerceAtLeast(1f)
+                    val barsShift = (pan.x / barW).roundToInt()
+                    if (barsShift != 0) {
+                        onPanBars(barsShift)
+                    }
+                }
+            }
+        }
+
+    Canvas(modifier = interactiveModifier) {
         val candles = analysis.candles
         if (candles.isEmpty() || window.end <= window.start) return@Canvas
         val axisW = AXIS_DP.dp.toPx()
+        val timeAxisH = 18.dp.toPx()
         val chartW = size.width - axisW
+        val chartH = (size.height - timeAxisH).coerceAtLeast(40f)
         val barW = chartW / window.count
 
         var hi = Double.NEGATIVE_INFINITY
@@ -157,7 +201,7 @@ fun PriceChartCanvas(
         lo -= pad
         val span = (hi - lo).coerceAtLeast(1e-9)
         val xOf: (Int) -> Float = { i -> ((i - window.start) + 0.5f) * barW }
-        val yOf: (Double) -> Float = { p -> ((hi - p) / span * size.height).toFloat() }
+        val yOf: (Double) -> Float = { p -> ((hi - p) / span * chartH).toFloat() }
 
         // Grid + price axis
         for (k in 0..4) {
@@ -165,6 +209,24 @@ fun PriceChartCanvas(
             val yy = yOf(p)
             hLine(yy, 0f, chartW, palette.grid, 0.8f)
             safeText(tm, fmtPrice(p), chartW + 4f, yy - 7f, palette.muted)
+        }
+
+        // TradingView-style IST Time Axis (bottom strip + subtle vertical grid)
+        drawLine(palette.grid, Offset(0f, chartH), Offset(size.width, chartH), strokeWidth = 1f)
+        val timeTicks = 5
+        val isIntraday = analysis.timeframe.isIntraday
+        for (t in 0 until timeTicks) {
+            val frac = (t + 0.5f) / timeTicks
+            val idx = (window.start + (frac * window.count).toInt()).coerceIn(window.start, window.end - 1)
+            val tx = xOf(idx)
+            drawLine(palette.grid.copy(alpha = 0.45f), Offset(tx, 0f), Offset(tx, chartH), strokeWidth = 0.7f)
+            val tsMillis = candles[idx].timestamp.toEpochMilli()
+            val label = if (isIntraday) {
+                MarketClock.formatIstShortTime(tsMillis)
+            } else {
+                MarketClock.formatIstDate(tsMillis).take(6)
+            }
+            safeText(tm, label, (tx - 16f).coerceIn(2f, chartW - 36f), chartH + 3f, palette.muted, 8)
         }
 
         // Premium / discount shading of the dealing range
@@ -396,10 +458,50 @@ fun PriceChartCanvas(
 
         // Last price marker
         val last = candles[window.end - 1].close
-        val lastY = yOf(last)
+        val lastY = yOf(last).coerceIn(8f, chartH - 8f)
         hLine(lastY, 0f, chartW, palette.primary.copy(alpha = 0.6f), 1f, dashed = true)
         drawRect(palette.primary, Offset(chartW, lastY - 8f), Size(axisW, 16f))
         safeText(tm, fmtPrice(last), chartW + 3f, lastY - 7f, Color.White)
+
+        // TradingView-style Time & Price Range Measure Tool overlay
+        if (measureStartIndex != null && measureStartIndex in candles.indices) {
+            val endIdx = (measureEndIndex ?: measureStartIndex).coerceIn(candles.indices)
+            val i1 = min(measureStartIndex, endIdx)
+            val i2 = max(measureStartIndex, endIdx)
+            val c1 = candles[measureStartIndex]
+            val c2 = candles[endIdx]
+            val x1 = xOf(i1).coerceIn(0f, chartW)
+            val x2 = xOf(i2).coerceIn(0f, chartW)
+            val y1 = yOf(c1.close).coerceIn(0f, chartH)
+            val y2 = yOf(c2.close).coerceIn(0f, chartH)
+            val priceDelta = c2.close - c1.close
+            val pctDelta = if (c1.close != 0.0) (priceDelta / c1.close) * 100.0 else 0.0
+            val rangeColor = if (priceDelta >= 0) palette.bull else palette.bear
+
+            val left = min(x1, x2)
+            val top = min(y1, y2)
+            val rectW = abs(x2 - x1).coerceAtLeast(4f)
+            val rectH = abs(y2 - y1).coerceAtLeast(4f)
+
+            drawRect(rangeColor.copy(alpha = 0.16f), Offset(left, top), Size(rectW, rectH))
+            drawRect(rangeColor, Offset(left, top), Size(rectW, rectH), style = Stroke(1.5f))
+            drawCircle(rangeColor, radius = 4.5f, center = Offset(xOf(measureStartIndex).coerceIn(0f, chartW), y1))
+            drawCircle(rangeColor, radius = 4.5f, center = Offset(xOf(endIdx).coerceIn(0f, chartW), y2))
+
+            val barsCount = abs(endIdx - measureStartIndex)
+            val durMins = abs(Duration.between(c1.timestamp, c2.timestamp).toMinutes())
+            val durLabel = when {
+                durMins >= 1440 -> "${durMins / 1440}d ${(durMins % 1440) / 60}h"
+                durMins >= 60 -> "${durMins / 60}h ${durMins % 60}m"
+                else -> "${durMins}m"
+            }
+            val sign = if (priceDelta >= 0) "+" else ""
+            val summary = "$sign${fmtPrice(priceDelta)} ($sign${String.format(Locale.US, "%.2f", pctDelta)}%) • $barsCount bars • $durLabel"
+            val labelX = left.coerceIn(6f, (chartW - 190f).coerceAtLeast(6f))
+            val labelY = (top - 22f).coerceIn(4f, (chartH - 22f).coerceAtLeast(4f))
+            drawRect(rangeColor, Offset(labelX - 4f, labelY - 2f), Size(195f.coerceAtMost(chartW - labelX + 2f), 18f))
+            safeText(tm, summary, labelX, labelY + 1f, Color.White, 8)
+        }
     }
 }
 

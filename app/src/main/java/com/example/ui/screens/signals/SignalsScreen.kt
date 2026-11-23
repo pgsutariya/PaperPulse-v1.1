@@ -1,5 +1,9 @@
 package com.example.ui.screens.signals
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -26,6 +30,9 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -39,6 +46,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -56,11 +64,14 @@ import com.example.data.signal.SignalUiItem
 import com.example.domain.analysis.RiskRewardLadder
 import com.example.domain.engine.MarketClock
 import com.example.domain.engine.RiskMath
-import com.example.domain.model.MarketSegment
 import com.example.domain.signal.AiSignalSecondOpinion
 import com.example.domain.signal.AiUiState
+import com.example.domain.signal.SignalAccuracyStats
+import com.example.domain.signal.SignalAssetCategory
 import com.example.domain.signal.SignalConfidence
 import com.example.domain.signal.SignalDirection
+import com.example.domain.signal.SignalOutcome
+import com.example.domain.signal.SignalRecord
 import com.example.domain.signal.SignalStrategy
 import com.example.domain.signal.TradeSignal
 import com.example.ui.components.AiSecondOpinionCard
@@ -84,13 +95,19 @@ fun SignalsScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tradingColors = LocalTradingColors.current
 
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        viewModel.toggleSignalNotifications(granted)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // Advisory header + scan button
+        // Advisory header + notification toggle + scan button
         Surface(
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -120,13 +137,29 @@ fun SignalsScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Advisory only • Confirm manually before placing paper orders",
+                            text = "Auto-removes hit SL/Target • Tracks Accuracy & BTST/STBT",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
+                }
+                IconButton(
+                    onClick = {
+                        if (!state.signalNotificationsEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            viewModel.toggleSignalNotifications(!state.signalNotificationsEnabled)
+                        }
+                    },
+                    modifier = Modifier.testTag("signals_notif_toggle")
+                ) {
+                    Icon(
+                        imageVector = if (state.signalNotificationsEnabled) Icons.Rounded.NotificationsActive else Icons.Rounded.NotificationsOff,
+                        contentDescription = if (state.signalNotificationsEnabled) "Disable signal notifications" else "Enable signal notifications",
+                        tint = if (state.signalNotificationsEnabled) tradingColors.bullish else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 IconButton(
                     onClick = viewModel::refreshSignals,
@@ -141,18 +174,22 @@ fun SignalsScreen(
             }
         }
 
-        // Active / Saved tab row
+        // Active / Saved / Performance tab row
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             SignalsTab.entries.forEach { tab ->
-                val count = if (tab == SignalsTab.ACTIVE) state.activeCount else state.savedCount
+                val count = when (tab) {
+                    SignalsTab.ACTIVE -> state.activeCount
+                    SignalsTab.SAVED -> state.savedCount
+                    SignalsTab.HISTORY -> state.historyCount
+                }
                 val selected = state.filters.tab == tab
                 FilterChip(
                     selected = selected,
                     onClick = { viewModel.setTab(tab) },
-                    label = { Text("${tab.label} ($count)") },
+                    label = { Text("${tab.label} ($count)", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     modifier = Modifier
                         .weight(1f)
                         .testTag("signals_tab_${tab.name.lowercase()}"),
@@ -164,7 +201,7 @@ fun SignalsScreen(
             }
         }
 
-        // Multi-dimension filter strip (Strategy, Direction, Segment, Confidence)
+        // Asset-Class Filter Row (All, Stock, Index, F&O, MCX, Crypto, Crypto F&O, BTST / STBT)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -172,25 +209,33 @@ fun SignalsScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            SignalStrategy.entries.forEach { strategy ->
+            SignalAssetCategory.entries.forEach { cat ->
                 FilterChip(
-                    selected = state.filters.strategy == strategy,
-                    onClick = { viewModel.setStrategyFilter(strategy) },
-                    label = { Text(strategy.shortLabel) }
+                    selected = state.filters.assetCategory == cat,
+                    onClick = { viewModel.setAssetCategory(cat) },
+                    label = { Text(cat.label) },
+                    modifier = Modifier.testTag("signal_cat_${cat.name.lowercase()}"),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                    )
                 )
             }
+        }
+
+        // Secondary Filter Strip (Direction, Strategy, Confidence)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             SignalDirection.entries.forEach { dir ->
                 FilterChip(
                     selected = state.filters.direction == dir,
                     onClick = { viewModel.setDirectionFilter(dir) },
                     label = { Text(dir.name) }
-                )
-            }
-            MarketSegment.entries.forEach { seg ->
-                FilterChip(
-                    selected = state.filters.segment == seg,
-                    onClick = { viewModel.setSegmentFilter(seg) },
-                    label = { Text(seg.label) }
                 )
             }
             SignalConfidence.entries.forEach { conf ->
@@ -200,9 +245,48 @@ fun SignalsScreen(
                     label = { Text("${conf.label} Conf") }
                 )
             }
+            SignalStrategy.entries.forEach { strategy ->
+                FilterChip(
+                    selected = state.filters.strategy == strategy,
+                    onClick = { viewModel.setStrategyFilter(strategy) },
+                    label = { Text(strategy.shortLabel) }
+                )
+            }
         }
 
-        if (state.items.isEmpty()) {
+        if (state.filters.tab == SignalsTab.HISTORY) {
+            SignalAccuracySummaryCard(
+                stats = state.accuracyStats,
+                onClearHistory = viewModel::clearSignalHistory
+            )
+
+            if (state.historyRecords.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    EmptyStatePanel(
+                        icon = Icons.Rounded.Bolt,
+                        title = "No Resolved Signal Records Yet",
+                        subtitle = "When active signals hit Target 1, Target 2, Stop Loss, or Expire, they are removed from Active and tracked here for live accuracy."
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentPadding = PaddingValues(bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(state.historyRecords, key = { it.id }) { rec ->
+                        SignalRecordCard(record = rec)
+                    }
+                }
+            }
+        } else if (state.items.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -211,8 +295,8 @@ fun SignalsScreen(
             ) {
                 EmptyStatePanel(
                     icon = Icons.Rounded.Bolt,
-                    title = if (state.filters.tab == SignalsTab.SAVED) "No Saved Signals" else "No Matching Signals Yet",
-                    subtitle = "Tap Refresh or wait for completed candles across NSE, BSE, MCX, and Crypto."
+                    title = if (state.filters.tab == SignalsTab.SAVED) "No Saved Signals" else "No Matching Active Signals",
+                    subtitle = "Signals auto-archive once SL or Target hits to reduce noise. Tap Refresh or switch filters to inspect more markets."
                 )
             }
         } else {
@@ -261,6 +345,118 @@ fun SignalsScreen(
                     viewModel.selectSignal(null)
                     onOpenChart(item.signal.symbol, item.signal.timeframe.name)
                 }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SignalAccuracySummaryCard(
+    stats: SignalAccuracyStats,
+    onClearHistory: () -> Unit
+) {
+    val tradingColors = LocalTradingColors.current
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, tradingColors.border),
+        modifier = Modifier.fillMaxWidth().testTag("signal_accuracy_card")
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("SIGNAL PERFORMANCE & ACCURACY", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = "${String.format(Locale.US, "%.1f", stats.accuracyPercent)}% Win Accuracy (${stats.wins}/${stats.decidedCount} decided)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (stats.accuracyPercent >= 50.0) tradingColors.bullish else tradingColors.amber
+                    )
+                }
+                if (stats.totalResolved > 0) {
+                    TextButton(onClick = onClearHistory, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                        Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text("Clear", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                PriceMetricCell("TARGET 1", stats.t1Hits.toString(), tradingColors.bullish)
+                PriceMetricCell("TARGET 2", stats.t2Hits.toString(), tradingColors.bullish)
+                PriceMetricCell("STOP LOSS", stats.slHits.toString(), tradingColors.bearish)
+                PriceMetricCell("EXPIRED", stats.expiredCount.toString(), MaterialTheme.colorScheme.onSurfaceVariant)
+                PriceMetricCell("TOTAL", stats.totalResolved.toString(), MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SignalRecordCard(record: SignalRecord) {
+    val tradingColors = LocalTradingColors.current
+    val (outcomeBg, outcomeFg) = when (record.outcome) {
+        SignalOutcome.HIT_T1, SignalOutcome.HIT_T2 -> tradingColors.bullishContainer to tradingColors.bullish
+        SignalOutcome.HIT_SL -> tradingColors.bearishContainer to tradingColors.bearish
+        SignalOutcome.EXPIRED -> MaterialTheme.colorScheme.surfaceContainerHigh to MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val pnlSign = if (record.pnlPercent >= 0) "+" else ""
+    val pnlColor = if (record.pnlPercent >= 0) tradingColors.bullish else tradingColors.bearish
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().testTag("signal_record_${record.symbol}"),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, tradingColors.border)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(record.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    SegmentBadge(record.segment)
+                    Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                        Text(
+                            "${record.strategy.shortLabel} • ${record.timeframe.label}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Surface(shape = RoundedCornerShape(6.dp), color = outcomeBg) {
+                    Text(
+                        text = record.outcome.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = outcomeFg,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                PriceMetricCell("ENTRY", RiskMath.formatPrice(record.entryPrice, record.segment), MaterialTheme.colorScheme.onSurface)
+                PriceMetricCell("RESOLVED", RiskMath.formatPrice(record.resolvedPrice, record.segment), outcomeFg)
+                PriceMetricCell("T1 / T2", "${RiskMath.formatPrice(record.target1, record.segment)} / ${RiskMath.formatPrice(record.target2, record.segment)}", tradingColors.bullish)
+                PriceMetricCell("RESULT", "$pnlSign${String.format(Locale.US, "%.2f", record.pnlPercent)}%", pnlColor)
+            }
+            Text(
+                text = "${record.direction.name} • Resolved ${MarketClock.formatIstDate(record.resolvedAtMillis)} ${MarketClock.formatIstTime(record.resolvedAtMillis)} IST",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -317,12 +513,12 @@ private fun SignalCard(
                     SegmentBadge(sig.segment)
                     Surface(
                         shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer
+                        color = if (sig.strategy == SignalStrategy.BTST_STBT) tradingColors.violetContainer else MaterialTheme.colorScheme.primaryContainer
                     ) {
                         Text(
                             text = "${sig.strategy.shortLabel} • ${sig.timeframe.label}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = if (sig.strategy == SignalStrategy.BTST_STBT) tradingColors.violet else MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
@@ -332,7 +528,9 @@ private fun SignalCard(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Surface(shape = RoundedCornerShape(6.dp), color = dirBg) {
                         Text(
-                            text = sig.direction.name,
+                            text = if (sig.strategy == SignalStrategy.BTST_STBT) {
+                                if (isLong) "BTST" else "STBT"
+                            } else sig.direction.name,
                             style = MaterialTheme.typography.labelSmall,
                             color = dirColor,
                             fontWeight = FontWeight.Bold,
@@ -374,7 +572,6 @@ private fun SignalCard(
                 PriceMetricCell("R:R", String.format(Locale.US, "1:%.1f", sig.riskRewardRatio), MaterialTheme.colorScheme.primary)
             }
 
-            // Reason chips (first 2 concise triggers)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()

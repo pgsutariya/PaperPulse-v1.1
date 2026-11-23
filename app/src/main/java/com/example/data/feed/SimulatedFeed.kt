@@ -1,5 +1,7 @@
 package com.example.data.feed
 
+import com.example.data.repository.TradingPreferencesRepository
+import com.example.domain.engine.MarketClock
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.FeedConnectionState
 import com.example.domain.model.FeedSourceType
@@ -8,6 +10,7 @@ import com.example.domain.model.InstrumentType
 import com.example.domain.model.MarketSegment
 import com.example.domain.model.PriceTick
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -25,9 +28,21 @@ import javax.inject.Singleton
 import kotlin.random.Random
 
 @Singleton
-class SimulatedFeed @Inject constructor(
-    private val appScope: CoroutineScope
+class SimulatedFeed private constructor(
+    private val appScope: CoroutineScope,
+    private val publicQuotePoller: PublicMarketQuotePoller?,
+    private val prefsRepository: TradingPreferencesRepository?,
+    @Suppress("UNUSED_PARAMETER") internalTag: Boolean
 ) : PriceFeed {
+
+    @Inject
+    constructor(
+        appScope: CoroutineScope,
+        publicQuotePoller: PublicMarketQuotePoller,
+        prefsRepository: TradingPreferencesRepository
+    ) : this(appScope, publicQuotePoller, prefsRepository, true)
+
+    constructor(appScope: CoroutineScope) : this(appScope, null, null, false)
 
     private val _ticks = MutableSharedFlow<PriceTick>(extraBufferCapacity = 128)
     override val ticks: Flow<PriceTick> = _ticks.asSharedFlow()
@@ -39,11 +54,17 @@ class SimulatedFeed @Inject constructor(
 
     private val universe = ConcurrentHashMap<String, Instrument>()
     private val currentPrices = ConcurrentHashMap<String, BigDecimal>()
+    private val publicAnchoredPrices = ConcurrentHashMap<String, BigDecimal>()
     private val cumulativeVolume = ConcurrentHashMap<String, Long>()
     private var tickerJob: Job? = null
+    private var publicPollerJob: Job? = null
 
     @Volatile
     var tickIntervalMs: Long = 1000L
+
+    @Volatile
+    var publicLiveQuoteCount: Int = 0
+        private set
 
     override fun setUniverse(instruments: List<Instrument>) {
         instruments.forEach { inst ->
@@ -56,31 +77,80 @@ class SimulatedFeed @Inject constructor(
         if (tickerJob?.isActive == true) return
         _connectionState.value = FeedConnectionState.Connected(
             source = FeedSourceType.SIMULATED,
-            detail = "1s GBM Simulator Active"
+            detail = if (publicQuotePoller != null) "Public Market API + Simulator Active" else "1s GBM Simulator Active"
         )
+
+        // Background poller for free public NSE / BSE / MCX / Crypto real market quotes
+        if (publicQuotePoller != null && publicPollerJob?.isActive != true) {
+            publicPollerJob = appScope.launch(Dispatchers.IO) {
+                while (isActive) {
+                    val usePublic = runCatching { prefsRepository?.getConfig()?.useFreePublicMarketFeed ?: true }
+                        .getOrDefault(true)
+                    if (usePublic && universe.isNotEmpty()) {
+                        val quotes = runCatching {
+                            publicQuotePoller.fetchQuotes(universe.values.toList())
+                        }.getOrDefault(emptyMap())
+                        if (quotes.isNotEmpty()) {
+                            publicLiveQuoteCount = quotes.size
+                            val now = System.currentTimeMillis()
+                            quotes.values.forEach { q ->
+                                currentPrices[q.symbol] = q.ltp
+                                publicAnchoredPrices[q.symbol] = q.ltp
+                                _ticks.tryEmit(
+                                    PriceTick(
+                                        symbol = q.symbol,
+                                        ltp = q.ltp,
+                                        timestampMillis = now,
+                                        previousClose = q.previousClose,
+                                        dayHigh = q.dayHigh,
+                                        dayLow = q.dayLow,
+                                        volume = q.volume
+                                    )
+                                )
+                            }
+                            _connectionState.value = FeedConnectionState.Connected(
+                                source = FeedSourceType.SIMULATED,
+                                detail = "Live Public Quotes (${quotes.size} NSE/BSE/MCX/Crypto)"
+                            )
+                        }
+                    }
+                    delay(15_000L)
+                }
+            }
+        }
+
         tickerJob = appScope.launch {
             while (isActive) {
                 val now = System.currentTimeMillis()
                 universe.values.forEach { inst ->
                     val current = currentPrices[inst.symbol] ?: inst.ltp
-                    val volatility = when {
+                    val isSessionOpen = MarketClock.isMarketSessionOpen(inst.segment, inst.type, now)
+                    val anchored = publicAnchoredPrices[inst.symbol]
+                    // Keep smoother, lower-amplitude ticks when anchored to real public quotes or after India close
+                    val baseVol = when {
                         inst.type == InstrumentType.OPTIONS -> 0.0045
                         inst.segment == MarketSegment.CRYPTO -> 0.0028
                         inst.segment == MarketSegment.MCX -> 0.0018
                         else -> 0.0014
                     }
-                    // Slight mean reversion toward previousClose mixed with Gaussian shock
+                    val volatility = when {
+                        anchored != null && !isSessionOpen -> baseVol * 0.15
+                        anchored != null -> baseVol * 0.35
+                        else -> baseVol
+                    }
                     val shock = Random.nextDouble(-1.0, 1.0) * volatility
-                    val nextRaw = current.toDouble() * (1.0 + shock)
+                    // Gently mean-revert toward real public anchor if present so paper prices stay true to real market
+                    val meanRevert = if (anchored != null && anchored > BigDecimal.ZERO) {
+                        ((anchored.toDouble() - current.toDouble()) / anchored.toDouble()) * 0.15
+                    } else 0.0
+                    val nextRaw = current.toDouble() * (1.0 + shock + meanRevert)
                     val rounded = RiskMath.roundToTick(
                         BigDecimal.valueOf(nextRaw).max(inst.tickSize),
                         inst.tickSize
                     )
                     currentPrices[inst.symbol] = rounded
-                    // Synthetic participation so volume-based tools (VWAP, Volume MA, OBV, Elder Force,
-                    // delta, volume profile) have something meaningful to work with on the simulator.
                     val perSecond = (inst.volume.coerceAtLeast(22_500L).toDouble() / 22_500.0)
-                    val activity = 0.4 + Random.nextDouble() * 1.2 + kotlin.math.abs(shock) / volatility
+                    val activity = 0.4 + Random.nextDouble() * 1.2 + kotlin.math.abs(shock) / baseVol
                     val qty = (perSecond * (tickIntervalMs / 1000.0) * activity).coerceAtLeast(1.0).toLong()
                     val cumulative = (cumulativeVolume[inst.symbol] ?: inst.volume.coerceAtLeast(0L)) + qty
                     cumulativeVolume[inst.symbol] = cumulative
@@ -104,6 +174,8 @@ class SimulatedFeed @Inject constructor(
     override fun stop() {
         tickerJob?.cancel()
         tickerJob = null
+        publicPollerJob?.cancel()
+        publicPollerJob = null
         _connectionState.value = FeedConnectionState.Disconnected(
             source = FeedSourceType.SIMULATED,
             reason = "Feed paused"

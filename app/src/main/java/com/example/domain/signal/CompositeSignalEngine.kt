@@ -1,6 +1,7 @@
 package com.example.domain.signal
 
 import com.example.domain.analysis.TradingStyle
+import com.example.domain.signal.evaluators.BtstStbtEvaluator
 import com.example.domain.signal.evaluators.EmaCrossRetestEvaluator
 import com.example.domain.signal.evaluators.IntradayOrbVwapEvaluator
 import com.example.domain.signal.evaluators.PivotBreakoutEvaluator
@@ -28,7 +29,8 @@ class CompositeSignalEngine(
             IntradayOrbVwapEvaluator(),
             SwingHeikinAshiEvaluator(),
             ReversalConfluenceEvaluator(),
-            SwigHybridEvaluator()
+            SwigHybridEvaluator(),
+            BtstStbtEvaluator()
         ) + TradingStyle.entries.map { EmaCrossRetestEvaluator(it) } + listOf(
             SmcIctEvaluator(),
             TrapReversalEvaluator(),

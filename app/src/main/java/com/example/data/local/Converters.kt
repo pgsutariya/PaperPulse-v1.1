@@ -97,4 +97,12 @@ class Converters {
 
     @TypeConverter fun fromSignalConfidence(v: SignalConfidence): String = v.name
     @TypeConverter fun toSignalConfidence(v: String): SignalConfidence = SignalConfidence.valueOf(v)
+
+    @TypeConverter fun fromCapitalTransactionType(v: com.example.domain.model.CapitalTransactionType): String = v.name
+    @TypeConverter fun toCapitalTransactionType(v: String): com.example.domain.model.CapitalTransactionType =
+        com.example.domain.model.CapitalTransactionType.valueOf(v)
+
+    @TypeConverter fun fromSignalOutcome(v: com.example.domain.signal.SignalOutcome): String = v.name
+    @TypeConverter fun toSignalOutcome(v: String): com.example.domain.signal.SignalOutcome =
+        com.example.domain.signal.SignalOutcome.valueOf(v)
 }

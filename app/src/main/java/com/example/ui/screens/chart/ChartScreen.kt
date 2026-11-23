@@ -17,8 +17,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CloseFullscreen
+import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material.icons.rounded.Straighten
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -112,11 +115,36 @@ fun ChartScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.zoom(zoomIn = true) }) {
+                    IconButton(
+                        onClick = viewModel::toggleMeasureMode,
+                        modifier = Modifier.testTag("chart_measure_toggle")
+                    ) {
+                        Icon(
+                            Icons.Rounded.Straighten,
+                            contentDescription = "Measure time & price range",
+                            tint = if (state.measureMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    IconButton(
+                        onClick = { viewModel.zoom(zoomIn = true) },
+                        modifier = Modifier.testTag("chart_zoom_in")
+                    ) {
                         Icon(Icons.Rounded.Add, contentDescription = "Zoom in")
                     }
-                    IconButton(onClick = { viewModel.zoom(zoomIn = false) }) {
+                    IconButton(
+                        onClick = { viewModel.zoom(zoomIn = false) },
+                        modifier = Modifier.testTag("chart_zoom_out")
+                    ) {
                         Icon(Icons.Rounded.Remove, contentDescription = "Zoom out")
+                    }
+                    IconButton(
+                        onClick = viewModel::toggleExpanded,
+                        modifier = Modifier.testTag("chart_expand_toggle")
+                    ) {
+                        Icon(
+                            if (state.isExpanded) Icons.Rounded.CloseFullscreen else Icons.Rounded.OpenInFull,
+                            contentDescription = if (state.isExpanded) "Collapse chart" else "Expand chart fullscreen"
+                        )
                     }
                     IconButton(onClick = viewModel::reloadHistory, modifier = Modifier.testTag("chart_reload_history")) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "Reload history")
@@ -126,6 +154,82 @@ fun ChartScreen(
             )
         }
     ) { padding ->
+        if (state.isExpanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                ChipRow {
+                    Timeframe.entries.forEach { tf ->
+                        FilterChip(
+                            selected = state.timeframe == tf,
+                            onClick = { viewModel.setTimeframe(tf) },
+                            label = { Text(tf.label) }
+                        )
+                    }
+                }
+                if (state.measureMode) {
+                    Text(
+                        "Measure Mode ON — tap two candles on chart for Δ Price, Δ %, Bars & Time Range",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                val analysis = state.analysis
+                if (analysis == null) {
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                        Text("Building candles…")
+                    }
+                } else {
+                    val window = ChartWindow.of(analysis.candles.size, state.visibleBars, state.panBars)
+                    val focus = analysis.setups.firstOrNull { r ->
+                        val s = r.latest
+                        s != null && s.state != SetupState.INVALIDATED && s.state != SetupState.EXPIRED
+                    }?.latest
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, colors.border),
+                        modifier = Modifier.fillMaxWidth().weight(1f)
+                    ) {
+                        Column(Modifier.fillMaxSize().padding(6.dp)) {
+                            PriceChartCanvas(
+                                analysis = analysis,
+                                overlays = state.overlays,
+                                window = window,
+                                focusSetup = focus,
+                                palette = palette,
+                                measureMode = state.measureMode,
+                                measureStartIndex = state.measureStartIndex,
+                                measureEndIndex = state.measureEndIndex,
+                                onMeasureTap = viewModel::onMeasureTap,
+                                onPinchZoom = viewModel::zoomByScale,
+                                onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(0.76f)
+                                    .testTag("chart_price_canvas")
+                            )
+                            LowerPaneCanvas(
+                                analysis = analysis,
+                                pane = state.lowerPane,
+                                window = window,
+                                showDivergences = state.overlays.divergences,
+                                palette = palette,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(0.24f)
+                            )
+                        }
+                    }
+                }
+            }
+            return@Scaffold
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -175,6 +279,20 @@ fun ChartScreen(
             if (state.historyNote.isNotBlank()) {
                 Text(state.historyNote, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            if (state.measureMode) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Time & Price Measure Tool active — tap two candles on the chart to inspect Δ Price, Δ %, Bars & Duration.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
 
             val analysis = state.analysis
             if (analysis == null) {
@@ -202,6 +320,12 @@ fun ChartScreen(
                         window = window,
                         focusSetup = focus,
                         palette = palette,
+                        measureMode = state.measureMode,
+                        measureStartIndex = state.measureStartIndex,
+                        measureEndIndex = state.measureEndIndex,
+                        onMeasureTap = viewModel::onMeasureTap,
+                        onPinchZoom = viewModel::zoomByScale,
+                        onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(380.dp)

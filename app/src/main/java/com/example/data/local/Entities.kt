@@ -118,7 +118,15 @@ data class OrderEntity(
     val attachedTrailingTargetValue: BigDecimal?,
     val statusReason: String?,
     val createdAtMillis: Long,
-    val updatedAtMillis: Long
+    val updatedAtMillis: Long,
+    val lotSize: Int = 1,
+    val brokerage: BigDecimal = BigDecimal.ZERO,
+    val sttCtt: BigDecimal = BigDecimal.ZERO,
+    val exchangeCharges: BigDecimal = BigDecimal.ZERO,
+    val sebiCharges: BigDecimal = BigDecimal.ZERO,
+    val stampDuty: BigDecimal = BigDecimal.ZERO,
+    val gst: BigDecimal = BigDecimal.ZERO,
+    val totalCharges: BigDecimal = BigDecimal.ZERO
 )
 
 fun OrderEntity.toDomain(): Order = Order(
@@ -153,7 +161,15 @@ fun OrderEntity.toDomain(): Order = Order(
     attachedTrailingTargetValue = attachedTrailingTargetValue,
     statusReason = statusReason,
     createdAtMillis = createdAtMillis,
-    updatedAtMillis = updatedAtMillis
+    updatedAtMillis = updatedAtMillis,
+    lotSize = lotSize,
+    brokerage = brokerage,
+    sttCtt = sttCtt,
+    exchangeCharges = exchangeCharges,
+    sebiCharges = sebiCharges,
+    stampDuty = stampDuty,
+    gst = gst,
+    totalCharges = totalCharges
 )
 
 fun Order.toEntity(): OrderEntity = OrderEntity(
@@ -188,7 +204,15 @@ fun Order.toEntity(): OrderEntity = OrderEntity(
     attachedTrailingTargetValue = attachedTrailingTargetValue,
     statusReason = statusReason,
     createdAtMillis = createdAtMillis,
-    updatedAtMillis = updatedAtMillis
+    updatedAtMillis = updatedAtMillis,
+    lotSize = lotSize,
+    brokerage = brokerage,
+    sttCtt = sttCtt,
+    exchangeCharges = exchangeCharges,
+    sebiCharges = sebiCharges,
+    stampDuty = stampDuty,
+    gst = gst,
+    totalCharges = totalCharges
 )
 
 @Entity(tableName = "positions")
@@ -221,7 +245,8 @@ data class PositionEntity(
     val gttDays: Int,
     val expiresAtMillis: Long,
     val openedAtMillis: Long,
-    val updatedAtMillis: Long
+    val updatedAtMillis: Long,
+    val lotSize: Int = 1
 )
 
 fun PositionEntity.toDomain(): Position = Position(
@@ -253,7 +278,8 @@ fun PositionEntity.toDomain(): Position = Position(
     gttDays = gttDays,
     expiresAtMillis = expiresAtMillis,
     openedAtMillis = openedAtMillis,
-    updatedAtMillis = updatedAtMillis
+    updatedAtMillis = updatedAtMillis,
+    lotSize = lotSize
 )
 
 fun Position.toEntity(): PositionEntity = PositionEntity(
@@ -285,7 +311,8 @@ fun Position.toEntity(): PositionEntity = PositionEntity(
     gttDays = gttDays,
     expiresAtMillis = expiresAtMillis,
     openedAtMillis = openedAtMillis,
-    updatedAtMillis = updatedAtMillis
+    updatedAtMillis = updatedAtMillis,
+    lotSize = lotSize
 )
 
 @Entity(tableName = "oco_links")
@@ -314,7 +341,14 @@ data class TradeJournalEntity(
     val exitReason: ExitReason,
     val notes: String,
     val openedAtMillis: Long,
-    val closedAtMillis: Long
+    val closedAtMillis: Long,
+    val lotSize: Int = 1,
+    val brokerage: BigDecimal = BigDecimal.ZERO,
+    val sttCtt: BigDecimal = BigDecimal.ZERO,
+    val exchangeCharges: BigDecimal = BigDecimal.ZERO,
+    val sebiCharges: BigDecimal = BigDecimal.ZERO,
+    val stampDuty: BigDecimal = BigDecimal.ZERO,
+    val gst: BigDecimal = BigDecimal.ZERO
 )
 
 fun TradeJournalEntity.toDomain(): TradeJournalEntry = TradeJournalEntry(
@@ -333,8 +367,35 @@ fun TradeJournalEntity.toDomain(): TradeJournalEntry = TradeJournalEntry(
     exitReason = exitReason,
     notes = notes,
     openedAtMillis = openedAtMillis,
-    closedAtMillis = closedAtMillis
+    closedAtMillis = closedAtMillis,
+    lotSize = lotSize,
+    brokerage = brokerage,
+    sttCtt = sttCtt,
+    exchangeCharges = exchangeCharges,
+    sebiCharges = sebiCharges,
+    stampDuty = stampDuty,
+    gst = gst
 )
+
+@Entity(tableName = "capital_transactions")
+data class CapitalTransactionEntity(
+    @PrimaryKey val id: String,
+    val type: com.example.domain.model.CapitalTransactionType,
+    val amount: BigDecimal,
+    val balanceAfter: BigDecimal,
+    val note: String,
+    val timestampMillis: Long
+)
+
+fun CapitalTransactionEntity.toDomain(): com.example.domain.model.CapitalTransaction =
+    com.example.domain.model.CapitalTransaction(
+        id = id,
+        type = type,
+        amount = amount,
+        balanceAfter = balanceAfter,
+        note = note,
+        timestampMillis = timestampMillis
+    )
 
 @Entity(tableName = "account_state")
 data class AccountStateEntity(
@@ -405,7 +466,8 @@ data class SignalEntity(
     val reasons: List<String>,
     val generatedAtMillis: Long,
     val expiresAtMillis: Long?,
-    val userStatus: String = "ACTIVE" // ACTIVE, ACCEPTED, DISMISSED
+    val userStatus: String = "ACTIVE", // ACTIVE, ACCEPTED, DISMISSED
+    val instrumentType: InstrumentType = InstrumentType.STOCK
 )
 
 fun SignalEntity.toDomain(): com.example.domain.signal.TradeSignal = com.example.domain.signal.TradeSignal(
@@ -423,7 +485,8 @@ fun SignalEntity.toDomain(): com.example.domain.signal.TradeSignal = com.example
     confidence = confidence,
     reasons = reasons,
     generatedAt = java.time.Instant.ofEpochMilli(generatedAtMillis),
-    expiresAt = expiresAtMillis?.let { java.time.Instant.ofEpochMilli(it) }
+    expiresAt = expiresAtMillis?.let { java.time.Instant.ofEpochMilli(it) },
+    instrumentType = instrumentType
 )
 
 fun com.example.domain.signal.TradeSignal.toEntity(userStatus: String = "ACTIVE"): SignalEntity = SignalEntity(
@@ -442,7 +505,8 @@ fun com.example.domain.signal.TradeSignal.toEntity(userStatus: String = "ACTIVE"
     reasons = reasons,
     generatedAtMillis = generatedAt.toEpochMilli(),
     expiresAtMillis = expiresAt?.toEpochMilli(),
-    userStatus = userStatus
+    userStatus = userStatus,
+    instrumentType = instrumentType
 )
 
 @Entity(tableName = "saved_signals")
@@ -462,7 +526,8 @@ data class SavedSignalEntity(
     val reasons: List<String>,
     val generatedAtMillis: Long,
     val expiresAtMillis: Long?,
-    val savedAtMillis: Long
+    val savedAtMillis: Long,
+    val instrumentType: InstrumentType = InstrumentType.STOCK
 )
 
 fun SavedSignalEntity.toDomain(): com.example.domain.signal.TradeSignal = com.example.domain.signal.TradeSignal(
@@ -480,7 +545,8 @@ fun SavedSignalEntity.toDomain(): com.example.domain.signal.TradeSignal = com.ex
     confidence = confidence,
     reasons = reasons,
     generatedAt = java.time.Instant.ofEpochMilli(generatedAtMillis),
-    expiresAt = expiresAtMillis?.let { java.time.Instant.ofEpochMilli(it) }
+    expiresAt = expiresAtMillis?.let { java.time.Instant.ofEpochMilli(it) },
+    instrumentType = instrumentType
 )
 
 fun com.example.domain.signal.TradeSignal.toSavedEntity(savedAtMillis: Long = System.currentTimeMillis()): SavedSignalEntity = SavedSignalEntity(
@@ -499,6 +565,49 @@ fun com.example.domain.signal.TradeSignal.toSavedEntity(savedAtMillis: Long = Sy
     reasons = reasons,
     generatedAtMillis = generatedAt.toEpochMilli(),
     expiresAtMillis = expiresAt?.toEpochMilli(),
-    savedAtMillis = savedAtMillis
+    savedAtMillis = savedAtMillis,
+    instrumentType = instrumentType
 )
+
+@Entity(tableName = "signal_records")
+data class SignalRecordEntity(
+    @PrimaryKey val id: String,
+    val symbol: String,
+    val segment: MarketSegment,
+    val instrumentType: InstrumentType,
+    val strategy: com.example.domain.signal.SignalStrategy,
+    val direction: com.example.domain.signal.SignalDirection,
+    val timeframe: com.example.domain.signal.Timeframe,
+    val entryPrice: BigDecimal,
+    val stopLoss: BigDecimal,
+    val target1: BigDecimal,
+    val target2: BigDecimal,
+    val resolvedPrice: BigDecimal,
+    val outcome: com.example.domain.signal.SignalOutcome,
+    val pnlPercent: Double,
+    val confidence: com.example.domain.signal.SignalConfidence,
+    val generatedAtMillis: Long,
+    val resolvedAtMillis: Long
+)
+
+fun SignalRecordEntity.toDomain(): com.example.domain.signal.SignalRecord =
+    com.example.domain.signal.SignalRecord(
+        id = id,
+        symbol = symbol,
+        segment = segment,
+        instrumentType = instrumentType,
+        strategy = strategy,
+        direction = direction,
+        timeframe = timeframe,
+        entryPrice = entryPrice,
+        stopLoss = stopLoss,
+        target1 = target1,
+        target2 = target2,
+        resolvedPrice = resolvedPrice,
+        outcome = outcome,
+        pnlPercent = pnlPercent,
+        confidence = confidence,
+        generatedAtMillis = generatedAtMillis,
+        resolvedAtMillis = resolvedAtMillis
+    )
 
