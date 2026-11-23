@@ -55,6 +55,21 @@ jobs:
           [ -f .env.example ] || touch .env.example
           [ -f .env ] || cp .env.example .env
 
+      - name: Restore google-services.json if provided via secret
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ ! -f app/google-services.json ] && [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            if printf '%s' "$GOOGLE_SERVICES_JSON" | grep -q '^[[:space:]]*{'; then
+              printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+            else
+              printf '%s' "$GOOGLE_SERVICES_JSON" | base64 --decode > app/google-services.json
+            fi
+          fi
+          if [ ! -f app/google-services.json ]; then
+            echo "::warning::app/google-services.json is missing. Firebase AI features will be disabled in the built APK until app/google-services.json is present or GOOGLE_SERVICES_JSON secret is configured."
+          fi
+
       - name: Build debug APK
         run: |
           gradle --version

@@ -1,5 +1,6 @@
 package com.example.data.ai
 
+import android.content.Context
 import android.util.Log
 import com.example.domain.engine.MarketClock
 import com.example.domain.engine.RiskMath
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
+import dagger.hilt.android.qualifiers.ApplicationContext
 import java.math.BigDecimal
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -59,7 +61,9 @@ interface AiMarketRepository {
 }
 
 @Singleton
-class FirebaseAiMarketRepository @Inject constructor() : AiMarketRepository {
+class FirebaseAiMarketRepository @Inject constructor(
+    @ApplicationContext private val context: Context
+) : AiMarketRepository {
 
     private val systemPrompt = """
         You are PaperPulse Quant Analyst, an objective quantitative trading & risk-control copilot for a paper-trading simulator covering Indian markets (NSE, BSE, MCX) and Crypto.
@@ -125,6 +129,9 @@ class FirebaseAiMarketRepository @Inject constructor() : AiMarketRepository {
         instrument: Instrument?,
         recentCandles: List<Candle>
     ): Result<AiSignalSecondOpinion> {
+        if (!ensureFirebaseInitialized(context)) {
+            return Result.failure(IllegalStateException(FIREBASE_NOT_INITIALIZED_MSG))
+        }
         return try {
             val prompt = buildSignalPrompt(signal, instrument, recentCandles)
             val response = withTimeout(TIMEOUT_MS) {
@@ -159,6 +166,9 @@ class FirebaseAiMarketRepository @Inject constructor() : AiMarketRepository {
         activeSignals: List<TradeSignal>,
         recentCandles: List<Candle>
     ): Result<AiSignalSecondOpinion> {
+        if (!ensureFirebaseInitialized(context)) {
+            return Result.failure(IllegalStateException(FIREBASE_NOT_INITIALIZED_MSG))
+        }
         return try {
             val prompt = buildSetupAuditPrompt(
                 instrument = instrument,
@@ -200,6 +210,10 @@ class FirebaseAiMarketRepository @Inject constructor() : AiMarketRepository {
         journalEntries: List<TradeJournalEntry>,
         activeSignals: List<TradeSignal>
     ): Flow<AiUiState<String>> = flow {
+        if (!ensureFirebaseInitialized(context)) {
+            emit(AiUiState.Error(FIREBASE_NOT_INITIALIZED_MSG))
+            return@flow
+        }
         emit(AiUiState.Loading)
         val prompt = buildCoachPrompt(
             question = question,
@@ -332,6 +346,8 @@ class FirebaseAiMarketRepository @Inject constructor() : AiMarketRepository {
         private const val TAG = "FirebaseAiMarketRepo"
         const val MODEL_NAME = "gemini-3.8-flash"
         private const val TIMEOUT_MS = 60_000L
+        private const val FIREBASE_NOT_INITIALIZED_MSG =
+            "Firebase is not configured in this APK build (missing app/google-services.json). Build the APK from AI Studio or configure the GOOGLE_SERVICES_JSON GitHub Actions secret to enable Gemini AI."
 
         internal fun parseSecondOpinionJson(
             rawJson: String,

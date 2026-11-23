@@ -17,13 +17,33 @@ private const val DEBUG_SECRET_KEY = "com.google.firebase.appcheck.debug.DEBUG_S
 private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
 
 /**
+ * Ensures the default [FirebaseApp] is initialized from bundled `google-services.json` resources.
+ * Returns `false` if Firebase configuration resources were not bundled in this APK build.
+ */
+fun ensureFirebaseInitialized(context: Context): Boolean {
+    val appContext = context.applicationContext ?: context
+    if (FirebaseApp.getApps(appContext).isNotEmpty()) {
+        return true
+    }
+    return runCatching {
+        FirebaseApp.initializeApp(appContext) != null
+    }.onFailure { e ->
+        Log.e(TAG, "FirebaseApp.initializeApp failed", e)
+    }.getOrDefault(false)
+}
+
+/**
  * Configures Firebase App Check before Compose UI or ViewModels initialize.
  * Must be invoked from MainActivity.onCreate() with the launch intent.
  */
 fun configureAppCheck(context: Context, intent: Intent?) {
     try {
-        if (FirebaseApp.getApps(context).isEmpty()) {
-            FirebaseApp.initializeApp(context)
+        if (!ensureFirebaseInitialized(context)) {
+            Log.w(
+                TAG,
+                "Default FirebaseApp could not be initialized. Ensure app/google-services.json is bundled at build time."
+            )
+            return
         }
 
         if (BuildConfig.DEBUG) {
