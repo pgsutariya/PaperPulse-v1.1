@@ -60,7 +60,10 @@ object AppModule {
             context,
             PaperPulseDatabase::class.java,
             "paperpulse.db"
-        ).fallbackToDestructiveMigration(dropAllTables = true).build()
+        )
+            .addMigrations(PaperPulseDatabase.MIGRATION_3_4)
+            .fallbackToDestructiveMigration(dropAllTables = true)
+            .build()
     }
 
     @Provides fun provideInstrumentDao(db: PaperPulseDatabase): InstrumentDao = db.instrumentDao()

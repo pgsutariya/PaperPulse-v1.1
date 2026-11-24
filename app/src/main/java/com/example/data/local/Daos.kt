@@ -128,6 +128,9 @@ interface AccountDao {
 
     @Query("UPDATE account_state SET availableMargin = :margin, realisedPnl = :realised WHERE id = 1")
     suspend fun updateBalances(margin: BigDecimal, realised: BigDecimal)
+
+    @Query("UPDATE account_state SET cryptoAvailableMargin = :margin, cryptoRealisedPnl = :realised WHERE id = 1")
+    suspend fun updateCryptoBalances(margin: BigDecimal, realised: BigDecimal)
 }
 
 @Dao

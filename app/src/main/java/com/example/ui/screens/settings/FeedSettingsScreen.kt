@@ -27,11 +27,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
+import com.example.data.ai.AiProvider
+import com.example.data.ai.AiProviderConfig
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -111,12 +114,11 @@ fun FeedSettingsScreen(
         pendingNotifAction = null
     }
 
-    fun launchBrokerLogin(broker: String, apiKey: String) {
+    var activeOAuthSession by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+
+    fun launchBrokerLogin(broker: String, title: String, apiKey: String) {
         val url = viewModel.buildBrokerOAuthUrl(broker, apiKey)
-        runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            context.startActivity(intent)
-        }
+        activeOAuthSession = Triple(broker, title, url)
     }
 
     val saved = state.brokerSettings
@@ -132,12 +134,20 @@ fun FeedSettingsScreen(
     var kiteApiKey by remember(saved.kiteApiKey) { mutableStateOf(saved.kiteApiKey) }
     var kiteToken by remember(saved.kiteAccessToken) { mutableStateOf(saved.kiteAccessToken) }
 
+    val savedAi = state.aiConfig
+    var selectedAiProvider by remember(savedAi.provider) { mutableStateOf(savedAi.provider) }
+    var aiApiKey by remember(savedAi.apiKey) { mutableStateOf(savedAi.apiKey) }
+    var aiModelName by remember(savedAi.modelName) { mutableStateOf(savedAi.modelName) }
+    var aiBaseUrl by remember(savedAi.customBaseUrl) { mutableStateOf(savedAi.customBaseUrl) }
+
     var slippageText by remember(state.config.slippageBps) { mutableStateOf(state.config.slippageBps.toString()) }
     var flatBrokerageText by remember(state.config.flatBrokerage) { mutableStateOf(state.config.flatBrokerage.toPlainString()) }
     var cryptoFeeText by remember(state.config.cryptoFeePercent) { mutableStateOf(state.config.cryptoFeePercent.toPlainString()) }
     var capitalDeltaText by remember { mutableStateOf("100000") }
+    var cryptoDeltaText by remember { mutableStateOf("5000") }
     var capitalNoteText by remember { mutableStateOf("") }
     var resetCapitalText by remember { mutableStateOf("1000000") }
+    var resetCryptoCapitalText by remember { mutableStateOf("10000") }
 
     var selectedNudgeSymbol by remember(state.instruments) {
         mutableStateOf(state.instruments.firstOrNull()?.symbol ?: "RELIANCE")
@@ -219,7 +229,7 @@ fun FeedSettingsScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         OutlinedButton(
-                            onClick = { launchBrokerLogin("angel", angelApiKey) },
+                            onClick = { launchBrokerLogin("angel", "Angel One", angelApiKey) },
                             modifier = Modifier.weight(1f).testTag("one_click_login_angel"),
                             shape = RoundedCornerShape(10.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
@@ -229,7 +239,7 @@ fun FeedSettingsScreen(
                             Text("Angel One", style = MaterialTheme.typography.labelMedium)
                         }
                         OutlinedButton(
-                            onClick = { launchBrokerLogin("kite", kiteApiKey) },
+                            onClick = { launchBrokerLogin("kite", "Zerodha Kite", kiteApiKey) },
                             modifier = Modifier.weight(1f).testTag("one_click_login_kite"),
                             shape = RoundedCornerShape(10.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
@@ -239,7 +249,7 @@ fun FeedSettingsScreen(
                             Text("Kite", style = MaterialTheme.typography.labelMedium)
                         }
                         OutlinedButton(
-                            onClick = { launchBrokerLogin("upstox", upstoxApiKey) },
+                            onClick = { launchBrokerLogin("upstox", "Upstox", upstoxApiKey) },
                             modifier = Modifier.weight(1f).testTag("one_click_login_upstox"),
                             shape = RoundedCornerShape(10.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
@@ -250,10 +260,98 @@ fun FeedSettingsScreen(
                         }
                     }
                     Text(
-                        "Redirect URI: paperpulse://broker-callback — completes sign-in and automatically returns the live feed token to PaperPulse.",
+                        "Opens securely inside PaperPulse and auto-captures the broker redirect token to return immediately.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+
+            // 0a. AI Provider Configuration (Firebase Built-in / Gemini / Claude / DeepSeek / OpenAI)
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, tradingColors.border)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                        Text("AI PROVIDER CONFIGURATION", style = MaterialTheme.typography.labelLarge)
+                    }
+                    Text(
+                        "Choose built-in Firebase AI or configure your own Gemini, Claude, DeepSeek, or OpenAI-compatible key (fixes App Check errors on standalone APKs).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        AiProvider.entries.forEach { provider ->
+                            FilterChip(
+                                selected = selectedAiProvider == provider,
+                                onClick = {
+                                    selectedAiProvider = provider
+                                    if (aiModelName.isBlank() || AiProvider.entries.any { it.defaultModel == aiModelName }) {
+                                        aiModelName = provider.defaultModel
+                                    }
+                                    if (aiBaseUrl.isBlank() || AiProvider.entries.any { it.defaultBaseUrl == aiBaseUrl }) {
+                                        aiBaseUrl = provider.defaultBaseUrl
+                                    }
+                                },
+                                label = { Text(provider.shortLabel) },
+                                modifier = Modifier.testTag("ai_provider_chip_${provider.name.lowercase()}")
+                            )
+                        }
+                    }
+
+                    if (selectedAiProvider.requiresApiKey) {
+                        OutlinedTextField(
+                            value = aiApiKey,
+                            onValueChange = { aiApiKey = it },
+                            label = { Text("${selectedAiProvider.shortLabel} API Key (Encrypted)") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_api_key_input")
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = aiModelName,
+                                onValueChange = { aiModelName = it },
+                                label = { Text("Model (${selectedAiProvider.defaultModel})") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f).testTag("ai_model_input")
+                            )
+                            if (selectedAiProvider == AiProvider.OPENAI_COMPATIBLE) {
+                                OutlinedTextField(
+                                    value = aiBaseUrl,
+                                    onValueChange = { aiBaseUrl = it },
+                                    label = { Text("HTTPS Base URL") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f).testTag("ai_base_url_input")
+                                )
+                            }
+                        }
+                    } else {
+                        EncryptedNoticeBanner("Uses Firebase AI Logic (zero API key needed in AI Studio emulator). On sideloaded APKs, switch to Gemini, Claude, DeepSeek, or OpenAI above.")
+                    }
+
+                    Button(
+                        onClick = {
+                            viewModel.saveAiConfig(
+                                AiProviderConfig(
+                                    provider = selectedAiProvider,
+                                    apiKey = aiApiKey,
+                                    modelName = aiModelName,
+                                    customBaseUrl = aiBaseUrl
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("save_ai_config_button"),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Save AI Provider (${selectedAiProvider.shortLabel})")
+                    }
                 }
             }
 
@@ -819,32 +917,95 @@ fun FeedSettingsScreen(
 
                     HorizontalDivider(color = tradingColors.border)
 
+                    Text("CRYPTO WALLET ($ USD)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Crypto Capital: ${RiskMath.formatPortfolioUsd(state.accountState.cryptoVirtualCapital)}", style = MonoPriceSmall, fontWeight = FontWeight.Bold)
+                        Text("Free Margin: ${RiskMath.formatPortfolioUsd(state.accountState.cryptoAvailableMargin)}", style = MonoPriceSmall, color = MaterialTheme.colorScheme.primary)
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(
-                            value = resetCapitalText,
-                            onValueChange = { resetCapitalText = it.filter { ch -> ch.isDigit() || ch == '.' } },
-                            label = { Text("Reset Capital (₹)") },
+                            value = cryptoDeltaText,
+                            onValueChange = { cryptoDeltaText = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                            label = { Text("Crypto Amount ($)") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                             modifier = Modifier.weight(1f)
                         )
                         Button(
                             onClick = {
-                                val target = resetCapitalText.toBigDecimalOrNull() ?: BigDecimal("1000000")
-                                viewModel.resetAccount(target)
+                                cryptoDeltaText.toBigDecimalOrNull()?.let {
+                                    viewModel.addCryptoCapital(it, capitalNoteText.ifBlank { "Crypto USD top-up" })
+                                }
                             },
-                            modifier = Modifier.testTag("reset_account_button"),
                             shape = RoundedCornerShape(10.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = tradingColors.bearish, contentColor = Color.White)
+                            colors = ButtonDefaults.buttonColors(containerColor = tradingColors.bullish, contentColor = Color.White),
+                            modifier = Modifier.testTag("settings_add_crypto_capital_button")
                         ) {
-                            Text("Reset Account")
+                            Text("+$")
                         }
+                        OutlinedButton(
+                            onClick = {
+                                cryptoDeltaText.toBigDecimalOrNull()?.let {
+                                    viewModel.reduceCryptoCapital(it, capitalNoteText.ifBlank { "Crypto USD withdrawal" })
+                                }
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.testTag("settings_reduce_crypto_capital_button")
+                        ) {
+                            Text("-$", color = tradingColors.bearish)
+                        }
+                    }
+
+                    HorizontalDivider(color = tradingColors.border)
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = resetCapitalText,
+                            onValueChange = { resetCapitalText = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                            label = { Text("Reset India (₹)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = resetCryptoCapitalText,
+                            onValueChange = { resetCryptoCapitalText = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                            label = { Text("Reset Crypto ($)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            val targetInr = resetCapitalText.toBigDecimalOrNull() ?: BigDecimal("1000000")
+                            val targetUsd = resetCryptoCapitalText.toBigDecimalOrNull() ?: BigDecimal("10000")
+                            viewModel.resetAccount(targetInr, targetUsd)
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("reset_account_button"),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = tradingColors.bearish, contentColor = Color.White)
+                    ) {
+                        Text("Reset Paper Account (India ₹ + Crypto $)")
                     }
                 }
             }
 
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    activeOAuthSession?.let { (brokerKey, brokerTitle, loginUrl) ->
+        BrokerOAuthWebViewDialog(
+            brokerKey = brokerKey,
+            brokerTitle = brokerTitle,
+            loginUrl = loginUrl,
+            onTokenCaptured = { broker, token, feedToken ->
+                activeOAuthSession = null
+                viewModel.onBrokerOAuthTokenCaptured(broker, token, feedToken)
+            },
+            onDismiss = { activeOAuthSession = null }
+        )
     }
 
     editingSegment?.let { seg ->

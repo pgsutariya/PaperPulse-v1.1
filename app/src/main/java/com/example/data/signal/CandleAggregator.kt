@@ -107,6 +107,33 @@ class CandleAggregator @Inject constructor(
             val tfActive = currentBars.getOrPut(symbol) { mutableMapOf() }
 
             Timeframe.entries.forEach { tf ->
+                // If this timeframe still only holds synthetic bootstrap/cached candles whose price level
+                // diverges sharply (>12%) from the incoming live exchange price (e.g. BTC seed $61k vs live $84k),
+                // proportionally rescale the synthetic history so ATR, swing levels, and signals stay in live price scale.
+                if (!hasRealHistory(symbol, tf)) {
+                    val queue = tfHistory[tf]
+                    val lastSyntheticClose = queue?.lastOrNull()?.close
+                    if (lastSyntheticClose != null && lastSyntheticClose > 0.0) {
+                        val relDiff = abs(price - lastSyntheticClose) / lastSyntheticClose
+                        if (relDiff > 0.12) {
+                            val ratio = price / lastSyntheticClose
+                            val rescaled = ArrayDeque<Candle>(queue.size)
+                            queue.forEach { c ->
+                                rescaled.addLast(
+                                    c.copy(
+                                        open = c.open * ratio,
+                                        high = c.high * ratio,
+                                        low = c.low * ratio,
+                                        close = c.close * ratio
+                                    )
+                                )
+                            }
+                            tfHistory[tf] = rescaled
+                            tfActive.remove(tf)
+                        }
+                    }
+                }
+
                 val bucketStart = SessionCalendar.bucketStart(tf, timestampMillis, segment)
                 val existing = tfActive[tf]
                 when {

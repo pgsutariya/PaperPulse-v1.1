@@ -2,6 +2,8 @@ package com.example.ui.screens.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.ai.AiProviderConfig
+import com.example.data.ai.SecureAiConfigStore
 import com.example.data.feed.live.AngelOnePriceFeed
 import com.example.data.feed.live.BrokerFeedSettings
 import com.example.data.feed.live.FeedType
@@ -34,6 +36,7 @@ import javax.inject.Inject
 data class FeedSettingsUiState(
     val config: TradingConfig = TradingConfig(),
     val brokerSettings: BrokerFeedSettings = BrokerFeedSettings(),
+    val aiConfig: AiProviderConfig = AiProviderConfig(),
     val segmentConfigs: Map<MarketSegment, SegmentFeedConfig> = emptyMap(),
     val feedStatuses: Map<FeedType, LiveConnectionStatus> = emptyMap(),
     val liveConnectionStatus: LiveConnectionStatus = LiveConnectionStatus.DISCONNECTED,
@@ -53,7 +56,8 @@ class FeedSettingsViewModel @Inject constructor(
     private val marketDataRepository: MarketDataRepository,
     private val prefsRepository: TradingPreferencesRepository,
     private val tradingRepository: TradingRepository,
-    private val angelOnePriceFeed: AngelOnePriceFeed
+    private val angelOnePriceFeed: AngelOnePriceFeed,
+    private val aiConfigStore: SecureAiConfigStore
 ) : ViewModel() {
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8)
@@ -81,16 +85,22 @@ class FeedSettingsViewModel @Inject constructor(
         SafetyAndCapitalSnapshot(segStatuses, suspended, bannerMsg, account, capTxns)
     }
 
-    val uiState: StateFlow<FeedSettingsUiState> = combine(
+    private val configAndAiFlow = combine(
         prefsRepository.configFlow,
+        aiConfigStore.config
+    ) { cfg, aiCfg -> cfg to aiCfg }
+
+    val uiState: StateFlow<FeedSettingsUiState> = combine(
+        configAndAiFlow,
         liveFeedStateFlow,
         safetyStateFlow,
         marketDataRepository.instruments,
         _angelDiagnosticState
-    ) { config, live, safety, instruments, diag ->
+    ) { (config, aiCfg), live, safety, instruments, diag ->
         FeedSettingsUiState(
             config = config,
             brokerSettings = live.settings,
+            aiConfig = aiCfg,
             segmentConfigs = live.segConfigs,
             feedStatuses = live.feedMap,
             liveConnectionStatus = live.connStatus,
@@ -109,6 +119,13 @@ class FeedSettingsViewModel @Inject constructor(
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = FeedSettingsUiState()
     )
+
+    fun saveAiConfig(newConfig: AiProviderConfig) {
+        aiConfigStore.save(newConfig)
+        viewModelScope.launch {
+            _messages.emit("AI provider set to ${newConfig.provider.label} (${newConfig.effectiveModel})")
+        }
+    }
 
     fun buildBrokerOAuthUrl(broker: String, apiKey: String): String {
         val cleanKey = apiKey.trim()
@@ -130,6 +147,43 @@ class FeedSettingsViewModel @Inject constructor(
                 "https://account.upstox.com/developer/apps"
             }
             else -> "https://smartapi.angelbroking.com/"
+        }
+    }
+
+    fun onBrokerOAuthTokenCaptured(broker: String, token: String, feedToken: String?) {
+        viewModelScope.launch {
+            val current = marketDataRepository.brokerSettings.value
+            val clean = token.trim()
+            val updated = when (broker) {
+                "upstox" -> {
+                    val segs = current.segmentConfigs.toMutableMap().apply {
+                        put(MarketSegment.NSE, SegmentFeedConfig(MarketSegment.NSE, FeedType.UPSTOX_LIVE, true))
+                        put(MarketSegment.BSE, SegmentFeedConfig(MarketSegment.BSE, FeedType.UPSTOX_LIVE, true))
+                        put(MarketSegment.MCX, SegmentFeedConfig(MarketSegment.MCX, FeedType.UPSTOX_LIVE, true))
+                    }
+                    current.copy(upstoxAccessToken = clean, segmentConfigs = segs)
+                }
+                "kite" -> {
+                    val segs = current.segmentConfigs.toMutableMap().apply {
+                        put(MarketSegment.NSE, SegmentFeedConfig(MarketSegment.NSE, FeedType.KITE_STUB, true))
+                        put(MarketSegment.BSE, SegmentFeedConfig(MarketSegment.BSE, FeedType.KITE_STUB, true))
+                        put(MarketSegment.MCX, SegmentFeedConfig(MarketSegment.MCX, FeedType.KITE_STUB, true))
+                    }
+                    current.copy(kiteAccessToken = clean, segmentConfigs = segs)
+                }
+                else -> {
+                    val segs = current.segmentConfigs.toMutableMap().apply {
+                        put(MarketSegment.NSE, SegmentFeedConfig(MarketSegment.NSE, FeedType.ANGEL_ONE_LIVE, true))
+                        put(MarketSegment.BSE, SegmentFeedConfig(MarketSegment.BSE, FeedType.ANGEL_ONE_LIVE, true))
+                        put(MarketSegment.MCX, SegmentFeedConfig(MarketSegment.MCX, FeedType.ANGEL_ONE_LIVE, true))
+                    }
+                    current.copy(segmentConfigs = segs)
+                }
+            }
+            marketDataRepository.updateBrokerSettings(updated)
+            marketDataRepository.reconnectActiveFeed()
+            val suffix = if (!feedToken.isNullOrBlank()) " + feed token" else ""
+            _messages.emit("${broker.uppercase()} login complete — token$suffix captured & live feed reconnecting")
         }
     }
 
@@ -170,6 +224,22 @@ class FeedSettingsViewModel @Inject constructor(
             tradingRepository.reduceCapital(amount, note)
                 .onSuccess { _messages.emit(it) }
                 .onFailure { _messages.emit(it.message ?: "Failed to reduce capital") }
+        }
+    }
+
+    fun addCryptoCapital(amount: BigDecimal, note: String) {
+        viewModelScope.launch {
+            tradingRepository.addCryptoCapital(amount, note)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Failed to add Crypto USD capital") }
+        }
+    }
+
+    fun reduceCryptoCapital(amount: BigDecimal, note: String) {
+        viewModelScope.launch {
+            tradingRepository.reduceCryptoCapital(amount, note)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Failed to reduce Crypto USD capital") }
         }
     }
 
@@ -287,10 +357,13 @@ class FeedSettingsViewModel @Inject constructor(
         }
     }
 
-    fun resetAccount(newCapital: BigDecimal = BigDecimal("1000000.00")) {
+    fun resetAccount(
+        newCapital: BigDecimal = BigDecimal("1000000.00"),
+        newCryptoCapital: BigDecimal = BigDecimal("10000.00")
+    ) {
         viewModelScope.launch {
-            tradingRepository.resetPaperAccount(newCapital)
-            _messages.emit("Paper trading account reset to ${RiskMath.formatPortfolioInr(newCapital)}")
+            tradingRepository.resetPaperAccount(newCapital, newCryptoCapital)
+            _messages.emit("Paper account reset: India ${RiskMath.formatPortfolioInr(newCapital)} • Crypto ${RiskMath.formatPortfolioUsd(newCryptoCapital)}")
         }
     }
 

@@ -10,10 +10,12 @@ import com.example.domain.engine.RiskMath
 import com.example.domain.model.AccountState
 import com.example.domain.model.CapitalTransaction
 import com.example.domain.model.Instrument
+import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
 import com.example.domain.model.Position
 import com.example.domain.model.TradeJournalEntry
 import com.example.domain.signal.AiUiState
+import com.example.domain.signal.InstrumentTradePerformance
 import com.example.domain.signal.TradeSignal
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -28,6 +30,7 @@ import javax.inject.Inject
 
 data class JournalUiState(
     val entries: List<TradeJournalEntry> = emptyList(),
+    val instrumentPerformance: List<InstrumentTradePerformance> = emptyList(),
     val capitalTransactions: List<CapitalTransaction> = emptyList(),
     val grossPnl: BigDecimal = BigDecimal.ZERO,
     val totalCharges: BigDecimal = BigDecimal.ZERO,
@@ -35,6 +38,10 @@ data class JournalUiState(
     val totalTaxes: BigDecimal = BigDecimal.ZERO,
     val netRealisedPnl: BigDecimal = BigDecimal.ZERO,
     val unrealisedPnl: BigDecimal = BigDecimal.ZERO,
+    val cryptoGrossPnl: BigDecimal = BigDecimal.ZERO,
+    val cryptoTotalCharges: BigDecimal = BigDecimal.ZERO,
+    val cryptoNetRealisedPnl: BigDecimal = BigDecimal.ZERO,
+    val cryptoUnrealisedPnl: BigDecimal = BigDecimal.ZERO,
     val winRatePercent: Int = 0,
     val coachState: AiUiState<String> = AiUiState.Idle
 )
@@ -84,37 +91,74 @@ class JournalViewModel @Inject constructor(
         )
 
         val ltpMap = instruments.associate { it.symbol to it.ltp }
-        val unrealised = positions.fold(BigDecimal.ZERO) { acc, pos ->
+        var indiaUnrealised = BigDecimal.ZERO
+        var cryptoUnrealised = BigDecimal.ZERO
+        positions.forEach { pos ->
             val ltp = ltpMap[pos.symbol] ?: pos.averageEntryPrice
-            acc.add(
-                RiskMath.calculateUnrealisedPnl(
-                    entryPrice = pos.averageEntryPrice,
-                    ltp = ltp,
-                    quantity = pos.quantity,
-                    isLong = pos.side == OrderSide.BUY
-                )
+            val pnl = RiskMath.calculateUnrealisedPnl(
+                entryPrice = pos.averageEntryPrice,
+                ltp = ltp,
+                quantity = pos.quantity,
+                isLong = pos.side == OrderSide.BUY
             )
+            if (pos.segment == MarketSegment.CRYPTO) {
+                cryptoUnrealised = cryptoUnrealised.add(pnl)
+            } else {
+                indiaUnrealised = indiaUnrealised.add(pnl)
+            }
         }
 
-        val gross = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.grossPnl) }
-        val charges = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
-        val brokerage = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.brokerage) }
-        val taxes = entries.fold(BigDecimal.ZERO) { acc, e ->
+        val indiaEntries = entries.filter { it.segment != MarketSegment.CRYPTO }
+        val cryptoEntries = entries.filter { it.segment == MarketSegment.CRYPTO }
+
+        val gross = indiaEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.grossPnl) }
+        val charges = indiaEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
+        val brokerage = indiaEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.brokerage) }
+        val taxes = indiaEntries.fold(BigDecimal.ZERO) { acc, e ->
             acc.add(e.sttCtt).add(e.exchangeCharges).add(e.sebiCharges).add(e.stampDuty).add(e.gst)
         }
-        val net = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+        val net = indiaEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+
+        val cryptoGross = cryptoEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.grossPnl) }
+        val cryptoCharges = cryptoEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
+        val cryptoNet = cryptoEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+
         val wins = entries.count { it.netPnl > BigDecimal.ZERO }
         val winRate = if (entries.isEmpty()) 0 else (wins * 100) / entries.size
 
+        val byInstrument = entries
+            .groupBy { it.symbol }
+            .map { (symbol, list) ->
+                val seg = list.first().segment
+                val w = list.count { it.netPnl > BigDecimal.ZERO }
+                val l = list.size - w
+                InstrumentTradePerformance(
+                    symbol = symbol,
+                    segment = seg,
+                    totalTrades = list.size,
+                    wins = w,
+                    losses = l,
+                    grossPnl = list.fold(BigDecimal.ZERO) { a, e -> a.add(e.grossPnl) },
+                    totalCharges = list.fold(BigDecimal.ZERO) { a, e -> a.add(e.charges) },
+                    netPnl = list.fold(BigDecimal.ZERO) { a, e -> a.add(e.netPnl) }
+                )
+            }
+            .sortedWith(compareByDescending<InstrumentTradePerformance> { it.totalTrades }.thenByDescending { it.netPnl })
+
         JournalUiState(
             entries = entries,
+            instrumentPerformance = byInstrument,
             capitalTransactions = capitalTxns,
             grossPnl = gross,
             totalCharges = charges,
             totalBrokerage = brokerage,
             totalTaxes = taxes,
             netRealisedPnl = net,
-            unrealisedPnl = unrealised,
+            unrealisedPnl = indiaUnrealised,
+            cryptoGrossPnl = cryptoGross,
+            cryptoTotalCharges = cryptoCharges,
+            cryptoNetRealisedPnl = cryptoNet,
+            cryptoUnrealisedPnl = cryptoUnrealised,
             winRatePercent = winRate,
             coachState = coachState
         )

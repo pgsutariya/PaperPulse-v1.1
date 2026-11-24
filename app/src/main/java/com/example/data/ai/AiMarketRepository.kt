@@ -21,13 +21,20 @@ import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
-import dagger.hilt.android.qualifiers.ApplicationContext
 import java.math.BigDecimal
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -62,15 +69,30 @@ interface AiMarketRepository {
 
 @Singleton
 class FirebaseAiMarketRepository @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val aiConfigStore: SecureAiConfigStore,
+    private val okHttpClient: OkHttpClient
 ) : AiMarketRepository {
 
     private val systemPrompt = """
         You are PaperPulse Quant Analyst, an objective quantitative trading & risk-control copilot for a paper-trading simulator covering Indian markets (NSE, BSE, MCX) and Crypto.
         Strict rules:
         - Paper trading advisory only. Never claim to place live broker orders or guarantee profits.
-        - Focus on risk-reward asymmetry, invalidation levels, Trailing Stop Loss (TSL), Trailing Target, OCO brackets, and session constraints (NSE/BSE 15:15 IST intraday square-off vs 24/7 Crypto).
+        - Focus on risk-reward asymmetry, invalidation levels, Trailing Stop Loss (TSL), Trailing Target, OCO brackets, and session constraints (NSE/BSE 15:15 Eq/Fut & 15:40 Opt IST vs 24/7 Crypto in USD).
         - Be concise, direct, and grounded strictly in the provided prices, candles, signals, and journal figures.
+    """.trimIndent()
+
+    private val jsonSchemaInstruction = """
+        Respond ONLY with a single valid JSON object (no markdown fences) matching these exact keys:
+        {
+          "verdict": "ALIGNED" | "CAUTION" | "CONFLICTING",
+          "bias": "BULLISH" | "BEARISH" | "NEUTRAL",
+          "confidenceScore": 0-100 integer,
+          "summary": "2-3 concise sentences",
+          "keyRiskInvalidation": "exact price or condition invalidating setup",
+          "executionGuidance": "actionable paper-trading SL/TSL/Trailing Target guidance",
+          "riskChecklist": ["item 1", "item 2", "item 3"]
+        }
     """.trimIndent()
 
     private val secondOpinionSchema = Schema.obj(
@@ -129,31 +151,12 @@ class FirebaseAiMarketRepository @Inject constructor(
         instrument: Instrument?,
         recentCandles: List<Candle>
     ): Result<AiSignalSecondOpinion> {
-        if (!ensureFirebaseInitialized(context)) {
-            return Result.failure(IllegalStateException(FIREBASE_NOT_INITIALIZED_MSG))
-        }
-        return try {
-            val prompt = buildSignalPrompt(signal, instrument, recentCandles)
-            val response = withTimeout(TIMEOUT_MS) {
-                structuredModel.generateContent(prompt)
-            }
-            val rawJson = response.text
-                ?: return Result.failure(IllegalStateException("Gemini returned an empty response."))
-            val parsed = parseSecondOpinionJson(
-                rawJson = rawJson,
-                referenceId = signal.id,
-                symbol = signal.symbol
-            )
-            Result.success(parsed)
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Signal analysis timed out", e)
-            Result.failure(IllegalStateException("AI analysis timed out after 60s. Please retry."))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Firebase AI signal analysis failed", e)
-            Result.failure(IllegalStateException(e.localizedMessage ?: "AI analysis failed."))
-        }
+        val prompt = buildSignalPrompt(signal, instrument, recentCandles)
+        return runStructuredAnalysis(
+            prompt = prompt,
+            referenceId = signal.id,
+            symbol = signal.symbol
+        )
     }
 
     override suspend fun analyzeInstrumentSetup(
@@ -166,40 +169,21 @@ class FirebaseAiMarketRepository @Inject constructor(
         activeSignals: List<TradeSignal>,
         recentCandles: List<Candle>
     ): Result<AiSignalSecondOpinion> {
-        if (!ensureFirebaseInitialized(context)) {
-            return Result.failure(IllegalStateException(FIREBASE_NOT_INITIALIZED_MSG))
-        }
-        return try {
-            val prompt = buildSetupAuditPrompt(
-                instrument = instrument,
-                side = side,
-                productType = productType,
-                entryPrice = entryPrice,
-                slPrice = slPrice,
-                targetPrice = targetPrice,
-                activeSignals = activeSignals,
-                recentCandles = recentCandles
-            )
-            val response = withTimeout(TIMEOUT_MS) {
-                structuredModel.generateContent(prompt)
-            }
-            val rawJson = response.text
-                ?: return Result.failure(IllegalStateException("Gemini returned an empty response."))
-            val parsed = parseSecondOpinionJson(
-                rawJson = rawJson,
-                referenceId = "setup_${instrument.symbol}_${side.name}",
-                symbol = instrument.symbol
-            )
-            Result.success(parsed)
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Setup audit timed out", e)
-            Result.failure(IllegalStateException("AI setup audit timed out after 60s. Please retry."))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Firebase AI setup audit failed", e)
-            Result.failure(IllegalStateException(e.localizedMessage ?: "AI setup audit failed."))
-        }
+        val prompt = buildSetupAuditPrompt(
+            instrument = instrument,
+            side = side,
+            productType = productType,
+            entryPrice = entryPrice,
+            slPrice = slPrice,
+            targetPrice = targetPrice,
+            activeSignals = activeSignals,
+            recentCandles = recentCandles
+        )
+        return runStructuredAnalysis(
+            prompt = prompt,
+            referenceId = "setup_${instrument.symbol}_${side.name}",
+            symbol = instrument.symbol
+        )
     }
 
     override fun streamPortfolioCoach(
@@ -210,11 +194,7 @@ class FirebaseAiMarketRepository @Inject constructor(
         journalEntries: List<TradeJournalEntry>,
         activeSignals: List<TradeSignal>
     ): Flow<AiUiState<String>> = flow {
-        if (!ensureFirebaseInitialized(context)) {
-            emit(AiUiState.Error(FIREBASE_NOT_INITIALIZED_MSG))
-            return@flow
-        }
-        emit(AiUiState.Loading)
+        val cfg = aiConfigStore.getCurrent()
         val prompt = buildCoachPrompt(
             question = question,
             account = account,
@@ -223,6 +203,28 @@ class FirebaseAiMarketRepository @Inject constructor(
             journalEntries = journalEntries,
             activeSignals = activeSignals
         )
+        emit(AiUiState.Loading)
+
+        if (cfg.provider != AiProvider.FIREBASE_AI_LOGIC) {
+            try {
+                val text = withTimeout(TIMEOUT_MS) {
+                    callExternalProvider(cfg, prompt, expectJson = false)
+                }
+                emit(AiUiState.Success(text))
+            } catch (e: TimeoutCancellationException) {
+                emit(AiUiState.Error("${cfg.provider.shortLabel} request timed out after 60s."))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emit(AiUiState.Error(e.message ?: "${cfg.provider.shortLabel} request failed."))
+            }
+            return@flow
+        }
+
+        if (!ensureFirebaseInitialized(context)) {
+            emit(AiUiState.Error(FIREBASE_NOT_INITIALIZED_MSG))
+            return@flow
+        }
         val acc = StringBuilder()
         try {
             withTimeout(TIMEOUT_MS) {
@@ -246,8 +248,190 @@ class FirebaseAiMarketRepository @Inject constructor(
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Firebase AI coach failed", e)
-            emit(AiUiState.Error(e.localizedMessage ?: "AI Coach request failed."))
+            emit(AiUiState.Error(friendlyAiError(e)))
         }
+    }
+
+    private suspend fun runStructuredAnalysis(
+        prompt: String,
+        referenceId: String,
+        symbol: String
+    ): Result<AiSignalSecondOpinion> {
+        val cfg = aiConfigStore.getCurrent()
+        if (cfg.provider != AiProvider.FIREBASE_AI_LOGIC) {
+            return try {
+                val rawText = withTimeout(TIMEOUT_MS) {
+                    callExternalProvider(cfg, "$prompt\n\n$jsonSchemaInstruction", expectJson = true)
+                }
+                val parsed = parseSecondOpinionJson(
+                    rawJson = extractJsonObject(rawText),
+                    referenceId = referenceId,
+                    symbol = symbol
+                )
+                Result.success(parsed)
+            } catch (e: TimeoutCancellationException) {
+                Result.failure(IllegalStateException("${cfg.provider.shortLabel} analysis timed out after 60s."))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "${cfg.provider.shortLabel} analysis failed", e)
+                Result.failure(IllegalStateException(e.message ?: "${cfg.provider.shortLabel} analysis failed."))
+            }
+        }
+
+        if (!ensureFirebaseInitialized(context)) {
+            return Result.failure(IllegalStateException(FIREBASE_NOT_INITIALIZED_MSG))
+        }
+        return try {
+            val response = withTimeout(TIMEOUT_MS) {
+                structuredModel.generateContent(prompt)
+            }
+            val rawJson = response.text
+                ?: return Result.failure(IllegalStateException("Gemini returned an empty response."))
+            val parsed = parseSecondOpinionJson(
+                rawJson = extractJsonObject(rawJson),
+                referenceId = referenceId,
+                symbol = symbol
+            )
+            Result.success(parsed)
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Signal analysis timed out", e)
+            Result.failure(IllegalStateException("AI analysis timed out after 60s. Please retry."))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Firebase AI analysis failed", e)
+            Result.failure(IllegalStateException(friendlyAiError(e)))
+        }
+    }
+
+    private suspend fun callExternalProvider(
+        cfg: AiProviderConfig,
+        prompt: String,
+        expectJson: Boolean
+    ): String = withContext(Dispatchers.IO) {
+        val key = cfg.apiKey.trim()
+        if (key.isBlank()) {
+            throw IllegalStateException("Enter your ${cfg.provider.label} API key in Settings → AI Provider Configuration.")
+        }
+        val baseUrl = cfg.effectiveBaseUrl
+        if (!baseUrl.startsWith("https://")) {
+            throw IllegalStateException("AI Provider base URL must use HTTPS.")
+        }
+        val model = cfg.effectiveModel
+        val jsonMedia = "application/json; charset=utf-8".toMediaType()
+
+        val request: Request = when (cfg.provider) {
+            AiProvider.GEMINI_API -> {
+                val url = "$baseUrl/models/$model:generateContent"
+                val genCfg = JSONObject().apply {
+                    put("temperature", if (expectJson) 0.25 else 0.4)
+                    if (expectJson) put("responseMimeType", "application/json")
+                }
+                val body = JSONObject().apply {
+                    put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
+                    put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
+                    put("generationConfig", genCfg)
+                }
+                Request.Builder()
+                    .url(url)
+                    .header("x-goog-api-key", key)
+                    .post(body.toString().toRequestBody(jsonMedia))
+                    .build()
+            }
+            AiProvider.CLAUDE_API -> {
+                val url = "$baseUrl/messages"
+                val body = JSONObject().apply {
+                    put("model", model)
+                    put("max_tokens", 1024)
+                    put("temperature", if (expectJson) 0.25 else 0.4)
+                    put("system", systemPrompt)
+                    put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+                }
+                Request.Builder()
+                    .url(url)
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01")
+                    .post(body.toString().toRequestBody(jsonMedia))
+                    .build()
+            }
+            AiProvider.DEEPSEEK_API, AiProvider.OPENAI_COMPATIBLE -> {
+                val url = if (baseUrl.endsWith("/chat/completions")) baseUrl else "$baseUrl/chat/completions"
+                val messages = JSONArray()
+                    .put(JSONObject().put("role", "system").put("content", systemPrompt))
+                    .put(JSONObject().put("role", "user").put("content", prompt))
+                val body = JSONObject().apply {
+                    put("model", model)
+                    put("temperature", if (expectJson) 0.25 else 0.4)
+                    put("messages", messages)
+                    if (expectJson) {
+                        put("response_format", JSONObject().put("type", "json_object"))
+                    }
+                }
+                Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bearer $key")
+                    .post(body.toString().toRequestBody(jsonMedia))
+                    .build()
+            }
+            AiProvider.FIREBASE_AI_LOGIC -> throw IllegalStateException("Invalid provider dispatch")
+        }
+
+        val callClient = okHttpClient.newBuilder()
+            .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+
+        callClient.newCall(request).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val errMsg = runCatching {
+                    val root = JSONObject(raw)
+                    root.optJSONObject("error")?.optString("message")
+                        ?: root.optString("message")
+                        ?: raw.take(180)
+                }.getOrDefault(raw.take(180))
+                throw IllegalStateException("${cfg.provider.shortLabel} HTTP ${resp.code}: ${errMsg.ifBlank { resp.message }}")
+            }
+
+            val root = JSONObject(raw)
+            val contentText = when (cfg.provider) {
+                AiProvider.GEMINI_API -> root.optJSONArray("candidates")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("content")
+                    ?.optJSONArray("parts")
+                    ?.optJSONObject(0)
+                    ?.optString("text")
+                AiProvider.CLAUDE_API -> root.optJSONArray("content")
+                    ?.optJSONObject(0)
+                    ?.optString("text")
+                AiProvider.DEEPSEEK_API, AiProvider.OPENAI_COMPATIBLE -> root.optJSONArray("choices")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("message")
+                    ?.optString("content")
+                AiProvider.FIREBASE_AI_LOGIC -> null
+            }
+            contentText?.takeIf { it.isNotBlank() }
+                ?: throw IllegalStateException("${cfg.provider.shortLabel} returned an empty response.")
+        }
+    }
+
+    private fun friendlyAiError(e: Exception): String {
+        val raw = e.localizedMessage.orEmpty()
+        return if (raw.contains("App check", ignoreCase = true) ||
+            raw.contains("AppCheck", ignoreCase = true) ||
+            raw.contains("token is invalid", ignoreCase = true)
+        ) {
+            "Firebase App Check token is invalid on this APK build. Open Settings → AI Provider Configuration to select Google Gemini API, Claude, DeepSeek, or OpenAI with your own API key."
+        } else {
+            raw.ifBlank { "AI request failed. Check Settings → AI Provider Configuration." }
+        }
+    }
+
+    private fun extractJsonObject(raw: String): String {
+        val trimmed = raw.trim()
+        val start = trimmed.indexOf('{')
+        val end = trimmed.lastIndexOf('}')
+        return if (start >= 0 && end > start) trimmed.substring(start, end + 1) else trimmed
     }
 
     private fun buildSignalPrompt(
@@ -321,11 +505,11 @@ class FirebaseAiMarketRepository @Inject constructor(
         val posText = positions.take(10).joinToString("\n") { p ->
             val ltp = ltpMap[p.symbol] ?: p.averageEntryPrice
             val pnl = RiskMath.calculateUnrealisedPnl(p.averageEntryPrice, ltp, p.quantity, p.side == OrderSide.BUY)
-            "- ${p.symbol} (${p.segment.label}) ${p.side.name} ${p.quantity} [${p.productType.shortCode}] Avg=${p.averageEntryPrice} LTP=$ltp PnL=$pnl SL=${p.activeSlPrice ?: "None"} Tgt=${p.activeTargetPrice ?: "None"} TSL=${p.isTslEnabled}"
+            "- ${p.symbol} (${p.segment.label}) ${p.side.name} ${p.quantity} [${p.productType.shortCode}] Avg=${RiskMath.formatPrice(p.averageEntryPrice, p.segment)} LTP=${RiskMath.formatPrice(ltp, p.segment)} PnL=${RiskMath.formatSignedCurrency(pnl, p.segment)} SL=${p.activeSlPrice?.let { RiskMath.formatPrice(it, p.segment) } ?: "None"} Tgt=${p.activeTargetPrice?.let { RiskMath.formatPrice(it, p.segment) } ?: "None"}"
         }.ifBlank { "No open positions." }
 
         val journalText = journalEntries.take(12).joinToString("\n") { j ->
-            "- ${j.symbol} (${j.segment.label}) ${j.side.name} ${j.quantity}: Entry=${j.entryPrice} Exit=${j.exitPrice} NetPnL=${j.netPnl} Reason=${j.exitReason.label} Note=${j.notes.ifBlank { "-" }}"
+            "- ${j.symbol} (${j.segment.label}) ${j.side.name} ${j.quantity}: Entry=${RiskMath.formatPrice(j.entryPrice, j.segment)} Exit=${RiskMath.formatPrice(j.exitPrice, j.segment)} NetPnL=${RiskMath.formatSignedCurrency(j.netPnl, j.segment)} Reason=${j.exitReason.label}"
         }.ifBlank { "No closed journal trades yet." }
 
         val signalText = activeSignals.take(6).joinToString("\n") { s ->
@@ -334,7 +518,10 @@ class FirebaseAiMarketRepository @Inject constructor(
 
         return buildString {
             appendLine("User Request: $question")
-            appendLine("\nAccount Snapshot: Available Margin=${RiskMath.formatPortfolioInr(account.availableMargin)}, Realised PnL=${RiskMath.formatPortfolioInr(account.realisedPnl, signed = true)}, IST=${MarketClock.formatCurrentIstClock()}")
+            appendLine(
+                "\nAccount Snapshot: India Free Margin=${RiskMath.formatPortfolioInr(account.availableMargin)}, India Realised=${RiskMath.formatPortfolioInr(account.realisedPnl, signed = true)} | " +
+                    "Crypto Free Margin=${RiskMath.formatPortfolioUsd(account.cryptoAvailableMargin)}, Crypto Realised=${RiskMath.formatPortfolioUsd(account.cryptoRealisedPnl, signed = true)} | IST=${MarketClock.formatCurrentIstClock()}"
+            )
             appendLine("\nOpen Positions:\n$posText")
             appendLine("\nRecent Closed Trades:\n$journalText")
             appendLine("\nTop Active Signals:\n$signalText")
@@ -344,10 +531,10 @@ class FirebaseAiMarketRepository @Inject constructor(
 
     companion object {
         private const val TAG = "FirebaseAiMarketRepo"
-        const val MODEL_NAME = "gemini-3.8-flash"
+        const val MODEL_NAME = "gemini-2.5-flash"
         private const val TIMEOUT_MS = 60_000L
         private const val FIREBASE_NOT_INITIALIZED_MSG =
-            "Firebase is not configured in this APK build (missing app/google-services.json). Build the APK from AI Studio or configure the GOOGLE_SERVICES_JSON GitHub Actions secret to enable Gemini AI."
+            "Firebase is not configured in this APK build. Open Settings → AI Provider Configuration to use Gemini API, Claude, DeepSeek, or OpenAI directly."
 
         internal fun parseSecondOpinionJson(
             rawJson: String,

@@ -9,12 +9,16 @@ import kotlin.math.sin
 
 object SeedData {
     val INITIAL_CAPITAL = BigDecimal("1000000.00")
+    val INITIAL_CRYPTO_CAPITAL = BigDecimal("10000.00")
 
     fun defaultAccount(): AccountStateEntity = AccountStateEntity(
         id = 1,
         virtualCapital = INITIAL_CAPITAL,
         availableMargin = INITIAL_CAPITAL,
-        realisedPnl = BigDecimal.ZERO.setScale(2)
+        realisedPnl = BigDecimal.ZERO.setScale(2),
+        cryptoVirtualCapital = INITIAL_CRYPTO_CAPITAL,
+        cryptoAvailableMargin = INITIAL_CRYPTO_CAPITAL,
+        cryptoRealisedPnl = BigDecimal.ZERO.setScale(2)
     )
 
     fun seedInstruments(): List<InstrumentEntity> = listOf(

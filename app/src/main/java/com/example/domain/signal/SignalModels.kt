@@ -79,13 +79,18 @@ enum class SignalStrategy(val label: String, val shortLabel: String) {
     TRAP("Liquidity Trap Reversal", "TRAP"),
     PIVOT("Pivot / CPR Breakout", "PIVOT"),
     QUANT_MEAN_REVERSION("Quant Z-Score Mean Reversion", "QUANT MR"),
-    QUANT_BREAKOUT("Quant Donchian + Squeeze Breakout", "QUANT BO");
+    QUANT_BREAKOUT("Quant Donchian + Squeeze Breakout", "QUANT BO"),
+    CONFLUENCE_70("70% Confluence (Fib 50% + SMA 5/8-13/20 + EMA 50/200)", "70% CONF"),
+    MOMENTUM_BREAKOUT("Momentum Breakout (SMA 10/30 + RSI)", "MOM BO"),
+    EMA50_RSI_MACD("50 EMA + RSI + MACD Trend", "EMA50 MACD"),
+    ASR_TRADING("ASR Support & Resistance", "ASR"),
+    NCL_TRADING("NCL Narrow Candle Breakout", "NCL");
 
     /** Suggested paper-trading product for this strategy family. */
     val prefersCarryForward: Boolean
         get() = when (this) {
             SWING, SWIG, BTST_STBT, EMA_50_200_SWING, EMA_50_200_SHORT_TERM,
-            EMA_50_200_INVESTING, EMA_50_200_LONG_TERM -> true
+            EMA_50_200_INVESTING, EMA_50_200_LONG_TERM, CONFLUENCE_70 -> true
             else -> false
         }
 }
@@ -159,6 +164,36 @@ data class SignalAccuracyStats(
         get() = if (decidedCount == 0) 0.0 else (wins.toDouble() / decidedCount.toDouble()) * 100.0
     val expiryRatePercent: Double
         get() = if (totalResolved == 0) 0.0 else (expiredCount.toDouble() / totalResolved.toDouble()) * 100.0
+}
+
+data class InstrumentSignalPerformance(
+    val symbol: String,
+    val segment: MarketSegment,
+    val totalSignals: Int,
+    val t1Hits: Int,
+    val t2Hits: Int,
+    val slHits: Int,
+    val expiredCount: Int,
+    val avgPnlPercent: Double
+) {
+    val wins: Int get() = t1Hits + t2Hits
+    val decidedCount: Int get() = wins + slHits
+    val accuracyPercent: Double
+        get() = if (decidedCount == 0) 0.0 else (wins.toDouble() / decidedCount.toDouble()) * 100.0
+}
+
+data class InstrumentTradePerformance(
+    val symbol: String,
+    val segment: MarketSegment,
+    val totalTrades: Int,
+    val wins: Int,
+    val losses: Int,
+    val grossPnl: BigDecimal,
+    val totalCharges: BigDecimal,
+    val netPnl: BigDecimal
+) {
+    val winRatePercent: Double
+        get() = if (totalTrades == 0) 0.0 else (wins.toDouble() / totalTrades.toDouble()) * 100.0
 }
 
 data class SignalFilterCriteria(

@@ -41,6 +41,7 @@ data class WatchlistUiState(
     val selectedType: InstrumentType? = null,
     val accountState: AccountState = AccountState(BigDecimal("1000000"), BigDecimal("1000000"), BigDecimal.ZERO),
     val unrealisedPnl: BigDecimal = BigDecimal.ZERO,
+    val cryptoUnrealisedPnl: BigDecimal = BigDecimal.ZERO,
     val feedState: FeedConnectionState = FeedConnectionState.Connecting(FeedSourceType.SIMULATED),
     val activeFeedType: FeedType = FeedType.SIMULATED,
     val liveConnectionStatus: LiveConnectionStatus = LiveConnectionStatus.DISCONNECTED,
@@ -128,16 +129,21 @@ class WatchlistViewModel @Inject constructor(
         val liveSearch = values[9] as LiveSearchSnapshot
 
         val ltpMap = allInstruments.associate { it.symbol to it.ltp }
-        val totalUnrealised = positions.fold(BigDecimal.ZERO) { acc, pos ->
+        var indiaUnrealised = BigDecimal.ZERO
+        var cryptoUnrealised = BigDecimal.ZERO
+        positions.forEach { pos ->
             val ltp = ltpMap[pos.symbol] ?: pos.averageEntryPrice
-            acc.add(
-                RiskMath.calculateUnrealisedPnl(
-                    entryPrice = pos.averageEntryPrice,
-                    ltp = ltp,
-                    quantity = pos.quantity,
-                    isLong = pos.side == OrderSide.BUY
-                )
+            val pnl = RiskMath.calculateUnrealisedPnl(
+                entryPrice = pos.averageEntryPrice,
+                ltp = ltp,
+                quantity = pos.quantity,
+                isLong = pos.side == OrderSide.BUY
             )
+            if (pos.segment == MarketSegment.CRYPTO) {
+                cryptoUnrealised = cryptoUnrealised.add(pnl)
+            } else {
+                indiaUnrealised = indiaUnrealised.add(pnl)
+            }
         }
 
         val filtered = allInstruments.filter { inst ->
@@ -155,7 +161,8 @@ class WatchlistViewModel @Inject constructor(
             selectedSegment = segmentFilter,
             selectedType = typeFilter,
             accountState = account,
-            unrealisedPnl = totalUnrealised,
+            unrealisedPnl = indiaUnrealised,
+            cryptoUnrealisedPnl = cryptoUnrealised,
             feedState = feedState,
             activeFeedType = health.activeFeed,
             liveConnectionStatus = health.liveStatus,

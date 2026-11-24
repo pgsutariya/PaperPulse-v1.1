@@ -384,7 +384,8 @@ data class CapitalTransactionEntity(
     val amount: BigDecimal,
     val balanceAfter: BigDecimal,
     val note: String,
-    val timestampMillis: Long
+    val timestampMillis: Long,
+    val currency: String = "INR"
 )
 
 fun CapitalTransactionEntity.toDomain(): com.example.domain.model.CapitalTransaction =
@@ -394,7 +395,8 @@ fun CapitalTransactionEntity.toDomain(): com.example.domain.model.CapitalTransac
         amount = amount,
         balanceAfter = balanceAfter,
         note = note,
-        timestampMillis = timestampMillis
+        timestampMillis = timestampMillis,
+        currency = currency
     )
 
 @Entity(tableName = "account_state")
@@ -402,13 +404,19 @@ data class AccountStateEntity(
     @PrimaryKey val id: Int = 1,
     val virtualCapital: BigDecimal,
     val availableMargin: BigDecimal,
-    val realisedPnl: BigDecimal
+    val realisedPnl: BigDecimal,
+    val cryptoVirtualCapital: BigDecimal = BigDecimal("10000.00"),
+    val cryptoAvailableMargin: BigDecimal = BigDecimal("10000.00"),
+    val cryptoRealisedPnl: BigDecimal = BigDecimal.ZERO
 )
 
 fun AccountStateEntity.toDomain(): AccountState = AccountState(
     virtualCapital = virtualCapital,
     availableMargin = availableMargin,
-    realisedPnl = realisedPnl
+    realisedPnl = realisedPnl,
+    cryptoVirtualCapital = cryptoVirtualCapital,
+    cryptoAvailableMargin = cryptoAvailableMargin,
+    cryptoRealisedPnl = cryptoRealisedPnl
 )
 
 @Entity(

@@ -38,9 +38,13 @@ data class PositionWithLivePnl(
 data class PositionsUiState(
     val items: List<PositionWithLivePnl> = emptyList(),
     val totalUnrealisedPnl: BigDecimal = BigDecimal.ZERO,
+    val cryptoUnrealisedPnl: BigDecimal = BigDecimal.ZERO,
     val realisedPnl: BigDecimal = BigDecimal.ZERO,
+    val cryptoRealisedPnl: BigDecimal = BigDecimal.ZERO,
     val virtualCapital: BigDecimal = BigDecimal.ZERO,
     val availableMargin: BigDecimal = BigDecimal.ZERO,
+    val cryptoVirtualCapital: BigDecimal = BigDecimal.ZERO,
+    val cryptoAvailableMargin: BigDecimal = BigDecimal.ZERO,
     val capitalTransactions: List<CapitalTransaction> = emptyList(),
     val riskControlsSuspended: Boolean = false,
     val suspendedBannerMessage: String = "",
@@ -76,7 +80,8 @@ class PositionsViewModel @Inject constructor(
         health: FeedHealthData ->
         val instMap: Map<String, Instrument> = instruments.associateBy { it.symbol }
         val segStatuses = health.statuses
-        var totalUnrealised = BigDecimal.ZERO
+        var indiaUnrealised = BigDecimal.ZERO
+        var cryptoUnrealised = BigDecimal.ZERO
         val enriched = positions.map { pos ->
             val inst = instMap[pos.symbol]
             val ltp = inst?.ltp ?: pos.averageEntryPrice
@@ -86,7 +91,11 @@ class PositionsViewModel @Inject constructor(
                 quantity = pos.quantity,
                 isLong = pos.side == OrderSide.BUY
             )
-            totalUnrealised = totalUnrealised.add(pnl)
+            if (pos.segment == MarketSegment.CRYPTO) {
+                cryptoUnrealised = cryptoUnrealised.add(pnl)
+            } else {
+                indiaUnrealised = indiaUnrealised.add(pnl)
+            }
             PositionWithLivePnl(
                 position = pos,
                 ltp = ltp,
@@ -97,10 +106,14 @@ class PositionsViewModel @Inject constructor(
         }
         PositionsUiState(
             items = enriched,
-            totalUnrealisedPnl = totalUnrealised,
+            totalUnrealisedPnl = indiaUnrealised,
+            cryptoUnrealisedPnl = cryptoUnrealised,
             realisedPnl = account.realisedPnl,
+            cryptoRealisedPnl = account.cryptoRealisedPnl,
             virtualCapital = account.virtualCapital,
             availableMargin = account.availableMargin,
+            cryptoVirtualCapital = account.cryptoVirtualCapital,
+            cryptoAvailableMargin = account.cryptoAvailableMargin,
             capitalTransactions = capitalTxns,
             riskControlsSuspended = health.suspended,
             suspendedBannerMessage = health.bannerMsg,
@@ -164,10 +177,31 @@ class PositionsViewModel @Inject constructor(
         }
     }
 
-    fun resetAccount(newCapital: BigDecimal) {
+    fun addCryptoCapital(amount: BigDecimal, note: String) {
         viewModelScope.launch {
-            tradingRepository.resetPaperAccount(newCapital)
-            _messages.emit("Paper account reset to ${RiskMath.formatPortfolioInr(newCapital)}")
+            tradingRepository.addCryptoCapital(amount, note)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Failed to add USD funds") }
+        }
+    }
+
+    fun reduceCryptoCapital(amount: BigDecimal, note: String) {
+        viewModelScope.launch {
+            tradingRepository.reduceCryptoCapital(amount, note)
+                .onSuccess { _messages.emit(it) }
+                .onFailure { _messages.emit(it.message ?: "Failed to reduce USD funds") }
+        }
+    }
+
+    fun resetAccount(
+        newCapital: BigDecimal,
+        newCryptoCapital: BigDecimal = BigDecimal("10000.00")
+    ) {
+        viewModelScope.launch {
+            tradingRepository.resetPaperAccount(newCapital, newCryptoCapital)
+            _messages.emit(
+                "Paper account reset: ${RiskMath.formatPortfolioInr(newCapital)} & ${RiskMath.formatPortfolioUsd(newCryptoCapital)}"
+            )
         }
     }
 

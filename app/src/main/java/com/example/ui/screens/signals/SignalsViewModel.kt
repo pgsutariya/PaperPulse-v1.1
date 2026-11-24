@@ -13,10 +13,12 @@ import com.example.domain.model.ProductType
 import com.example.domain.model.ValidityType
 import com.example.domain.signal.AiSignalSecondOpinion
 import com.example.domain.signal.AiUiState
+import com.example.domain.signal.InstrumentSignalPerformance
 import com.example.domain.signal.SignalAccuracyStats
 import com.example.domain.signal.SignalAssetCategory
 import com.example.domain.signal.SignalConfidence
 import com.example.domain.signal.SignalDirection
+import com.example.domain.signal.SignalOutcome
 import com.example.domain.signal.SignalRecord
 import com.example.domain.signal.SignalStrategy
 import com.example.domain.signal.TradeSignal
@@ -50,6 +52,7 @@ data class SignalsUiState(
     val filters: SignalsFilterState = SignalsFilterState(),
     val items: List<SignalUiItem> = emptyList(),
     val historyRecords: List<SignalRecord> = emptyList(),
+    val instrumentPerformance: List<InstrumentSignalPerformance> = emptyList(),
     val accuracyStats: SignalAccuracyStats = SignalAccuracyStats(),
     val activeCount: Int = 0,
     val savedCount: Int = 0,
@@ -114,13 +117,45 @@ class SignalsViewModel @Inject constructor(
                 (filters.segment == null || rec.segment == filters.segment) &&
                 (filters.confidence == null || rec.confidence == filters.confidence)
         }
+        val filteredAccuracy = if (filteredRecords.size == records.size) {
+            stats
+        } else {
+            SignalAccuracyStats(
+                totalResolved = filteredRecords.size,
+                t1Hits = filteredRecords.count { it.outcome == SignalOutcome.HIT_T1 },
+                t2Hits = filteredRecords.count { it.outcome == SignalOutcome.HIT_T2 },
+                slHits = filteredRecords.count { it.outcome == SignalOutcome.HIT_SL },
+                expiredCount = filteredRecords.count { it.outcome == SignalOutcome.EXPIRED }
+            )
+        }
+        val instPerf = filteredRecords
+            .groupBy { it.symbol }
+            .map { (sym, list) ->
+                InstrumentSignalPerformance(
+                    symbol = sym,
+                    segment = list.first().segment,
+                    totalSignals = list.size,
+                    t1Hits = list.count { it.outcome == SignalOutcome.HIT_T1 },
+                    t2Hits = list.count { it.outcome == SignalOutcome.HIT_T2 },
+                    slHits = list.count { it.outcome == SignalOutcome.HIT_SL },
+                    expiredCount = list.count { it.outcome == SignalOutcome.EXPIRED },
+                    avgPnlPercent = if (list.isEmpty()) 0.0 else list.map { it.pnlPercent }.average()
+                )
+            }
+            .sortedWith(
+                compareByDescending<InstrumentSignalPerformance> { it.decidedCount > 0 }
+                    .thenByDescending { it.accuracyPercent }
+                    .thenByDescending { it.totalSignals }
+            )
+
         val selected = (active + saved).firstOrNull { it.signal.id == meta.selectedId }
         val selectedAi = selected?.let { meta.aiStates[it.signal.id] } ?: AiUiState.Idle
         SignalsUiState(
             filters = filters,
             items = filteredSignals,
             historyRecords = filteredRecords,
-            accuracyStats = stats,
+            instrumentPerformance = instPerf,
+            accuracyStats = filteredAccuracy,
             activeCount = active.size,
             savedCount = saved.size,
             historyCount = records.size,

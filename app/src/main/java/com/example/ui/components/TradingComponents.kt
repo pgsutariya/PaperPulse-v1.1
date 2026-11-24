@@ -316,15 +316,18 @@ fun PortfolioPulseHeader(
     activeFeedType: FeedType = FeedType.SIMULATED,
     liveConnectionStatus: LiveConnectionStatus = LiveConnectionStatus.DISCONNECTED,
     riskControlsSuspended: Boolean = false,
+    cryptoUnrealisedPnl: BigDecimal = BigDecimal.ZERO,
     modifier: Modifier = Modifier
 ) {
     val tradingColors = LocalTradingColors.current
     val totalMtm = account.realisedPnl.add(unrealisedPnl)
+    val cryptoMtm = account.cryptoRealisedPnl.add(cryptoUnrealisedPnl)
     val mtmColor by animateColorAsState(
         targetValue = if (totalMtm >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish,
         animationSpec = tween(250),
         label = "mtmColor"
     )
+    val cryptoMtmColor = if (cryptoMtm >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
     val dotColor = when {
         riskControlsSuspended -> tradingColors.bearish
         activeFeedType == FeedType.SIMULATED -> tradingColors.bullish
@@ -346,8 +349,8 @@ fun PortfolioPulseHeader(
             ) {
                 Column {
                     Text(
-                        text = "PAPER CAPITAL",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "INDIA PAPER CAPITAL (₹)",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(2.dp))
@@ -360,8 +363,8 @@ fun PortfolioPulseHeader(
 
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = "NET MTM P&L",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "INDIA NET MTM",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(2.dp))
@@ -371,6 +374,29 @@ fun PortfolioPulseHeader(
                         color = mtmColor
                     )
                 }
+            }
+
+            Spacer(Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "CRYPTO ($): ${RiskMath.formatPortfolioUsd(account.cryptoAvailableMargin)}",
+                    style = MonoPriceSmall,
+                    color = tradingColors.amber
+                )
+                Text(
+                    text = "MTM ${RiskMath.formatPortfolioUsd(cryptoMtm, signed = true)}",
+                    style = MonoPriceSmall,
+                    color = cryptoMtmColor
+                )
             }
 
             Spacer(Modifier.height(10.dp))

@@ -85,12 +85,14 @@ class TradingLedgerService @Inject constructor(
                 quantity = order.quantity,
                 instrumentType = order.instrumentType
             )
-            if (account.availableMargin < requiredMargin) {
+            val isCrypto = order.segment == com.example.domain.model.MarketSegment.CRYPTO
+            val availableMargin = if (isCrypto) account.cryptoAvailableMargin else account.availableMargin
+            if (availableMargin < requiredMargin) {
                 orderDao.upsert(
                     order.copy(
                         status = OrderStatus.CANCELLED,
                         validityState = ValidityState.CANCELLED,
-                        statusReason = "Rejected at fill: insufficient margin (need ${RiskMath.formatPortfolioInr(requiredMargin)})",
+                        statusReason = "Rejected at fill: insufficient margin (need ${RiskMath.formatCurrency(requiredMargin, order.segment)})",
                         updatedAtMillis = nowMillis
                     )
                 )
@@ -153,6 +155,7 @@ class TradingLedgerService @Inject constructor(
             val slOrderId = resolvedSl?.let { UUID.randomUUID().toString() }
             val targetOrderId = resolvedTarget?.let { UUID.randomUUID().toString() }
 
+            val protectiveExpiryMillis = maxOf(order.expiresAtMillis, nowMillis + 30L * 86_400_000L)
             if (slOrderId != null && resolvedSl != null) {
                 orderDao.upsert(
                     OrderEntity(
@@ -170,7 +173,7 @@ class TradingLedgerService @Inject constructor(
                         status = OrderStatus.PENDING,
                         validityType = order.validityType,
                         gttDays = order.gttDays,
-                        expiresAtMillis = order.expiresAtMillis,
+                        expiresAtMillis = protectiveExpiryMillis,
                         validityState = ValidityState.ACTIVE,
                         ocoGroupId = ocoGroupId,
                         parentOrderId = order.id,
@@ -210,7 +213,7 @@ class TradingLedgerService @Inject constructor(
                         status = OrderStatus.PENDING,
                         validityType = order.validityType,
                         gttDays = order.gttDays,
-                        expiresAtMillis = order.expiresAtMillis,
+                        expiresAtMillis = protectiveExpiryMillis,
                         validityState = ValidityState.ACTIVE,
                         ocoGroupId = ocoGroupId,
                         parentOrderId = order.id,
@@ -273,17 +276,24 @@ class TradingLedgerService @Inject constructor(
                     trailingTargetExitTrigger = null,
                     validityType = order.validityType,
                     gttDays = order.gttDays ?: 7,
-                    expiresAtMillis = order.expiresAtMillis,
+                    expiresAtMillis = protectiveExpiryMillis,
                     openedAtMillis = nowMillis,
                     updatedAtMillis = nowMillis,
                     lotSize = instrument.lotSize
                 )
             )
 
-            accountDao.updateBalances(
-                margin = account.availableMargin.subtract(requiredMargin).max(BigDecimal.ZERO),
-                realised = account.realisedPnl
-            )
+            if (isCrypto) {
+                accountDao.updateCryptoBalances(
+                    margin = account.cryptoAvailableMargin.subtract(requiredMargin).max(BigDecimal.ZERO),
+                    realised = account.cryptoRealisedPnl
+                )
+            } else {
+                accountDao.updateBalances(
+                    margin = account.availableMargin.subtract(requiredMargin).max(BigDecimal.ZERO),
+                    realised = account.realisedPnl
+                )
+            }
             true
         }
     }
@@ -486,10 +496,17 @@ class TradingLedgerService @Inject constructor(
                 quantity = currentPos.quantity,
                 instrumentType = currentPos.instrumentType
             )
-            accountDao.updateBalances(
-                margin = account.availableMargin.add(releasedMargin).add(netPnl).max(BigDecimal.ZERO),
-                realised = account.realisedPnl.add(netPnl)
-            )
+            if (currentPos.segment == com.example.domain.model.MarketSegment.CRYPTO) {
+                accountDao.updateCryptoBalances(
+                    margin = account.cryptoAvailableMargin.add(releasedMargin).add(netPnl).max(BigDecimal.ZERO),
+                    realised = account.cryptoRealisedPnl.add(netPnl)
+                )
+            } else {
+                accountDao.updateBalances(
+                    margin = account.availableMargin.add(releasedMargin).add(netPnl).max(BigDecimal.ZERO),
+                    realised = account.realisedPnl.add(netPnl)
+                )
+            }
 
             tradeJournalDao.insert(
                 TradeJournalEntity(

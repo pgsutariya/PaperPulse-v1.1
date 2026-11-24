@@ -536,7 +536,7 @@ fun InstrumentDetailScreen(
                         OutlinedTextField(
                             value = draft.slValueText,
                             onValueChange = viewModel::updateSlValue,
-                            label = { Text(if (draft.slMode == RiskInputMode.PERCENT) "SL Distance (%)" else "SL Trigger Price") },
+                            label = { Text(if (draft.slMode == RiskInputMode.PERCENT) "SL Distance (%)" else "SL Trigger Price (${inst.segment.currencySymbol})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth().testTag("sl_value_input")
@@ -609,7 +609,7 @@ fun InstrumentDetailScreen(
                         OutlinedTextField(
                             value = draft.targetValueText,
                             onValueChange = viewModel::updateTargetValue,
-                            label = { Text(if (draft.targetMode == RiskInputMode.PERCENT) "Target Distance (%)" else "Target Price") },
+                            label = { Text(if (draft.targetMode == RiskInputMode.PERCENT) "Target Distance (%)" else "Target Price (${inst.segment.currencySymbol})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth().testTag("target_value_input")
@@ -709,7 +709,7 @@ fun InstrumentDetailScreen(
             AiSecondOpinionCard(
                 title = "AI Pre-Trade Risk Audit",
                 subtitle = "Checks planned Entry, SL, Target & product fit against recent candles",
-                ctaLabel = "Audit Draft Order with Gemini",
+                ctaLabel = "Audit Draft Order with AI",
                 aiState = state.aiAuditState,
                 onAnalyze = viewModel::runAiSetupAudit,
                 ctaTestTag = "ai_audit_setup_button"
@@ -727,7 +727,10 @@ fun InstrumentDetailScreen(
             } else {
                 notional
             }
-            val availableMargin = state.accountState?.availableMargin
+            val isCrypto = inst.segment == com.example.domain.model.MarketSegment.CRYPTO
+            val availableMargin = state.accountState?.let {
+                if (isCrypto) it.cryptoAvailableMargin else it.availableMargin
+            }
             val insufficientMargin = availableMargin != null && marginRequired > availableMargin
 
             Surface(
@@ -739,16 +742,20 @@ fun InstrumentDetailScreen(
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Est. Margin Required", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
-                            text = RiskMath.formatPortfolioInr(marginRequired),
+                            text = RiskMath.formatCurrency(marginRequired, inst.segment),
                             style = MonoPriceMedium,
                             color = if (insufficientMargin) tradingColors.bearish else MaterialTheme.colorScheme.onSurface
                         )
                     }
                     availableMargin?.let { avail ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Available Margin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(
-                                text = RiskMath.formatPortfolioInr(avail),
+                                text = if (isCrypto) "Available Crypto Margin ($)" else "Available Margin (₹)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = RiskMath.formatCurrency(avail, inst.segment),
                                 style = MonoPriceSmall,
                                 color = if (insufficientMargin) tradingColors.bearish else tradingColors.bullish
                             )

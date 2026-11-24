@@ -132,10 +132,12 @@ class TradingRepository private constructor(
             instrumentType = instrument.type
         )
         val account = accountDao.getAccount() ?: SeedData.defaultAccount()
-        if (account.availableMargin < requiredMargin) {
+        val isCrypto = instrument.segment == com.example.domain.model.MarketSegment.CRYPTO
+        val availableMargin = if (isCrypto) account.cryptoAvailableMargin else account.availableMargin
+        if (availableMargin < requiredMargin) {
             return Result.failure(
                 IllegalStateException(
-                    "Insufficient margin: need ${RiskMath.formatPortfolioInr(requiredMargin)}, available ${RiskMath.formatPortfolioInr(account.availableMargin)}"
+                    "Insufficient margin: need ${RiskMath.formatCurrency(requiredMargin, instrument.segment)}, available ${RiskMath.formatCurrency(availableMargin, instrument.segment)}"
                 )
             )
         }
@@ -313,15 +315,46 @@ class TradingRepository private constructor(
         trailingTargetValue: BigDecimal
     ): Result<Unit> {
         val nowMillis = System.currentTimeMillis()
+        var failure: Throwable? = null
         database.withTransaction {
             val pos = positionDao.getById(positionId)
-                ?: return@withTransaction
+                ?: run {
+                    failure = IllegalStateException("Position already closed")
+                    return@withTransaction
+                }
             val instrument = instrumentDao.getBySymbol(pos.symbol)
             val tickSize = instrument?.tickSize ?: BigDecimal("0.05")
-            val exitSide = if (pos.side == OrderSide.BUY) OrderSide.SELL else OrderSide.BUY
+            val currentLtp = instrument?.ltp ?: pos.averageEntryPrice
+            val isBuy = pos.side == OrderSide.BUY
+            val exitSide = if (isBuy) OrderSide.SELL else OrderSide.BUY
 
-            val roundedSl = newSlPrice?.let { RiskMath.roundToTick(it.max(tickSize), tickSize) }
-            val roundedTarget = newTargetPrice?.let { RiskMath.roundToTick(it.max(tickSize), tickSize) }
+            val roundedSl = newSlPrice?.takeIf { it > BigDecimal.ZERO }?.let { RiskMath.roundToTick(it.max(tickSize), tickSize) }
+            val roundedTarget = newTargetPrice?.takeIf { it > BigDecimal.ZERO }?.let { RiskMath.roundToTick(it.max(tickSize), tickSize) }
+
+            // Validate SL/Target against live LTP so the user gets immediate clear feedback instead of silent rejection or instant trigger
+            if (roundedSl != null) {
+                if (isBuy && roundedSl >= currentLtp) {
+                    failure = IllegalArgumentException("Stop Loss (${RiskMath.formatPrice(roundedSl, pos.segment)}) must be below live LTP (${RiskMath.formatPrice(currentLtp, pos.segment)}) for a BUY position")
+                    return@withTransaction
+                }
+                if (!isBuy && roundedSl <= currentLtp) {
+                    failure = IllegalArgumentException("Stop Loss (${RiskMath.formatPrice(roundedSl, pos.segment)}) must be above live LTP (${RiskMath.formatPrice(currentLtp, pos.segment)}) for a SELL position")
+                    return@withTransaction
+                }
+            }
+            if (roundedTarget != null) {
+                if (isBuy && roundedTarget <= currentLtp) {
+                    failure = IllegalArgumentException("Target (${RiskMath.formatPrice(roundedTarget, pos.segment)}) must be above live LTP (${RiskMath.formatPrice(currentLtp, pos.segment)}) for a BUY position")
+                    return@withTransaction
+                }
+                if (!isBuy && roundedTarget >= currentLtp) {
+                    failure = IllegalArgumentException("Target (${RiskMath.formatPrice(roundedTarget, pos.segment)}) must be below live LTP (${RiskMath.formatPrice(currentLtp, pos.segment)}) for a SELL position")
+                    return@withTransaction
+                }
+            }
+
+            // Always ensure protective SL/Target legs have a fresh future expiry horizon so they are NEVER auto-expired while open
+            val protectiveExpiryMillis = maxOf(pos.expiresAtMillis, nowMillis + 30L * 86_400_000L)
 
             val ocoGroupId = if (roundedSl != null && roundedTarget != null) {
                 pos.ocoGroupId ?: UUID.randomUUID().toString()
@@ -338,12 +371,15 @@ class TradingRepository private constructor(
                     orderDao.upsert(
                         existingSl?.copy(
                             triggerPrice = roundedSl,
+                            expiresAtMillis = protectiveExpiryMillis,
+                            validityState = ValidityState.ACTIVE,
                             ocoGroupId = ocoGroupId,
                             attachedTslEnabled = isTslEnabled,
                             attachedTslMode = tslMode,
                             attachedTslValue = tslValue,
                             statusReason = if (isTslEnabled) "Trailing SL Updated" else "SL Updated",
-                            updatedAtMillis = nowMillis
+                            updatedAtMillis = nowMillis,
+                            lotSize = pos.lotSize
                         ) ?: OrderEntity(
                             id = id,
                             symbol = pos.symbol,
@@ -359,7 +395,7 @@ class TradingRepository private constructor(
                             status = OrderStatus.PENDING,
                             validityType = pos.validityType,
                             gttDays = pos.gttDays,
-                            expiresAtMillis = pos.expiresAtMillis,
+                            expiresAtMillis = protectiveExpiryMillis,
                             validityState = ValidityState.ACTIVE,
                             ocoGroupId = ocoGroupId,
                             parentOrderId = null,
@@ -376,7 +412,8 @@ class TradingRepository private constructor(
                             attachedTrailingTargetValue = null,
                             statusReason = if (isTslEnabled) "Trailing SL Armed" else "Protective SL",
                             createdAtMillis = nowMillis,
-                            updatedAtMillis = nowMillis
+                            updatedAtMillis = nowMillis,
+                            lotSize = pos.lotSize
                         )
                     )
                     id
@@ -406,12 +443,15 @@ class TradingRepository private constructor(
                     orderDao.upsert(
                         existingTgt?.copy(
                             triggerPrice = roundedTarget,
+                            expiresAtMillis = protectiveExpiryMillis,
+                            validityState = ValidityState.ACTIVE,
                             ocoGroupId = ocoGroupId,
                             attachedTrailingTargetEnabled = isTrailingTargetEnabled,
                             attachedTrailingTargetMode = trailingTargetMode,
                             attachedTrailingTargetValue = trailingTargetValue,
                             statusReason = if (isTrailingTargetEnabled) "Trailing Target Updated" else "Target Updated",
-                            updatedAtMillis = nowMillis
+                            updatedAtMillis = nowMillis,
+                            lotSize = pos.lotSize
                         ) ?: OrderEntity(
                             id = id,
                             symbol = pos.symbol,
@@ -427,7 +467,7 @@ class TradingRepository private constructor(
                             status = OrderStatus.PENDING,
                             validityType = pos.validityType,
                             gttDays = pos.gttDays,
-                            expiresAtMillis = pos.expiresAtMillis,
+                            expiresAtMillis = protectiveExpiryMillis,
                             validityState = ValidityState.ACTIVE,
                             ocoGroupId = ocoGroupId,
                             parentOrderId = null,
@@ -444,7 +484,8 @@ class TradingRepository private constructor(
                             attachedTrailingTargetValue = trailingTargetValue,
                             statusReason = if (isTrailingTargetEnabled) "Trailing Target Armed" else "Target Order",
                             createdAtMillis = nowMillis,
-                            updatedAtMillis = nowMillis
+                            updatedAtMillis = nowMillis,
+                            lotSize = pos.lotSize
                         )
                     )
                     id
@@ -494,11 +535,12 @@ class TradingRepository private constructor(
                     trailingTargetActivated = if (isTrailingTargetEnabled && roundedTarget != null) pos.trailingTargetActivated else false,
                     trailingTargetPeakPrice = if (isTrailingTargetEnabled && roundedTarget != null) pos.trailingTargetPeakPrice else null,
                     trailingTargetExitTrigger = if (isTrailingTargetEnabled && roundedTarget != null) pos.trailingTargetExitTrigger else null,
+                    expiresAtMillis = protectiveExpiryMillis,
                     updatedAtMillis = nowMillis
                 )
             )
         }
-        return Result.success(Unit)
+        return failure?.let { Result.failure(it) } ?: Result.success(Unit)
     }
 
     suspend fun convertProductToCarryForward(positionId: String): Result<String> {
@@ -524,23 +566,24 @@ class TradingRepository private constructor(
             )
             val extraMarginNeeded = newMargin.subtract(oldMargin).max(BigDecimal.ZERO)
             val account = accountDao.getAccount() ?: SeedData.defaultAccount()
-            if (account.availableMargin < extraMarginNeeded) {
+            val isCrypto = pos.segment == com.example.domain.model.MarketSegment.CRYPTO
+            val availableMargin = if (isCrypto) account.cryptoAvailableMargin else account.availableMargin
+            if (availableMargin < extraMarginNeeded) {
                 result = Result.failure(
                     IllegalStateException(
-                        "Need ${RiskMath.formatPortfolioInr(extraMarginNeeded)} extra margin to convert to Carry Forward"
+                        "Need ${RiskMath.formatCurrency(extraMarginNeeded, pos.segment)} extra margin to convert to Carry Forward"
                     )
                 )
                 return@withTransaction
             }
 
-            // Upgrade DAY validity to GTT 7 days so protective legs persist across sessions
+            // Upgrade DAY validity to GTT 30 days so protective legs persist across sessions
             val newValidityType = if (pos.validityType == ValidityType.DAY) ValidityType.GTT else pos.validityType
-            val newGttDays = if (pos.validityType == ValidityType.DAY) 7 else pos.gttDays
-            val newExpiry = if (pos.validityType == ValidityType.DAY) {
-                MarketClock.computeExpiryMillis(ValidityType.GTT, pos.segment, gttDays = 7, nowMillis = nowMillis)
-            } else {
-                pos.expiresAtMillis
-            }
+            val newGttDays = if (pos.validityType == ValidityType.DAY) 30 else pos.gttDays
+            val newExpiry = maxOf(
+                pos.expiresAtMillis,
+                nowMillis + 30L * 86_400_000L
+            )
 
             positionDao.upsert(
                 pos.copy(
@@ -566,10 +609,17 @@ class TradingRepository private constructor(
                 }
             }
 
-            accountDao.updateBalances(
-                margin = account.availableMargin.subtract(extraMarginNeeded),
-                realised = account.realisedPnl
-            )
+            if (isCrypto) {
+                accountDao.updateCryptoBalances(
+                    margin = account.cryptoAvailableMargin.subtract(extraMarginNeeded).max(BigDecimal.ZERO),
+                    realised = account.cryptoRealisedPnl
+                )
+            } else {
+                accountDao.updateBalances(
+                    margin = account.availableMargin.subtract(extraMarginNeeded).max(BigDecimal.ZERO),
+                    realised = account.realisedPnl
+                )
+            }
             result = Result.success("Converted ${pos.symbol} to Carry Forward (${newValidityType.label})")
         }
         return result
@@ -726,10 +776,12 @@ class TradingRepository private constructor(
                 instrumentType = pos.instrumentType
             )
             val account = accountDao.getAccount() ?: SeedData.defaultAccount()
-            if (account.availableMargin < extraMargin) {
+            val isCrypto = pos.segment == com.example.domain.model.MarketSegment.CRYPTO
+            val availableMargin = if (isCrypto) account.cryptoAvailableMargin else account.availableMargin
+            if (availableMargin < extraMargin) {
                 result = Result.failure(
                     IllegalStateException(
-                        "Insufficient margin to average: need ${RiskMath.formatPortfolioInr(extraMargin)}, available ${RiskMath.formatPortfolioInr(account.availableMargin)}"
+                        "Insufficient margin to average: need ${RiskMath.formatCurrency(extraMargin, pos.segment)}, available ${RiskMath.formatCurrency(availableMargin, pos.segment)}"
                     )
                 )
                 return@withTransaction
@@ -817,10 +869,17 @@ class TradingRepository private constructor(
                 }
             }
 
-            accountDao.updateBalances(
-                margin = account.availableMargin.subtract(extraMargin).max(BigDecimal.ZERO),
-                realised = account.realisedPnl
-            )
+            if (isCrypto) {
+                accountDao.updateCryptoBalances(
+                    margin = account.cryptoAvailableMargin.subtract(extraMargin).max(BigDecimal.ZERO),
+                    realised = account.cryptoRealisedPnl
+                )
+            } else {
+                accountDao.updateBalances(
+                    margin = account.availableMargin.subtract(extraMargin).max(BigDecimal.ZERO),
+                    realised = account.realisedPnl
+                )
+            }
 
             val msg = "Averaged ${pos.symbol}: +${RiskMath.formatQtyWithLots(additionalQuantity, lotSize)} @ ${RiskMath.formatPrice(fillPrice, pos.segment)} → New Avg ${RiskMath.formatPrice(newAvg, pos.segment)}"
             result = Result.success(msg)
@@ -906,14 +965,95 @@ class TradingRepository private constructor(
         return result
     }
 
+    suspend fun addCryptoCapital(amount: BigDecimal, note: String = "Crypto USD top-up"): Result<String> {
+        if (amount <= BigDecimal.ZERO) {
+            return Result.failure(IllegalArgumentException("Amount must be greater than zero"))
+        }
+        val rounded = amount.setScale(2, java.math.RoundingMode.HALF_UP)
+        val now = System.currentTimeMillis()
+        var newBalance = BigDecimal.ZERO
+        database.withTransaction {
+            val account = accountDao.getAccount() ?: SeedData.defaultAccount()
+            val updatedCapital = account.cryptoVirtualCapital.add(rounded)
+            val updatedMargin = account.cryptoAvailableMargin.add(rounded)
+            newBalance = updatedCapital
+            accountDao.upsert(
+                account.copy(
+                    cryptoVirtualCapital = updatedCapital,
+                    cryptoAvailableMargin = updatedMargin
+                )
+            )
+            database.capitalTransactionDao().insert(
+                com.example.data.local.CapitalTransactionEntity(
+                    id = UUID.randomUUID().toString(),
+                    type = com.example.domain.model.CapitalTransactionType.ADD,
+                    amount = rounded,
+                    balanceAfter = updatedCapital,
+                    note = note.ifBlank { "Added virtual USD funds" },
+                    timestampMillis = now,
+                    currency = "USD"
+                )
+            )
+        }
+        val msg = "Added ${RiskMath.formatPortfolioUsd(rounded)} • Crypto Capital now ${RiskMath.formatPortfolioUsd(newBalance)}"
+        notificationManager?.notifyTradeActivity("Crypto Funds Added", msg)
+        return Result.success(msg)
+    }
+
+    suspend fun reduceCryptoCapital(amount: BigDecimal, note: String = "Crypto USD withdrawal"): Result<String> {
+        if (amount <= BigDecimal.ZERO) {
+            return Result.failure(IllegalArgumentException("Amount must be greater than zero"))
+        }
+        val rounded = amount.setScale(2, java.math.RoundingMode.HALF_UP)
+        val now = System.currentTimeMillis()
+        var result: Result<String> = Result.failure(IllegalStateException("Insufficient crypto free margin"))
+        database.withTransaction {
+            val account = accountDao.getAccount() ?: SeedData.defaultAccount()
+            if (rounded > account.cryptoAvailableMargin) {
+                result = Result.failure(
+                    IllegalStateException("Cannot withdraw more than available Crypto free margin (${RiskMath.formatPortfolioUsd(account.cryptoAvailableMargin)})")
+                )
+                return@withTransaction
+            }
+            val updatedCapital = account.cryptoVirtualCapital.subtract(rounded).max(BigDecimal.ZERO)
+            val updatedMargin = account.cryptoAvailableMargin.subtract(rounded).max(BigDecimal.ZERO)
+            accountDao.upsert(
+                account.copy(
+                    cryptoVirtualCapital = updatedCapital,
+                    cryptoAvailableMargin = updatedMargin
+                )
+            )
+            database.capitalTransactionDao().insert(
+                com.example.data.local.CapitalTransactionEntity(
+                    id = UUID.randomUUID().toString(),
+                    type = com.example.domain.model.CapitalTransactionType.REDUCE,
+                    amount = rounded,
+                    balanceAfter = updatedCapital,
+                    note = note.ifBlank { "Withdrew virtual USD funds" },
+                    timestampMillis = now,
+                    currency = "USD"
+                )
+            )
+            result = Result.success("Reduced ${RiskMath.formatPortfolioUsd(rounded)} • Crypto Capital now ${RiskMath.formatPortfolioUsd(updatedCapital)}")
+        }
+        result.getOrNull()?.let { msg ->
+            notificationManager?.notifyTradeActivity("Crypto Funds Reduced", msg)
+        }
+        return result
+    }
+
     suspend fun triggerSimulatedSquareOff(): Int = executionEngine.triggerSimulatedSquareOff()
 
     suspend fun updateJournalNotes(entryId: String, notes: String) {
         tradeJournalDao.updateNotes(entryId, notes)
     }
 
-    suspend fun resetPaperAccount(newCapital: BigDecimal = SeedData.INITIAL_CAPITAL) {
+    suspend fun resetPaperAccount(
+        newCapital: BigDecimal = SeedData.INITIAL_CAPITAL,
+        newCryptoCapital: BigDecimal = SeedData.INITIAL_CRYPTO_CAPITAL
+    ) {
         val targetCapital = newCapital.max(BigDecimal("1000.00")).setScale(2, java.math.RoundingMode.HALF_UP)
+        val targetCrypto = newCryptoCapital.max(BigDecimal("100.00")).setScale(2, java.math.RoundingMode.HALF_UP)
         val now = System.currentTimeMillis()
         database.withTransaction {
             positionDao.clearAll()
@@ -925,7 +1065,10 @@ class TradingRepository private constructor(
                     id = 1,
                     virtualCapital = targetCapital,
                     availableMargin = targetCapital,
-                    realisedPnl = BigDecimal.ZERO
+                    realisedPnl = BigDecimal.ZERO,
+                    cryptoVirtualCapital = targetCrypto,
+                    cryptoAvailableMargin = targetCrypto,
+                    cryptoRealisedPnl = BigDecimal.ZERO
                 )
             )
             database.capitalTransactionDao().insert(
@@ -934,14 +1077,15 @@ class TradingRepository private constructor(
                     type = com.example.domain.model.CapitalTransactionType.RESET,
                     amount = targetCapital,
                     balanceAfter = targetCapital,
-                    note = "Paper account reset to ${RiskMath.formatPortfolioInr(targetCapital)}",
-                    timestampMillis = now
+                    note = "Paper account reset: India ${RiskMath.formatPortfolioInr(targetCapital)} • Crypto ${RiskMath.formatPortfolioUsd(targetCrypto)}",
+                    timestampMillis = now,
+                    currency = "INR"
                 )
             )
         }
         notificationManager?.notifyTradeActivity(
             title = "Paper Account Reset",
-            body = "Account reset to ${RiskMath.formatPortfolioInr(targetCapital)}"
+            body = "India ${RiskMath.formatPortfolioInr(targetCapital)} • Crypto ${RiskMath.formatPortfolioUsd(targetCrypto)}"
         )
     }
 }

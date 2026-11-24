@@ -1,9 +1,15 @@
 package com.example.domain.signal
 
 import com.example.domain.analysis.TradingStyle
+import com.example.domain.model.InstrumentType
+import com.example.domain.signal.evaluators.AsrTradingEvaluator
 import com.example.domain.signal.evaluators.BtstStbtEvaluator
+import com.example.domain.signal.evaluators.Confluence70Evaluator
+import com.example.domain.signal.evaluators.Ema50RsiMacdEvaluator
 import com.example.domain.signal.evaluators.EmaCrossRetestEvaluator
 import com.example.domain.signal.evaluators.IntradayOrbVwapEvaluator
+import com.example.domain.signal.evaluators.MomentumBreakoutEvaluator
+import com.example.domain.signal.evaluators.NclTradingEvaluator
 import com.example.domain.signal.evaluators.PivotBreakoutEvaluator
 import com.example.domain.signal.evaluators.QuantBreakoutEvaluator
 import com.example.domain.signal.evaluators.QuantMeanReversionEvaluator
@@ -16,6 +22,7 @@ import com.example.domain.signal.evaluators.SwingHeikinAshiEvaluator
 import java.math.BigDecimal
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.abs
 
 @Singleton
 class CompositeSignalEngine(
@@ -25,6 +32,11 @@ class CompositeSignalEngine(
     @Inject
     constructor() : this(
         listOf(
+            Confluence70Evaluator(),
+            MomentumBreakoutEvaluator(),
+            Ema50RsiMacdEvaluator(),
+            AsrTradingEvaluator(),
+            NclTradingEvaluator(),
             ScalpStrategyEvaluator(),
             IntradayOrbVwapEvaluator(),
             SwingHeikinAshiEvaluator(),
@@ -61,7 +73,7 @@ class CompositeSignalEngine(
         if (signal.target1 <= BigDecimal.ZERO) return false
         if (signal.target2 <= BigDecimal.ZERO) return false
         if (signal.riskRewardRatio <= 0.0) return false
-        return when (signal.direction) {
+        val ordered = when (signal.direction) {
             SignalDirection.LONG ->
                 signal.stopLoss < signal.entryPrice &&
                     signal.target1 > signal.entryPrice &&
@@ -71,5 +83,18 @@ class CompositeSignalEngine(
                     signal.target1 < signal.entryPrice &&
                     signal.target2 <= signal.target1
         }
+        if (!ordered) return false
+
+        // Sanity guard against mixed seed/live candle scales (e.g. $66 SL on $241 SOLUSDT or $56k SL on $84k BTC)
+        val entry = signal.entryPrice.toDouble()
+        val sl = signal.stopLoss.toDouble()
+        val riskPct = abs(entry - sl) / entry
+        val maxAllowedRiskPct = if (context.instrumentType == InstrumentType.OPTIONS) 0.40 else 0.12
+        if (riskPct < 0.0008 || riskPct > maxAllowedRiskPct) return false
+
+        val ltp = context.currentLtp.toDouble()
+        if (ltp > 0.0 && abs(entry - ltp) / ltp > 0.10) return false
+
+        return true
     }
 }

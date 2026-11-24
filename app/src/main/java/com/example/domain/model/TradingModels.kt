@@ -247,13 +247,17 @@ data class CapitalTransaction(
     val amount: BigDecimal,
     val balanceAfter: BigDecimal,
     val note: String,
-    val timestampMillis: Long
+    val timestampMillis: Long,
+    val currency: String = "INR"
 )
 
 data class AccountState(
     val virtualCapital: BigDecimal,
     val availableMargin: BigDecimal,
-    val realisedPnl: BigDecimal
+    val realisedPnl: BigDecimal,
+    val cryptoVirtualCapital: BigDecimal = BigDecimal("10000.00"),
+    val cryptoAvailableMargin: BigDecimal = BigDecimal("10000.00"),
+    val cryptoRealisedPnl: BigDecimal = BigDecimal.ZERO
 )
 
 data class TradingConfig(

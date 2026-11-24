@@ -62,6 +62,7 @@ import com.example.domain.engine.MarketClock
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.CapitalTransaction
 import com.example.domain.model.InstrumentType
+import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
 import com.example.domain.model.ProductType
 import com.example.domain.model.TrailMode
@@ -104,7 +105,7 @@ fun PositionsScreen(
         ) {
             Spacer(Modifier.height(8.dp))
 
-            // Summary Header Card
+            // Summary Header Card (India ₹ + Crypto $ Wallets)
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -114,54 +115,111 @@ fun PositionsScreen(
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "INDIA PORTFOLIO (₹ INR)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        OutlinedButton(
+                            onClick = { showFundsDialog = true },
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.testTag("manage_funds_button")
+                        ) {
+                            Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Manage Funds", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column {
-                            Text("UNREALISED P&L", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("UNREALISED P&L", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             val unrealColor = if (state.totalUnrealisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
                             Text(
                                 text = RiskMath.formatPortfolioInr(state.totalUnrealisedPnl, signed = true),
                                 style = MonoPriceMedium,
                                 color = unrealColor
                             )
+                            Text(
+                                text = "Cap ${RiskMath.formatPortfolioInr(state.virtualCapital)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                         Column(horizontalAlignment = Alignment.End) {
-                            Text("REALISED P&L", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("REALISED P&L", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             val realColor = if (state.realisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
                             Text(
                                 text = RiskMath.formatPortfolioInr(state.realisedPnl, signed = true),
                                 style = MonoPriceMedium,
                                 color = realColor
                             )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
                             Text(
-                                text = "Capital: ${RiskMath.formatPortfolioInr(state.virtualCapital)}",
-                                style = MonoPriceSmall,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "Free Margin: ${RiskMath.formatPortfolioInr(state.availableMargin)}",
-                                style = MonoPriceSmall,
+                                text = "Free ${RiskMath.formatPortfolioInr(state.availableMargin)}",
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        OutlinedButton(
-                            onClick = { showFundsDialog = true },
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("manage_funds_button")
+                    }
+
+                    HorizontalDivider(color = tradingColors.border)
+
+                    // Crypto USD Wallet Strip
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text("Manage Funds", style = MaterialTheme.typography.labelMedium)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "CRYPTO WALLET ($ USD)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = tradingColors.amber
+                                )
+                                Text(
+                                    text = "Free ${RiskMath.formatPortfolioUsd(state.cryptoAvailableMargin)}",
+                                    style = MonoPriceSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                val cUnrealColor = if (state.cryptoUnrealisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
+                                val cRealColor = if (state.cryptoRealisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
+                                Text(
+                                    text = "Unreal: ${RiskMath.formatPortfolioUsd(state.cryptoUnrealisedPnl, signed = true)}",
+                                    style = MonoPriceSmall,
+                                    color = cUnrealColor
+                                )
+                                Text(
+                                    text = "Real: ${RiskMath.formatPortfolioUsd(state.cryptoRealisedPnl, signed = true)}",
+                                    style = MonoPriceSmall,
+                                    color = cRealColor
+                                )
+                                Text(
+                                    text = "Cap ${RiskMath.formatPortfolioUsd(state.cryptoVirtualCapital)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
 
@@ -229,9 +287,14 @@ fun PositionsScreen(
     }
 
     averagingItem?.let { item ->
+        val segAvailable = if (item.position.segment == MarketSegment.CRYPTO) {
+            state.cryptoAvailableMargin
+        } else {
+            state.availableMargin
+        }
         AveragePositionDialog(
             item = item,
-            availableMargin = state.availableMargin,
+            availableMargin = segAvailable,
             onDismiss = { averagingItem = null },
             onConfirm = { addQty ->
                 viewModel.averagePosition(item.position.id, addQty)
@@ -244,11 +307,15 @@ fun PositionsScreen(
         CapitalManagementDialog(
             virtualCapital = state.virtualCapital,
             availableMargin = state.availableMargin,
-            recentTransactions = state.capitalTransactions.take(5),
+            cryptoVirtualCapital = state.cryptoVirtualCapital,
+            cryptoAvailableMargin = state.cryptoAvailableMargin,
+            recentTransactions = state.capitalTransactions.take(6),
             onDismiss = { showFundsDialog = false },
-            onAdd = { amt, note -> viewModel.addCapital(amt, note) },
-            onReduce = { amt, note -> viewModel.reduceCapital(amt, note) },
-            onReset = { amt -> viewModel.resetAccount(amt) }
+            onAddInr = { amt, note -> viewModel.addCapital(amt, note) },
+            onReduceInr = { amt, note -> viewModel.reduceCapital(amt, note) },
+            onAddUsd = { amt, note -> viewModel.addCryptoCapital(amt, note) },
+            onReduceUsd = { amt, note -> viewModel.reduceCryptoCapital(amt, note) },
+            onReset = { inr, usd -> viewModel.resetAccount(inr, usd) }
         )
     }
 }
@@ -477,7 +544,7 @@ private fun PositionCard(
                         OutlinedTextField(
                             value = slText,
                             onValueChange = { slText = it },
-                            label = { Text("SL Price") },
+                            label = { Text("SL Price (${pos.segment.currencySymbol})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                             modifier = Modifier.weight(1f)
@@ -485,7 +552,7 @@ private fun PositionCard(
                         OutlinedTextField(
                             value = targetText,
                             onValueChange = { targetText = it },
-                            label = { Text("Target Price") },
+                            label = { Text("Target Price (${pos.segment.currencySymbol})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                             modifier = Modifier.weight(1f)
@@ -667,7 +734,7 @@ private fun AveragePositionDialog(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text("Incremental Margin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(
-                                RiskMath.formatPortfolioInr(estExtraMargin),
+                                RiskMath.formatCurrency(estExtraMargin, pos.segment),
                                 style = MonoPriceSmall,
                                 color = if (insufficient) tradingColors.bearish else MaterialTheme.colorScheme.onSurface
                             )
@@ -700,37 +767,63 @@ private fun AveragePositionDialog(
 private fun CapitalManagementDialog(
     virtualCapital: BigDecimal,
     availableMargin: BigDecimal,
+    cryptoVirtualCapital: BigDecimal,
+    cryptoAvailableMargin: BigDecimal,
     recentTransactions: List<CapitalTransaction>,
     onDismiss: () -> Unit,
-    onAdd: (BigDecimal, String) -> Unit,
-    onReduce: (BigDecimal, String) -> Unit,
-    onReset: (BigDecimal) -> Unit
+    onAddInr: (BigDecimal, String) -> Unit,
+    onReduceInr: (BigDecimal, String) -> Unit,
+    onAddUsd: (BigDecimal, String) -> Unit,
+    onReduceUsd: (BigDecimal, String) -> Unit,
+    onReset: (BigDecimal, BigDecimal) -> Unit
 ) {
     val tradingColors = LocalTradingColors.current
-    var amountText by remember { mutableStateOf("100000") }
+    var isCryptoWallet by remember { mutableStateOf(false) }
+    var amountText by remember(isCryptoWallet) { mutableStateOf(if (isCryptoWallet) "2500" else "100000") }
     var noteText by remember { mutableStateOf("") }
-    var resetText by remember { mutableStateOf("1000000") }
+    var resetInrText by remember { mutableStateOf("1000000") }
+    var resetUsdText by remember { mutableStateOf("10000") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Manage Paper Capital", fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    FilterChip(
+                        selected = !isCryptoWallet,
+                        onClick = { isCryptoWallet = false },
+                        label = { Text("India (₹ INR)") },
+                        modifier = Modifier.weight(1f).testTag("wallet_tab_inr")
+                    )
+                    FilterChip(
+                        selected = isCryptoWallet,
+                        onClick = { isCryptoWallet = true },
+                        label = { Text("Crypto ($ USD)") },
+                        modifier = Modifier.weight(1f).testTag("wallet_tab_usd")
+                    )
+                }
+
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerLow,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text("Total Capital: ${RiskMath.formatPortfolioInr(virtualCapital)}", style = MonoPriceSmall, fontWeight = FontWeight.Bold)
-                        Text("Free Margin: ${RiskMath.formatPortfolioInr(availableMargin)}", style = MonoPriceSmall, color = MaterialTheme.colorScheme.primary)
+                        if (isCryptoWallet) {
+                            Text("Crypto Capital: ${RiskMath.formatPortfolioUsd(cryptoVirtualCapital)}", style = MonoPriceSmall, fontWeight = FontWeight.Bold)
+                            Text("Free Crypto Margin: ${RiskMath.formatPortfolioUsd(cryptoAvailableMargin)}", style = MonoPriceSmall, color = tradingColors.amber)
+                        } else {
+                            Text("India Capital: ${RiskMath.formatPortfolioInr(virtualCapital)}", style = MonoPriceSmall, fontWeight = FontWeight.Bold)
+                            Text("Free India Margin: ${RiskMath.formatPortfolioInr(availableMargin)}", style = MonoPriceSmall, color = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 }
 
                 OutlinedTextField(
                     value = amountText,
                     onValueChange = { amountText = it.filter { ch -> ch.isDigit() || ch == '.' } },
-                    label = { Text("Amount (₹)") },
+                    label = { Text(if (isCryptoWallet) "Amount ($ USD)" else "Amount (₹ INR)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("capital_amount_input")
@@ -746,7 +839,8 @@ private fun CapitalManagementDialog(
                     Button(
                         onClick = {
                             amountText.toBigDecimalOrNull()?.let { amt ->
-                                onAdd(amt, noteText.ifBlank { "Capital top-up" })
+                                val note = noteText.ifBlank { if (isCryptoWallet) "Crypto USD top-up" else "Capital top-up" }
+                                if (isCryptoWallet) onAddUsd(amt, note) else onAddInr(amt, note)
                             }
                         },
                         modifier = Modifier.weight(1f).testTag("add_capital_button"),
@@ -757,7 +851,8 @@ private fun CapitalManagementDialog(
                     OutlinedButton(
                         onClick = {
                             amountText.toBigDecimalOrNull()?.let { amt ->
-                                onReduce(amt, noteText.ifBlank { "Capital withdrawal" })
+                                val note = noteText.ifBlank { if (isCryptoWallet) "Crypto USD withdrawal" else "Capital withdrawal" }
+                                if (isCryptoWallet) onReduceUsd(amt, note) else onReduceInr(amt, note)
                             }
                         },
                         modifier = Modifier.weight(1f).testTag("reduce_capital_button")
@@ -770,17 +865,26 @@ private fun CapitalManagementDialog(
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
-                        value = resetText,
-                        onValueChange = { resetText = it.filter { ch -> ch.isDigit() || ch == '.' } },
-                        label = { Text("Reset Balance (₹)") },
+                        value = resetInrText,
+                        onValueChange = { resetInrText = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        label = { Text("Reset ₹") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = resetUsdText,
+                        onValueChange = { resetUsdText = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        label = { Text("Reset $") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
                     Button(
                         onClick = {
-                            val target = resetText.toBigDecimalOrNull() ?: BigDecimal("1000000")
-                            onReset(target)
+                            val targetInr = resetInrText.toBigDecimalOrNull() ?: BigDecimal("1000000")
+                            val targetUsd = resetUsdText.toBigDecimalOrNull() ?: BigDecimal("10000")
+                            onReset(targetInr, targetUsd)
                             onDismiss()
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = tradingColors.bearish, contentColor = Color.White),
@@ -793,14 +897,19 @@ private fun CapitalManagementDialog(
                 if (recentTransactions.isNotEmpty()) {
                     Text("RECENT CAPITAL RECORD", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     recentTransactions.forEach { tx ->
+                        val formattedAmt = if (tx.currency.equals("USD", ignoreCase = true)) {
+                            RiskMath.formatPortfolioUsd(tx.amount)
+                        } else {
+                            RiskMath.formatPortfolioInr(tx.amount)
+                        }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(
-                                "${tx.type.label} • ${MarketClock.formatIstDate(tx.timestampMillis)}",
+                                "${tx.type.label} (${tx.currency}) • ${MarketClock.formatIstDate(tx.timestampMillis)}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                RiskMath.formatPortfolioInr(tx.amount),
+                                formattedAmt,
                                 style = MonoPriceSmall,
                                 color = when (tx.type) {
                                     com.example.domain.model.CapitalTransactionType.ADD -> tradingColors.bullish

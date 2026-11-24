@@ -415,4 +415,24 @@ object RiskMath {
         val df = DecimalFormat("#,##0.00", DecimalFormatSymbols(Locale.forLanguageTag("en-IN")))
         return "$sign₹${df.format(absVal)}"
     }
+
+    fun formatPortfolioUsd(amount: BigDecimal, signed: Boolean = false): String {
+        val sign = when {
+            !signed -> if (amount < BigDecimal.ZERO) "-" else ""
+            amount > BigDecimal.ZERO -> "+"
+            amount < BigDecimal.ZERO -> "-"
+            else -> ""
+        }
+        val absVal = amount.abs().setScale(2, RoundingMode.HALF_UP)
+        val df = DecimalFormat("#,##0.00", DecimalFormatSymbols(Locale.US))
+        return "$sign$${df.format(absVal)}"
+    }
+
+    fun formatCurrency(amount: BigDecimal, segment: MarketSegment, signed: Boolean = false): String {
+        return if (segment == MarketSegment.CRYPTO) {
+            formatPortfolioUsd(amount, signed)
+        } else {
+            formatPortfolioInr(amount, signed)
+        }
+    }
 }

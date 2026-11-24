@@ -97,6 +97,7 @@ fun WatchlistScreen(
         PortfolioPulseHeader(
             account = state.accountState,
             unrealisedPnl = state.unrealisedPnl,
+            cryptoUnrealisedPnl = state.cryptoUnrealisedPnl,
             feedState = state.feedState,
             istClockText = state.istClockText,
             onOpenFeedSettings = onOpenFeedSettings,

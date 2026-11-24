@@ -50,9 +50,16 @@ import com.example.ui.theme.MonoPriceMedium
 import com.example.ui.theme.MonoPriceSmall
 import java.math.BigDecimal
 
+import androidx.compose.material.icons.rounded.Assessment
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.text.style.TextOverflow
+import com.example.domain.signal.InstrumentTradePerformance
+import java.util.Locale
+
 private enum class JournalTab(val label: String) {
-    TRADES("Closed Trades"),
-    CAPITAL("Capital Ledger")
+    TRADES("Trades"),
+    BY_INSTRUMENT("Instruments"),
+    CAPITAL("Capital")
 }
 
 @Composable
@@ -70,7 +77,7 @@ fun JournalScreen(
     ) {
         Spacer(Modifier.height(8.dp))
 
-        // Summary Analytics Card
+        // Summary Analytics Card (India ₹ + Crypto $)
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -83,12 +90,12 @@ fun JournalScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Column {
-                        Text("NET REALISED P&L", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("INDIA NET REALISED (₹)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         val netColor = if (state.netRealisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
                         Text(RiskMath.formatPortfolioInr(state.netRealisedPnl, signed = true), style = MonoPriceMedium, color = netColor)
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("LIVE UNREALISED", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("INDIA LIVE UNREALISED", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         val unColor = if (state.unrealisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
                         Text(RiskMath.formatPortfolioInr(state.unrealisedPnl, signed = true), style = MonoPriceMedium, color = unColor)
                     }
@@ -113,7 +120,7 @@ fun JournalScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Total Charges: ${RiskMath.formatPortfolioInr(state.totalCharges)}",
+                        text = "India Charges: ${RiskMath.formatPortfolioInr(state.totalCharges)}",
                         style = MonoPriceSmall,
                         color = tradingColors.amber
                     )
@@ -123,22 +130,48 @@ fun JournalScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+
+                HorizontalDivider(color = tradingColors.border)
+
+                // Crypto USD Performance Strip
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val cNetColor = if (state.cryptoNetRealisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
+                    val cUnColor = if (state.cryptoUnrealisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
+                    Text(
+                        text = "CRYPTO ($): Net ${RiskMath.formatPortfolioUsd(state.cryptoNetRealisedPnl, signed = true)}",
+                        style = MonoPriceSmall,
+                        color = cNetColor
+                    )
+                    Text(
+                        text = "Unreal ${RiskMath.formatPortfolioUsd(state.cryptoUnrealisedPnl, signed = true)} • Fee ${RiskMath.formatPortfolioUsd(state.cryptoTotalCharges)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = cUnColor
+                    )
+                }
             }
         }
 
         Spacer(Modifier.height(10.dp))
 
-        // Closed Trades vs Capital Ledger Tabs
+        // Closed Trades vs By Instrument vs Capital Ledger Tabs
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             JournalTab.entries.forEach { tab ->
-                val count = if (tab == JournalTab.TRADES) state.entries.size else state.capitalTransactions.size
+                val count = when (tab) {
+                    JournalTab.TRADES -> state.entries.size
+                    JournalTab.BY_INSTRUMENT -> state.instrumentPerformance.size
+                    JournalTab.CAPITAL -> state.capitalTransactions.size
+                }
                 FilterChip(
                     selected = selectedTab == tab,
                     onClick = { selectedTab = tab },
-                    label = { Text("${tab.label} ($count)") },
+                    label = { Text("${tab.label} ($count)", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     modifier = Modifier.weight(1f).testTag("journal_tab_${tab.name.lowercase()}"),
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -155,43 +188,114 @@ fun JournalScreen(
             contentPadding = PaddingValues(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            if (selectedTab == JournalTab.TRADES) {
-                item(key = "ai_coach_card") {
-                    AiPortfolioCoachCard(
-                        coachState = state.coachState,
-                        onAskQuestion = viewModel::askAiCoach
-                    )
-                }
+            when (selectedTab) {
+                JournalTab.TRADES -> {
+                    item(key = "ai_coach_card") {
+                        AiPortfolioCoachCard(
+                            coachState = state.coachState,
+                            onAskQuestion = viewModel::askAiCoach
+                        )
+                    }
 
-                if (state.entries.isEmpty()) {
-                    item(key = "journal_empty_panel") {
-                        EmptyStatePanel(
-                            icon = Icons.Rounded.Book,
-                            title = "No closed trades yet",
-                            subtitle = "Closed positions appear here with itemized brokerage, STT/CTT, exchange, SEBI, stamp duty, GST, net P&L, and trade notes."
-                        )
-                    }
-                } else {
-                    items(state.entries, key = { it.id }) { entry ->
-                        JournalEntryCard(
-                            entry = entry,
-                            onSaveNotes = { notes -> viewModel.saveNotes(entry.id, notes) }
-                        )
+                    if (state.entries.isEmpty()) {
+                        item(key = "journal_empty_panel") {
+                            EmptyStatePanel(
+                                icon = Icons.Rounded.Book,
+                                title = "No closed trades yet",
+                                subtitle = "Closed positions appear here with itemized brokerage, STT/CTT, exchange, SEBI, stamp duty, GST, net P&L, and trade notes."
+                            )
+                        }
+                    } else {
+                        items(state.entries, key = { it.id }) { entry ->
+                            JournalEntryCard(
+                                entry = entry,
+                                onSaveNotes = { notes -> viewModel.saveNotes(entry.id, notes) }
+                            )
+                        }
                     }
                 }
-            } else {
-                if (state.capitalTransactions.isEmpty()) {
-                    item(key = "capital_empty_panel") {
-                        EmptyStatePanel(
-                            icon = Icons.Rounded.AccountBalanceWallet,
-                            title = "No capital adjustments recorded",
-                            subtitle = "Add, reduce, or reset your virtual paper trading capital from Positions or Settings to maintain a complete audit ledger."
-                        )
+                JournalTab.BY_INSTRUMENT -> {
+                    if (state.instrumentPerformance.isEmpty()) {
+                        item(key = "instrument_perf_empty") {
+                            EmptyStatePanel(
+                                icon = Icons.Rounded.Assessment,
+                                title = "No instrument performance yet",
+                                subtitle = "Close trades to track symbol-by-symbol Win Rate, Gross P&L, Charges, and Net P&L in ₹ (India) or $ (Crypto)."
+                            )
+                        }
+                    } else {
+                        items(state.instrumentPerformance, key = { it.symbol }) { perf ->
+                            InstrumentTradePerformanceCard(perf = perf)
+                        }
                     }
-                } else {
-                    items(state.capitalTransactions, key = { it.id }) { tx ->
-                        CapitalTransactionCard(tx = tx)
+                }
+                JournalTab.CAPITAL -> {
+                    if (state.capitalTransactions.isEmpty()) {
+                        item(key = "capital_empty_panel") {
+                            EmptyStatePanel(
+                                icon = Icons.Rounded.AccountBalanceWallet,
+                                title = "No capital adjustments recorded",
+                                subtitle = "Add, reduce, or reset your virtual paper trading capital from Positions or Settings to maintain a complete audit ledger."
+                            )
+                        }
+                    } else {
+                        items(state.capitalTransactions, key = { it.id }) { tx ->
+                            CapitalTransactionCard(tx = tx)
+                        }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InstrumentTradePerformanceCard(perf: InstrumentTradePerformance) {
+    val tradingColors = LocalTradingColors.current
+    val netColor = if (perf.netPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
+    val winColor = if (perf.winRatePercent >= 50.0) tradingColors.bullish else tradingColors.amber
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().testTag("instrument_trade_perf_${perf.symbol}"),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, tradingColors.border)
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SegmentBadge(perf.segment)
+                    Text(perf.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+                Text(
+                    text = RiskMath.formatSignedCurrency(perf.netPnl, perf.segment),
+                    style = MonoPriceMedium,
+                    color = netColor
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text("TRADES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${perf.totalTrades} (${perf.wins}W / ${perf.losses}L)", style = MonoPriceSmall)
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("WIN RATE", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${String.format(Locale.US, "%.1f", perf.winRatePercent)}%", style = MonoPriceSmall, color = winColor, fontWeight = FontWeight.Bold)
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("GROSS / FEES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "${RiskMath.formatSignedCurrency(perf.grossPnl, perf.segment)} / ${RiskMath.formatPrice(perf.totalCharges, perf.segment)}",
+                        style = MonoPriceSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -378,7 +482,7 @@ private fun CapitalTransactionCard(tx: CapitalTransaction) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Surface(shape = RoundedCornerShape(6.dp), color = badgeBg) {
                     Text(
-                        text = tx.type.label,
+                        text = "${tx.type.label} • ${tx.currency}",
                         style = MaterialTheme.typography.labelSmall,
                         color = badgeFg,
                         fontWeight = FontWeight.Bold,
@@ -392,14 +496,15 @@ private fun CapitalTransactionCard(tx: CapitalTransaction) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            val isUsd = tx.currency.equals("USD", ignoreCase = true)
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = "$prefix${RiskMath.formatPortfolioInr(tx.amount)}",
+                    text = "$prefix${if (isUsd) RiskMath.formatPortfolioUsd(tx.amount) else RiskMath.formatPortfolioInr(tx.amount)}",
                     style = MonoPriceMedium,
                     color = badgeFg
                 )
                 Text(
-                    text = "Bal: ${RiskMath.formatPortfolioInr(tx.balanceAfter)}",
+                    text = "Bal: ${if (isUsd) RiskMath.formatPortfolioUsd(tx.balanceAfter) else RiskMath.formatPortfolioInr(tx.balanceAfter)}",
                     style = MonoPriceSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

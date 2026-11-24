@@ -179,9 +179,12 @@ class ExecutionEngine private constructor(
                 }
             }
 
-            // Cancel untriggered DAY orders when session square-off is active
+            // Cancel untriggered DAY entry orders when session square-off is active.
+            // Protective SL/TARGET legs stay alive as long as their parent position is open
+            // (closing the position automatically cancels them via TradingLedgerService).
             val pendingOrders = orderDao.getByStatus(OrderStatus.PENDING)
             for (order in pendingOrders) {
+                if (order.legRole == "SL" || order.legRole == "TARGET") continue
                 if (order.validityType == ValidityType.DAY &&
                     MarketClock.isIntradaySquareOffTime(order.segment, order.instrumentType, nowMillis)
                 ) {
@@ -248,6 +251,13 @@ class ExecutionEngine private constructor(
     private suspend fun expireOrdersForTime(nowMillis: Long) {
         val activePending = orderDao.getByStatus(OrderStatus.PENDING)
         for (order in activePending) {
+            // Never strip active Stop Loss / Target protection from an open position!
+            // Protective legs remain active until triggered, manually removed, or the parent position closes.
+            if (order.legRole == "SL" || order.legRole == "TARGET") {
+                val hasOpenParent = positionDao.getBySymbol(order.symbol)
+                    .any { it.slOrderId == order.id || it.targetOrderId == order.id }
+                if (hasOpenParent) continue
+            }
             if (nowMillis >= order.expiresAtMillis) {
                 database.withTransaction {
                     orderDao.upsert(
@@ -258,14 +268,13 @@ class ExecutionEngine private constructor(
                             updatedAtMillis = nowMillis
                         )
                     )
-                    // Detach from open Carry Forward position if this was an SL or Target leg
                     if (order.legRole == "SL" || order.legRole == "TARGET") {
                         val positions = positionDao.getBySymbol(order.symbol)
                         for (pos in positions) {
                             if (pos.slOrderId == order.id) {
-                                positionDao.upsert(pos.copy(slOrderId = null, activeSlPrice = null, isTslEnabled = false))
+                                positionDao.upsert(pos.copy(slOrderId = null, activeSlPrice = null, isTslEnabled = false, ocoGroupId = null))
                             } else if (pos.targetOrderId == order.id) {
-                                positionDao.upsert(pos.copy(targetOrderId = null, activeTargetPrice = null, isTrailingTargetEnabled = false))
+                                positionDao.upsert(pos.copy(targetOrderId = null, activeTargetPrice = null, isTrailingTargetEnabled = false, ocoGroupId = null))
                             }
                         }
                     }

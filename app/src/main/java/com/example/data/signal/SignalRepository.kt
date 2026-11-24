@@ -121,6 +121,31 @@ class SignalRepository @Inject constructor(
         )
     }
 
+    val instrumentSignalPerformance: Flow<List<com.example.domain.signal.InstrumentSignalPerformance>> =
+        signalRecords.map { records ->
+            records.groupBy { it.symbol }.map { (symbol, list) ->
+                val segment = list.first().segment
+                val t1 = list.count { it.outcome == SignalOutcome.HIT_T1 }
+                val t2 = list.count { it.outcome == SignalOutcome.HIT_T2 }
+                val sl = list.count { it.outcome == SignalOutcome.HIT_SL }
+                val exp = list.count { it.outcome == SignalOutcome.EXPIRED }
+                val avgPnl = if (list.isEmpty()) 0.0 else list.map { it.pnlPercent }.average()
+                com.example.domain.signal.InstrumentSignalPerformance(
+                    symbol = symbol,
+                    segment = segment,
+                    totalSignals = list.size,
+                    t1Hits = t1,
+                    t2Hits = t2,
+                    slHits = sl,
+                    expiredCount = exp,
+                    avgPnlPercent = avgPnl
+                )
+            }.sortedWith(
+                compareByDescending<com.example.domain.signal.InstrumentSignalPerformance> { it.totalSignals }
+                    .thenByDescending { it.accuracyPercent }
+            )
+        }
+
     fun observeSignalsForSymbol(symbol: String): Flow<List<SignalUiItem>> = combine(
         signalDao.observeForSymbol(symbol),
         savedSignalDao.observeSavedIds(),
@@ -145,6 +170,7 @@ class SignalRepository @Inject constructor(
                 candleAggregator.registerSegment(it.symbol, it.segment)
             }
             candleAggregator.warmUpFromDatabaseOrSeed(universe)
+            pruneCorruptedSignals()
             archiveAndPruneExpired(System.currentTimeMillis())
             universe.forEach { evaluateSymbol(it, Instant.now()) }
             backfillHistory(universe)
@@ -231,6 +257,23 @@ class SignalRepository @Inject constructor(
                     title = "Signal Target 2 Hit: ${rec.symbol}",
                     body = "${rec.direction.name} ${rec.strategy.shortLabel} extended to T2 @ ${RiskMath.formatPrice(ltp, rec.segment)}"
                 )
+            }
+        }
+    }
+
+    private suspend fun pruneCorruptedSignals() {
+        val all = signalDao.getAllOnce()
+        for (s in all) {
+            val entry = s.entryPrice.toDouble()
+            val sl = s.stopLoss.toDouble()
+            if (entry <= 0.0 || sl <= 0.0) {
+                signalDao.deleteById(s.id)
+                continue
+            }
+            val riskPct = kotlin.math.abs(entry - sl) / entry
+            val maxAllowed = if (s.instrumentType == com.example.domain.model.InstrumentType.OPTIONS) 0.40 else 0.12
+            if (riskPct > maxAllowed) {
+                signalDao.deleteById(s.id)
             }
         }
     }

@@ -87,16 +87,19 @@ fun ChartScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = LocalTradingColors.current
+    // TradingView-inspired high-contrast chart palette
     val palette = ChartPalette(
-        bull = colors.bullish,
-        bear = colors.bearish,
+        bull = Color(0xFF26A69A),
+        bear = Color(0xFFEF5350),
         amber = colors.amber,
         violet = colors.violet,
-        cyan = colors.cryptoCyan,
-        grid = colors.border,
-        text = MaterialTheme.colorScheme.onSurface,
-        muted = MaterialTheme.colorScheme.onSurfaceVariant,
-        primary = MaterialTheme.colorScheme.primary
+        cyan = Color(0xFF29B6F6),
+        grid = Color(0xFF2A2E39),
+        text = Color(0xFFD1D4DC),
+        muted = Color(0xFF787B86),
+        primary = Color(0xFF2962FF),
+        canvasBg = Color(0xFF131722),
+        axisDivider = Color(0xFF2A2E39)
     )
 
     Scaffold(
@@ -190,12 +193,12 @@ fun ChartScreen(
                         s != null && s.state != SetupState.INVALIDATED && s.state != SetupState.EXPIRED
                     }?.latest
                     Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, colors.border),
+                        shape = RoundedCornerShape(12.dp),
+                        color = palette.canvasBg,
+                        border = BorderStroke(1.dp, palette.axisDivider),
                         modifier = Modifier.fillMaxWidth().weight(1f)
                     ) {
-                        Column(Modifier.fillMaxSize().padding(6.dp)) {
+                        Column(Modifier.fillMaxSize().padding(2.dp)) {
                             PriceChartCanvas(
                                 analysis = analysis,
                                 overlays = state.overlays,
@@ -309,11 +312,11 @@ fun ChartScreen(
             }?.latest
 
             Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, colors.border)
+                shape = RoundedCornerShape(12.dp),
+                color = palette.canvasBg,
+                border = BorderStroke(1.dp, palette.axisDivider)
             ) {
-                Column(Modifier.padding(6.dp)) {
+                Column(Modifier.padding(2.dp)) {
                     PriceChartCanvas(
                         analysis = analysis,
                         overlays = state.overlays,

@@ -35,6 +35,13 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.text.font.FontWeight
+
 /** Colours used by the chart canvases (resolved from the theme by the caller). */
 data class ChartPalette(
     val bull: Color,
@@ -45,7 +52,9 @@ data class ChartPalette(
     val grid: Color,
     val text: Color,
     val muted: Color,
-    val primary: Color
+    val primary: Color,
+    val canvasBg: Color = Color(0xFF131722),
+    val axisDivider: Color = Color(0xFF2A2E39)
 )
 
 /** Visible window shared by the price and the lower pane so they stay aligned. */
@@ -70,16 +79,23 @@ private fun fmtPrice(v: Double): String = when {
     else -> String.format(Locale.US, "%.4f", v)
 }
 
+private fun fmtCompactVol(v: Double): String = when {
+    abs(v) >= 1e6 -> String.format(Locale.US, "%.2fM", v / 1e6)
+    abs(v) >= 1e3 -> String.format(Locale.US, "%.1fK", v / 1e3)
+    else -> String.format(Locale.US, "%.0f", v)
+}
+
 private fun DrawScope.safeText(
     tm: TextMeasurer,
     text: String,
     x: Float,
     y: Float,
     color: Color,
-    sizeSp: Int = 9
+    sizeSp: Int = 9,
+    bold: Boolean = false
 ) {
     // drawText throws if the remaining layout space is negative, so clamp inside the canvas.
-    val maxX = (size.width - 36f).coerceAtLeast(0f)
+    val maxX = (size.width - 28f).coerceAtLeast(0f)
     val maxY = (size.height - 14f).coerceAtLeast(0f)
     val cx = x.coerceIn(0f, maxX)
     val cy = y.coerceIn(0f, maxY)
@@ -87,9 +103,33 @@ private fun DrawScope.safeText(
         textMeasurer = tm,
         text = text,
         topLeft = Offset(cx, cy),
-        style = TextStyle(color = color, fontSize = sizeSp.sp),
+        style = TextStyle(
+            color = color,
+            fontSize = sizeSp.sp,
+            fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal
+        ),
         maxLines = 1
     )
+}
+
+private fun DrawScope.drawAxisPricePill(
+    tm: TextMeasurer,
+    chartW: Float,
+    axisW: Float,
+    yPos: Float,
+    label: String,
+    bgColor: Color,
+    textColor: Color = Color.White
+) {
+    val pillH = 16f
+    val top = (yPos - pillH / 2f).coerceIn(1f, (size.height - pillH - 1f).coerceAtLeast(1f))
+    drawRoundRect(
+        color = bgColor,
+        topLeft = Offset(chartW + 1f, top),
+        size = Size((axisW - 2f).coerceAtLeast(24f), pillH),
+        cornerRadius = CornerRadius(3f, 3f)
+    )
+    safeText(tm, label, chartW + 4f, top + 2f, textColor, sizeSp = 8, bold = true)
 }
 
 private fun DrawScope.seriesPath(
@@ -150,16 +190,20 @@ fun PriceChartCanvas(
     onPanBars: (Int) -> Unit = {}
 ) {
     val tm = rememberTextMeasurer()
+    var crosshairIndex by remember(analysis.candles.size, measureMode) { mutableStateOf<Int?>(null) }
+
     val interactiveModifier = modifier
         .pointerInput(measureMode, window.start, window.end) {
-            if (measureMode) {
-                detectTapGestures { offset ->
-                    val axisW = AXIS_DP.dp.toPx()
-                    val chartW = (size.width - axisW).coerceAtLeast(1f)
-                    val barW = chartW / window.count
-                    val idx = (window.start + (offset.x / barW).toInt())
-                        .coerceIn(window.start, (window.end - 1).coerceAtLeast(window.start))
+            detectTapGestures { offset ->
+                val axisW = AXIS_DP.dp.toPx()
+                val chartW = (size.width - axisW).coerceAtLeast(1f)
+                val barW = chartW / window.count
+                val idx = (window.start + (offset.x / barW).toInt())
+                    .coerceIn(window.start, (window.end - 1).coerceAtLeast(window.start))
+                if (measureMode) {
                     onMeasureTap(idx)
+                } else {
+                    crosshairIndex = if (crosshairIndex == idx) null else idx
                 }
             }
         }
@@ -167,6 +211,7 @@ fun PriceChartCanvas(
             if (!measureMode) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     if (abs(zoom - 1f) > 0.03f) {
+                        crosshairIndex = null
                         onPinchZoom(zoom)
                     }
                     val axisW = AXIS_DP.dp.toPx()
@@ -174,6 +219,7 @@ fun PriceChartCanvas(
                     val barW = (chartW / window.count).coerceAtLeast(1f)
                     val barsShift = (pan.x / barW).roundToInt()
                     if (barsShift != 0) {
+                        crosshairIndex = null
                         onPanBars(barsShift)
                     }
                 }
@@ -184,49 +230,69 @@ fun PriceChartCanvas(
         val candles = analysis.candles
         if (candles.isEmpty() || window.end <= window.start) return@Canvas
         val axisW = AXIS_DP.dp.toPx()
-        val timeAxisH = 18.dp.toPx()
+        val timeAxisH = 20.dp.toPx()
+        val topHudH = 20.dp.toPx()
         val chartW = size.width - axisW
-        val chartH = (size.height - timeAxisH).coerceAtLeast(40f)
+        val plotBottom = (size.height - timeAxisH).coerceAtLeast(topHudH + 40f)
+        val plotH = (plotBottom - topHudH).coerceAtLeast(30f)
         val barW = chartW / window.count
+
+        // TradingView dark chart background & crisp axis borders
+        drawRect(palette.canvasBg, Offset.Zero, size)
+        drawLine(palette.axisDivider, Offset(chartW, 0f), Offset(chartW, size.height), strokeWidth = 1f)
+        drawLine(palette.axisDivider, Offset(0f, plotBottom), Offset(size.width, plotBottom), strokeWidth = 1f)
 
         var hi = Double.NEGATIVE_INFINITY
         var lo = Double.POSITIVE_INFINITY
+        var maxVol = 0.0
         for (i in window.start until window.end) {
             hi = max(hi, candles[i].high)
             lo = min(lo, candles[i].low)
+            maxVol = max(maxVol, candles[i].volume)
         }
         if (!hi.isFinite() || !lo.isFinite()) return@Canvas
-        val pad = (hi - lo).coerceAtLeast(hi * 0.001) * 0.08
+        val pad = (hi - lo).coerceAtLeast(hi * 0.001) * 0.09
         hi += pad
         lo -= pad
         val span = (hi - lo).coerceAtLeast(1e-9)
         val xOf: (Int) -> Float = { i -> ((i - window.start) + 0.5f) * barW }
-        val yOf: (Double) -> Float = { p -> ((hi - p) / span * chartH).toFloat() }
+        val yOf: (Double) -> Float = { p -> topHudH + ((hi - p) / span * plotH).toFloat() }
 
-        // Grid + price axis
+        // Subtle TradingView horizontal grid + right price axis labels
         for (k in 0..4) {
             val p = lo + span * k / 4.0
             val yy = yOf(p)
-            hLine(yy, 0f, chartW, palette.grid, 0.8f)
-            safeText(tm, fmtPrice(p), chartW + 4f, yy - 7f, palette.muted)
+            hLine(yy, 0f, chartW, palette.grid.copy(alpha = 0.45f), 0.7f)
+            safeText(tm, fmtPrice(p), chartW + 5f, yy - 6f, palette.muted, sizeSp = 8)
         }
 
         // TradingView-style IST Time Axis (bottom strip + subtle vertical grid)
-        drawLine(palette.grid, Offset(0f, chartH), Offset(size.width, chartH), strokeWidth = 1f)
         val timeTicks = 5
         val isIntraday = analysis.timeframe.isIntraday
         for (t in 0 until timeTicks) {
             val frac = (t + 0.5f) / timeTicks
             val idx = (window.start + (frac * window.count).toInt()).coerceIn(window.start, window.end - 1)
             val tx = xOf(idx)
-            drawLine(palette.grid.copy(alpha = 0.45f), Offset(tx, 0f), Offset(tx, chartH), strokeWidth = 0.7f)
+            drawLine(palette.grid.copy(alpha = 0.35f), Offset(tx, topHudH), Offset(tx, plotBottom), strokeWidth = 0.7f)
             val tsMillis = candles[idx].timestamp.toEpochMilli()
             val label = if (isIntraday) {
                 MarketClock.formatIstShortTime(tsMillis)
             } else {
                 MarketClock.formatIstDate(tsMillis).take(6)
             }
-            safeText(tm, label, (tx - 16f).coerceIn(2f, chartW - 36f), chartH + 3f, palette.muted, 8)
+            safeText(tm, label, (tx - 16f).coerceIn(2f, chartW - 36f), plotBottom + 4f, palette.muted, 8)
+        }
+
+        // Translucent TradingView bottom volume bars (bottom 16% of plot area)
+        if (maxVol > 0.0) {
+            val volAreaH = plotH * 0.16f
+            val volBarW = (barW * 0.68f).coerceAtLeast(1f)
+            for (i in window.start until window.end) {
+                val c = candles[i]
+                val vh = ((c.volume / maxVol) * volAreaH).toFloat().coerceAtLeast(1f)
+                val vCol = (if (c.close >= c.open) palette.bull else palette.bear).copy(alpha = 0.22f)
+                drawRect(vCol, Offset(xOf(i) - volBarW / 2f, plotBottom - vh), Size(volBarW, vh))
+            }
         }
 
         // Premium / discount shading of the dealing range
@@ -440,28 +506,74 @@ fun PriceChartCanvas(
             hLine(yOf(s.triggerLevel), fromX, chartW, palette.amber, 1.4f, dashed = true)
             safeText(tm, "Trigger ${fmtPrice(s.triggerLevel)}", fromX + 2f, yOf(s.triggerLevel) - 12f, palette.amber, 8)
             s.entry?.let { e ->
-                hLine(yOf(e), fromX, chartW, palette.text, 1.4f)
-                safeText(tm, "Entry", chartW - 34f, yOf(e) - 12f, palette.text, 8)
+                val ey = yOf(e)
+                hLine(ey, fromX, chartW, palette.primary, 1.3f)
+                safeText(tm, "Entry", chartW - 34f, ey - 12f, palette.primary, 8)
+                drawAxisPricePill(tm, chartW, axisW, ey, fmtPrice(e), palette.primary)
             }
             s.stopLoss?.let { sl ->
-                hLine(yOf(sl), fromX, chartW, palette.bear, 1.4f)
-                safeText(tm, "SL", chartW - 20f, yOf(sl) + 1f, palette.bear, 8)
+                val sly = yOf(sl)
+                hLine(sly, fromX, chartW, palette.bear, 1.4f)
+                safeText(tm, "SL", chartW - 20f, sly + 1f, palette.bear, 8)
+                drawAxisPricePill(tm, chartW, axisW, sly, fmtPrice(sl), palette.bear)
             }
-            s.targets.forEach { t ->
+            s.targets.forEachIndexed { idx, t ->
                 val yy = yOf(t.price)
-                if (yy in 0f..size.height) {
-                    hLine(yy, fromX, chartW, palette.bull.copy(alpha = 0.55f), 0.9f, dashed = true)
+                if (yy in topHudH..plotBottom) {
+                    hLine(yy, fromX, chartW, palette.bull.copy(alpha = 0.65f), 1.0f, dashed = true)
                     safeText(tm, t.label, chartW - 34f, yy - 11f, palette.bull, 8)
+                    if (idx < 2) {
+                        drawAxisPricePill(tm, chartW, axisW, yy, fmtPrice(t.price), palette.bull.copy(alpha = 0.85f))
+                    }
                 }
             }
         }
 
-        // Last price marker
-        val last = candles[window.end - 1].close
-        val lastY = yOf(last).coerceIn(8f, chartH - 8f)
-        hLine(lastY, 0f, chartW, palette.primary.copy(alpha = 0.6f), 1f, dashed = true)
-        drawRect(palette.primary, Offset(chartW, lastY - 8f), Size(axisW, 16f))
-        safeText(tm, fmtPrice(last), chartW + 3f, lastY - 7f, Color.White)
+        // Last price TradingView dashed line + colored bull/bear axis pill
+        val lastCandle = candles[window.end - 1]
+        val last = lastCandle.close
+        val lastBull = lastCandle.close >= lastCandle.open
+        val lastColor = if (lastBull) palette.bull else palette.bear
+        val lastY = yOf(last).coerceIn(topHudH + 6f, plotBottom - 6f)
+        hLine(lastY, 0f, chartW, lastColor.copy(alpha = 0.7f), 1.1f, dashed = true)
+        drawAxisPricePill(tm, chartW, axisW, lastY, fmtPrice(last), lastColor)
+
+        // Interactive Tap Crosshair (TradingView style)
+        val inspectIdx = crosshairIndex?.takeIf { it in window.start until window.end }
+        if (inspectIdx != null && !measureMode) {
+            val ic = candles[inspectIdx]
+            val cx = xOf(inspectIdx)
+            val cy = yOf(ic.close).coerceIn(topHudH, plotBottom)
+            val crossColor = palette.muted.copy(alpha = 0.85f)
+            drawLine(
+                color = crossColor,
+                start = Offset(cx, topHudH),
+                end = Offset(cx, plotBottom),
+                strokeWidth = 1f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f))
+            )
+            hLine(cy, 0f, chartW, crossColor, 1f, dashed = true)
+            drawAxisPricePill(tm, chartW, axisW, cy, fmtPrice(ic.close), palette.axisDivider, palette.text)
+            val tsLabel = MarketClock.formatIstShortTime(ic.timestamp.toEpochMilli())
+            val timeBoxX = (cx - 22f).coerceIn(2f, (chartW - 44f).coerceAtLeast(2f))
+            drawRoundRect(
+                color = palette.axisDivider,
+                topLeft = Offset(timeBoxX, plotBottom + 1f),
+                size = Size(44f, 16f),
+                cornerRadius = CornerRadius(3f, 3f)
+            )
+            safeText(tm, tsLabel, timeBoxX + 4f, plotBottom + 3f, palette.text, sizeSp = 8, bold = true)
+        }
+
+        // Top TradingView OHLCV HUD Bar
+        val hudCandle = inspectIdx?.let { candles[it] } ?: lastCandle
+        val hudBull = hudCandle.close >= hudCandle.open
+        val hudColor = if (hudBull) palette.bull else palette.bear
+        val barPct = if (hudCandle.open > 0.0) ((hudCandle.close - hudCandle.open) / hudCandle.open) * 100.0 else 0.0
+        val pctSign = if (barPct >= 0.0) "+" else ""
+        val hudText = "O ${fmtPrice(hudCandle.open)}  H ${fmtPrice(hudCandle.high)}  L ${fmtPrice(hudCandle.low)}  C ${fmtPrice(hudCandle.close)} ($pctSign${String.format(Locale.US, "%.2f", barPct)}%)  V ${fmtCompactVol(hudCandle.volume)}"
+        drawRect(palette.canvasBg.copy(alpha = 0.92f), Offset(0f, 0f), Size(chartW, topHudH))
+        safeText(tm, hudText, 6f, 4f, hudColor, sizeSp = 8, bold = true)
 
         // TradingView-style Time & Price Range Measure Tool overlay
         if (measureStartIndex != null && measureStartIndex in candles.indices) {
@@ -472,8 +584,8 @@ fun PriceChartCanvas(
             val c2 = candles[endIdx]
             val x1 = xOf(i1).coerceIn(0f, chartW)
             val x2 = xOf(i2).coerceIn(0f, chartW)
-            val y1 = yOf(c1.close).coerceIn(0f, chartH)
-            val y2 = yOf(c2.close).coerceIn(0f, chartH)
+            val y1 = yOf(c1.close).coerceIn(topHudH, plotBottom)
+            val y2 = yOf(c2.close).coerceIn(topHudH, plotBottom)
             val priceDelta = c2.close - c1.close
             val pctDelta = if (c1.close != 0.0) (priceDelta / c1.close) * 100.0 else 0.0
             val rangeColor = if (priceDelta >= 0) palette.bull else palette.bear
@@ -498,9 +610,14 @@ fun PriceChartCanvas(
             val sign = if (priceDelta >= 0) "+" else ""
             val summary = "$sign${fmtPrice(priceDelta)} ($sign${String.format(Locale.US, "%.2f", pctDelta)}%) • $barsCount bars • $durLabel"
             val labelX = left.coerceIn(6f, (chartW - 190f).coerceAtLeast(6f))
-            val labelY = (top - 22f).coerceIn(4f, (chartH - 22f).coerceAtLeast(4f))
-            drawRect(rangeColor, Offset(labelX - 4f, labelY - 2f), Size(195f.coerceAtMost(chartW - labelX + 2f), 18f))
-            safeText(tm, summary, labelX, labelY + 1f, Color.White, 8)
+            val labelY = (top - 22f).coerceIn(topHudH + 2f, (plotBottom - 22f).coerceAtLeast(topHudH + 2f))
+            drawRoundRect(
+                color = rangeColor,
+                topLeft = Offset(labelX - 4f, labelY - 2f),
+                size = Size(195f.coerceAtMost(chartW - labelX + 2f), 18f),
+                cornerRadius = CornerRadius(4f, 4f)
+            )
+            safeText(tm, summary, labelX, labelY + 1f, Color.White, 8, bold = true)
         }
     }
 }
@@ -518,11 +635,13 @@ fun LowerPaneCanvas(
     Canvas(modifier = modifier) {
         val candles = analysis.candles
         if (candles.isEmpty() || window.end <= window.start) return@Canvas
+        drawRect(palette.canvasBg, Offset.Zero, size)
         val axisW = AXIS_DP.dp.toPx()
         val chartW = size.width - axisW
         val barW = chartW / window.count
         val xOf: (Int) -> Float = { i -> ((i - window.start) + 0.5f) * barW }
-        hLine(0.5f, 0f, size.width, palette.grid, 1f)
+        hLine(0.5f, 0f, size.width, palette.axisDivider, 1f)
+        drawLine(palette.axisDivider, Offset(chartW, 0f), Offset(chartW, size.height), strokeWidth = 1f)
 
         fun scaleOf(values: List<Double?>, symmetric: Boolean = false): Pair<Double, Double>? {
             var mx = Double.NEGATIVE_INFINITY

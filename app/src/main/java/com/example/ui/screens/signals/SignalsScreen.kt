@@ -64,8 +64,12 @@ import com.example.data.signal.SignalUiItem
 import com.example.domain.analysis.RiskRewardLadder
 import com.example.domain.engine.MarketClock
 import com.example.domain.engine.RiskMath
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import com.example.domain.signal.AiSignalSecondOpinion
 import com.example.domain.signal.AiUiState
+import com.example.domain.signal.InstrumentSignalPerformance
 import com.example.domain.signal.SignalAccuracyStats
 import com.example.domain.signal.SignalAssetCategory
 import com.example.domain.signal.SignalConfidence
@@ -255,10 +259,38 @@ fun SignalsScreen(
         }
 
         if (state.filters.tab == SignalsTab.HISTORY) {
+            var showByInstrument by remember { mutableStateOf(true) }
+
             SignalAccuracySummaryCard(
                 stats = state.accuracyStats,
                 onClearHistory = viewModel::clearSignalHistory
             )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = showByInstrument,
+                    onClick = { showByInstrument = true },
+                    label = { Text("By Instrument (${state.instrumentPerformance.size})") },
+                    modifier = Modifier.weight(1f).testTag("signals_perf_by_instrument_tab"),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+                FilterChip(
+                    selected = !showByInstrument,
+                    onClick = { showByInstrument = false },
+                    label = { Text("Signal Log (${state.historyRecords.size})") },
+                    modifier = Modifier.weight(1f).testTag("signals_perf_log_tab"),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+            }
 
             if (state.historyRecords.isEmpty()) {
                 Box(
@@ -272,6 +304,18 @@ fun SignalsScreen(
                         title = "No Resolved Signal Records Yet",
                         subtitle = "When active signals hit Target 1, Target 2, Stop Loss, or Expire, they are removed from Active and tracked here for live accuracy."
                     )
+                }
+            } else if (showByInstrument) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentPadding = PaddingValues(bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(state.instrumentPerformance, key = { it.symbol }) { perf ->
+                        InstrumentSignalPerformanceCard(perf = perf)
+                    }
                 }
             } else {
                 LazyColumn(
@@ -394,6 +438,65 @@ private fun SignalAccuracySummaryCard(
                 PriceMetricCell("STOP LOSS", stats.slHits.toString(), tradingColors.bearish)
                 PriceMetricCell("EXPIRED", stats.expiredCount.toString(), MaterialTheme.colorScheme.onSurfaceVariant)
                 PriceMetricCell("TOTAL", stats.totalResolved.toString(), MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun InstrumentSignalPerformanceCard(perf: InstrumentSignalPerformance) {
+    val tradingColors = LocalTradingColors.current
+    val accColor = when {
+        perf.decidedCount == 0 -> MaterialTheme.colorScheme.onSurfaceVariant
+        perf.accuracyPercent >= 60.0 -> tradingColors.bullish
+        perf.accuracyPercent >= 45.0 -> tradingColors.amber
+        else -> tradingColors.bearish
+    }
+    val pnlSign = if (perf.avgPnlPercent >= 0.0) "+" else ""
+    val pnlColor = if (perf.avgPnlPercent >= 0.0) tradingColors.bullish else tradingColors.bearish
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().testTag("signal_inst_perf_${perf.symbol}"),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, tradingColors.border)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(perf.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    SegmentBadge(perf.segment)
+                }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (perf.accuracyPercent >= 50.0) tradingColors.bullishContainer else MaterialTheme.colorScheme.surfaceContainerHigh
+                ) {
+                    Text(
+                        text = if (perf.decidedCount > 0) {
+                            "${String.format(Locale.US, "%.1f", perf.accuracyPercent)}% Acc (${perf.wins}/${perf.decidedCount})"
+                        } else {
+                            "0 decided"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = accColor,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                PriceMetricCell("T1", perf.t1Hits.toString(), tradingColors.bullish)
+                PriceMetricCell("T2", perf.t2Hits.toString(), tradingColors.bullish)
+                PriceMetricCell("SL", perf.slHits.toString(), tradingColors.bearish)
+                PriceMetricCell("EXP", perf.expiredCount.toString(), MaterialTheme.colorScheme.onSurfaceVariant)
+                PriceMetricCell("AVG P&L", "$pnlSign${String.format(Locale.US, "%.2f", perf.avgPnlPercent)}%", pnlColor)
             }
         }
     }
@@ -756,7 +859,7 @@ private fun SignalDetailSheetContent(
         AiSecondOpinionCard(
             title = "AI Signal Second Opinion",
             subtitle = "Advisory confluence & invalidation check",
-            ctaLabel = "Analyze Setup with Gemini",
+            ctaLabel = "Analyze Setup with AI",
             aiState = aiState,
             onAnalyze = onAnalyzeAi,
             ctaTestTag = "ai_analyze_signal_button"
