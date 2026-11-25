@@ -80,7 +80,7 @@ class SimulatedFeed private constructor(
             detail = if (publicQuotePoller != null) "Public Market API + Simulator Active" else "1s GBM Simulator Active"
         )
 
-        // Background poller for free public NSE / BSE / MCX / Crypto real market quotes
+        // Background poller for free public NSE / BSE / MCX / Crypto live market quotes
         if (publicQuotePoller != null && publicPollerJob?.isActive != true) {
             publicPollerJob = appScope.launch(Dispatchers.IO) {
                 while (isActive) {
@@ -110,11 +110,14 @@ class SimulatedFeed private constructor(
                             }
                             _connectionState.value = FeedConnectionState.Connected(
                                 source = FeedSourceType.SIMULATED,
-                                detail = "Live Public Quotes (${quotes.size} NSE/BSE/MCX/Crypto)"
+                                detail = "Live NSE/BSE/MCX Public Data (${quotes.size} symbols)"
                             )
                         }
+                        delay(8_000L)
+                    } else {
+                        // Retry quickly while waiting for universe to finish seeding
+                        delay(500L)
                     }
-                    delay(15_000L)
                 }
             }
         }
@@ -134,14 +137,14 @@ class SimulatedFeed private constructor(
                         else -> 0.0014
                     }
                     val volatility = when {
-                        anchored != null && !isSessionOpen -> baseVol * 0.15
-                        anchored != null -> baseVol * 0.35
+                        anchored != null && !isSessionOpen -> baseVol * 0.04
+                        anchored != null -> baseVol * 0.14
                         else -> baseVol
                     }
                     val shock = Random.nextDouble(-1.0, 1.0) * volatility
-                    // Gently mean-revert toward real public anchor if present so paper prices stay true to real market
+                    // Strongly mean-revert toward real live NSE/BSE/MCX anchor so simulated prices stay faithful to live market
                     val meanRevert = if (anchored != null && anchored > BigDecimal.ZERO) {
-                        ((anchored.toDouble() - current.toDouble()) / anchored.toDouble()) * 0.15
+                        ((anchored.toDouble() - current.toDouble()) / anchored.toDouble()) * 0.45
                     } else 0.0
                     val nextRaw = current.toDouble() * (1.0 + shock + meanRevert)
                     val rounded = RiskMath.roundToTick(

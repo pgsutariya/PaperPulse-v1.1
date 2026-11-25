@@ -3,8 +3,10 @@ package com.example.ui.screens.watchlist
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,9 +30,14 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.GridOn
+import androidx.compose.material.icons.rounded.Newspaper
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -43,16 +50,23 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.alerts.PriceAlert
 import com.example.data.feed.live.AngelScripSearchResult
 import com.example.data.feed.live.SegmentBadgeMode
 import com.example.domain.engine.RiskMath
@@ -64,8 +78,11 @@ import com.example.ui.components.FeedHealthBadge
 import com.example.ui.components.FeedLostWarningBanner
 import com.example.ui.components.InstrumentTypeBadge
 import com.example.ui.components.PortfolioPulseHeader
+import com.example.ui.components.PriceAlertsManagerDialog
 import com.example.ui.components.SegmentBadge
+import com.example.ui.components.SetPriceAlertDialog
 import com.example.ui.components.SparklineChart
+import com.example.ui.components.WatchlistNewsFeedSection
 import com.example.ui.theme.LocalTradingColors
 import com.example.ui.theme.MonoPriceMedium
 import com.example.ui.theme.MonoPriceSmall
@@ -76,10 +93,17 @@ fun WatchlistScreen(
     onInstrumentClick: (String) -> Unit,
     onOpenFeedSettings: () -> Unit,
     onOpenOptionChain: (String) -> Unit = {},
+    onOpenNews: () -> Unit = {},
     viewModel: WatchlistViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tradingColors = LocalTradingColors.current
+    var alertTargetSymbol by remember { mutableStateOf<String?>(null) }
+    var showAlertsManager by remember { mutableStateOf(false) }
+
+    val alertTargetInstrument = remember(alertTargetSymbol, state.instruments) {
+        alertTargetSymbol?.let { sym -> state.instruments.firstOrNull { it.symbol == sym } }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.openSymbolEvents.collect { symbol ->
@@ -173,6 +197,55 @@ fun WatchlistScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            AssistChip(
+                onClick = onOpenNews,
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Newspaper,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = if (state.filteredWatchlistNews.isNotEmpty()) {
+                            "Watchlist News (${state.filteredWatchlistNews.size})"
+                        } else {
+                            "Watchlist News"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                },
+                modifier = Modifier.testTag("watchlist_open_news_feed")
+            )
+            val activeAlertCount = state.priceAlerts.count { it.isActive }
+            AssistChip(
+                onClick = { showAlertsManager = true },
+                leadingIcon = {
+                    Icon(
+                        imageVector = if (activeAlertCount > 0) {
+                            Icons.Rounded.NotificationsActive
+                        } else {
+                            Icons.Rounded.NotificationsNone
+                        },
+                        contentDescription = null,
+                        tint = if (activeAlertCount > 0) tradingColors.amber else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = if (activeAlertCount > 0) "Price Alerts ($activeAlertCount)" else "Price Alerts",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (activeAlertCount > 0) tradingColors.amber else MaterialTheme.colorScheme.primary
+                    )
+                },
+                modifier = Modifier.testTag("watchlist_open_price_alerts")
+            )
             AssistChip(
                 onClick = { onOpenOptionChain("NIFTY") },
                 leadingIcon = {
@@ -363,6 +436,21 @@ fun WatchlistScreen(
                     }
                 }
 
+                if (!showLiveSection && state.watchlistNewsSymbols.isNotEmpty()) {
+                    item(key = "watchlist_grounded_news_section") {
+                        WatchlistNewsFeedSection(
+                            feedState = state.watchlistNewsState,
+                            watchlistSymbols = state.watchlistNewsSymbols,
+                            selectedNewsSymbol = state.selectedNewsSymbol,
+                            articles = state.filteredWatchlistNews,
+                            onSelectNewsSymbol = viewModel::onSelectNewsSymbol,
+                            onRefreshGrounded = { sym -> viewModel.refreshWatchlistNews(focusSymbol = sym, force = true) },
+                            onOpenSymbol = onInstrumentClick,
+                            onOpenFullFeed = onOpenNews
+                        )
+                    }
+                }
+
                 if (state.instruments.isNotEmpty() && showLiveSection) {
                     item(key = "watchlist_saved_header") {
                         Text(
@@ -377,14 +465,45 @@ fun WatchlistScreen(
 
                 items(state.instruments, key = { it.symbol }) { instrument ->
                     val badge = state.segmentStatuses[instrument.segment]?.badge ?: SegmentBadgeMode.SIMULATED
+                    val activeAlerts = state.activeAlertsBySymbol[instrument.symbol].orEmpty()
                     InstrumentRowCard(
                         instrument = instrument,
                         feedBadge = badge,
-                        onClick = { onInstrumentClick(instrument.symbol) }
+                        activeAlerts = activeAlerts,
+                        onClick = { onInstrumentClick(instrument.symbol) },
+                        onSetPriceAlert = { alertTargetSymbol = instrument.symbol },
+                        onFilterNewsForSymbol = { viewModel.onSelectNewsSymbol(instrument.symbol) }
                     )
                 }
             }
         }
+    }
+
+    if (alertTargetInstrument != null) {
+        val alertsForSymbol = state.priceAlerts.filter { it.symbol == alertTargetInstrument.symbol }
+        SetPriceAlertDialog(
+            instrument = alertTargetInstrument,
+            existingAlerts = alertsForSymbol,
+            hasNotificationPermission = viewModel.hasNotificationPermission(),
+            onCreateAlert = { targetPrice, condition, note ->
+                viewModel.createPriceAlert(alertTargetInstrument, targetPrice, condition, note)
+            },
+            onDeleteAlert = viewModel::deletePriceAlert,
+            onRearmAlert = viewModel::rearmPriceAlert,
+            onDismiss = { alertTargetSymbol = null }
+        )
+    }
+
+    if (showAlertsManager) {
+        PriceAlertsManagerDialog(
+            alerts = state.priceAlerts,
+            ltpBySymbol = state.ltpBySymbol,
+            onRearmAlert = viewModel::rearmPriceAlert,
+            onDeleteAlert = viewModel::deletePriceAlert,
+            onClearTriggered = viewModel::clearTriggeredPriceAlerts,
+            onOpenSymbol = onInstrumentClick,
+            onDismiss = { showAlertsManager = false }
+        )
     }
 }
 
@@ -498,15 +617,20 @@ private fun LiveSearchResultCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun InstrumentRowCard(
     instrument: Instrument,
     feedBadge: SegmentBadgeMode,
-    onClick: () -> Unit
+    activeAlerts: List<PriceAlert>,
+    onClick: () -> Unit,
+    onSetPriceAlert: () -> Unit,
+    onFilterNewsForSymbol: () -> Unit
 ) {
     val tradingColors = LocalTradingColors.current
     val isPositive = instrument.changePercent >= BigDecimal.ZERO
     val pctColor = if (isPositive) tradingColors.bullish else tradingColors.bearish
+    var showContextMenu by remember { mutableStateOf(false) }
 
     val tickFlashColor by animateColorAsState(
         targetValue = when (instrument.lastTickDirection) {
@@ -518,102 +642,222 @@ private fun InstrumentRowCard(
         label = "tickFlash"
     )
 
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("instrument_card_${instrument.symbol}")
-            .clip(RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, tradingColors.border)
-    ) {
-        Row(
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .testTag("instrument_card_${instrument.symbol}")
+                .clip(RoundedCornerShape(14.dp))
+                .pointerInput(instrument.symbol) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                                event.changes.forEach { it.consume() }
+                                showContextMenu = true
+                            }
+                        }
+                    }
+                }
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { showContextMenu = true }
+                ),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(
+                1.dp,
+                if (activeAlerts.isNotEmpty()) tradingColors.amber.copy(alpha = 0.55f) else tradingColors.border
+            )
         ) {
-            Column(modifier = Modifier.weight(1.25f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    SegmentBadge(segment = instrument.segment)
-                    InstrumentTypeBadge(type = instrument.type)
-                    FeedHealthBadge(badge = feedBadge)
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1.25f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        SegmentBadge(segment = instrument.segment)
+                        InstrumentTypeBadge(type = instrument.type)
+                        FeedHealthBadge(badge = feedBadge)
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh
+                        ) {
+                            Text(
+                                text = "LOT ${instrument.lotSize}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "LOT ${instrument.lotSize}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = instrument.symbol,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (activeAlerts.isNotEmpty()) {
+                            val firstAlert = activeAlerts.first()
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = tradingColors.amberContainer,
+                                modifier = Modifier
+                                    .clickable(onClick = onSetPriceAlert)
+                                    .testTag("instrument_alert_pill_${instrument.symbol}")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.NotificationsActive,
+                                        contentDescription = "Active price alert",
+                                        tint = tradingColors.amber,
+                                        modifier = Modifier.size(11.dp)
+                                    )
+                                    Text(
+                                        text = if (activeAlerts.size == 1) {
+                                            "${firstAlert.condition.symbolText}${RiskMath.formatPrice(firstAlert.targetPrice, instrument.segment)}"
+                                        } else {
+                                            "${activeAlerts.size} Alerts"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = tradingColors.amber,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        text = instrument.displayName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                SparklineChart(
+                    points = instrument.sparkline,
+                    isPositive = isPositive,
+                    modifier = Modifier
+                        .width(64.dp)
+                        .height(34.dp)
+                        .padding(horizontal = 4.dp)
+                )
+
+                Column(
+                    modifier = Modifier.weight(0.95f),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(tickFlashColor)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = RiskMath.formatPrice(instrument.ltp, instrument.segment),
+                            style = MonoPriceMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    val sign = if (isPositive) "+" else ""
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (isPositive) tradingColors.bullishContainer else tradingColors.bearishContainer
+                    ) {
+                        Text(
+                            text = "$sign${instrument.changePercent}%",
+                            style = MonoPriceSmall,
+                            color = pctColor,
                             fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = instrument.symbol,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = instrument.displayName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
             }
+        }
 
-            SparklineChart(
-                points = instrument.sparkline,
-                isPositive = isPositive,
-                modifier = Modifier
-                    .width(68.dp)
-                    .height(34.dp)
-                    .padding(horizontal = 6.dp)
+        DropdownMenu(
+            expanded = showContextMenu,
+            onDismissRequest = { showContextMenu = false },
+            modifier = Modifier.testTag("instrument_context_menu_${instrument.symbol}")
+        ) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = if (activeAlerts.isNotEmpty()) {
+                            "Set / Manage Price Alerts (${activeAlerts.size})"
+                        } else {
+                            "Set Price Alert..."
+                        },
+                        fontWeight = FontWeight.SemiBold
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.NotificationsActive,
+                        contentDescription = null,
+                        tint = tradingColors.amber
+                    )
+                },
+                onClick = {
+                    showContextMenu = false
+                    onSetPriceAlert()
+                },
+                modifier = Modifier.testTag("context_menu_set_alert_${instrument.symbol}")
             )
-
-            Column(
-                modifier = Modifier.weight(0.95f),
-                horizontalAlignment = Alignment.End
-            ) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(tickFlashColor)
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = RiskMath.formatPrice(instrument.ltp, instrument.segment),
-                        style = MonoPriceMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1
+            DropdownMenuItem(
+                text = { Text("Open Chart & Trade") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.TrendingUp,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
                     )
-                }
-                Spacer(Modifier.height(4.dp))
-                val sign = if (isPositive) "+" else ""
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = if (isPositive) tradingColors.bullishContainer else tradingColors.bearishContainer
-                ) {
-                    Text(
-                        text = "$sign${instrument.changePercent}%",
-                        style = MonoPriceSmall,
-                        color = pctColor,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                },
+                onClick = {
+                    showContextMenu = false
+                    onClick()
+                },
+                modifier = Modifier.testTag("context_menu_trade_${instrument.symbol}")
+            )
+            DropdownMenuItem(
+                text = { Text("Filter Watchlist News") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Newspaper,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                }
-            }
+                },
+                onClick = {
+                    showContextMenu = false
+                    onFilterNewsForSymbol()
+                },
+                modifier = Modifier.testTag("context_menu_news_${instrument.symbol}")
+            )
         }
     }
 }

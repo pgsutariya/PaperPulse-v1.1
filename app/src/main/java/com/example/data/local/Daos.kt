@@ -111,6 +111,9 @@ interface TradeJournalDao {
     @Query("UPDATE trade_journal SET notes = :notes WHERE id = :id")
     suspend fun updateNotes(id: String, notes: String)
 
+    @Query("UPDATE trade_journal SET tagsCsv = :tagsCsv WHERE id = :id")
+    suspend fun updateTags(id: String, tagsCsv: String)
+
     @Query("DELETE FROM trade_journal")
     suspend fun clearAll()
 }

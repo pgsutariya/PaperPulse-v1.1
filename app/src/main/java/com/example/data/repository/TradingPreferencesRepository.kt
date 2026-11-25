@@ -34,6 +34,7 @@ class TradingPreferencesRepository @Inject constructor(
         val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
         val SIGNAL_NOTIFICATIONS_ENABLED = booleanPreferencesKey("signal_notifications_enabled")
         val USE_FREE_PUBLIC_FEED = booleanPreferencesKey("use_free_public_feed")
+        val CHART_ENGINE = stringPreferencesKey("chart_engine")
     }
 
     // Feed token kept strictly in memory only so sensitive credentials are never persisted
@@ -56,6 +57,14 @@ class TradingPreferencesRepository @Inject constructor(
             signalNotificationsEnabled = prefs[Keys.SIGNAL_NOTIFICATIONS_ENABLED] ?: true,
             useFreePublicMarketFeed = prefs[Keys.USE_FREE_PUBLIC_FEED] ?: true
         )
+    }
+
+    val chartEngineFlow: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.CHART_ENGINE] ?: "CANVAS"
+    }
+
+    suspend fun updateChartEngine(engineName: String) {
+        context.dataStore.edit { it[Keys.CHART_ENGINE] = engineName }
     }
 
     suspend fun getConfig(): TradingConfig = configFlow.first()

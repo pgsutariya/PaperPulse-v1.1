@@ -2,6 +2,8 @@ package com.example.ui.screens.positions
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.ai.AiConnectionStatus
+import com.example.data.ai.AiMarketRepository
 import com.example.data.feed.live.FeedType
 import com.example.data.feed.live.SegmentBadgeMode
 import com.example.data.feed.live.SegmentFeedStatus
@@ -15,8 +17,11 @@ import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
 import com.example.domain.model.Position
 import com.example.domain.model.TrailMode
+import com.example.domain.signal.AiSignalSecondOpinion
+import com.example.domain.signal.AiUiState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -48,17 +53,23 @@ data class PositionsUiState(
     val capitalTransactions: List<CapitalTransaction> = emptyList(),
     val riskControlsSuspended: Boolean = false,
     val suspendedBannerMessage: String = "",
-    val liveStatusMessage: String = ""
+    val liveStatusMessage: String = "",
+    val aiRiskAuditState: AiUiState<AiSignalSecondOpinion> = AiUiState.Idle,
+    val aiConnectionStatus: AiConnectionStatus = AiConnectionStatus()
 )
 
 @HiltViewModel
 class PositionsViewModel @Inject constructor(
     private val tradingRepository: TradingRepository,
-    private val marketDataRepository: MarketDataRepository
+    private val marketDataRepository: MarketDataRepository,
+    private val aiMarketRepository: AiMarketRepository
 ) : ViewModel() {
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
+    private val _aiRiskAuditState = MutableStateFlow<AiUiState<AiSignalSecondOpinion>>(AiUiState.Idle)
+
+    private var latestAuditSnapshot = AuditSnapshot()
 
     private val feedHealthFlow = combine(
         marketDataRepository.segmentStatuses,
@@ -67,17 +78,31 @@ class PositionsViewModel @Inject constructor(
         marketDataRepository.liveStatusMessage
     ) { statuses, suspended, bannerMsg, msg -> FeedHealthData(statuses, suspended, bannerMsg, msg) }
 
+    private val aiFlow = combine(
+        _aiRiskAuditState,
+        aiMarketRepository.connectionStatus
+    ) { audit, status -> audit to status }
+
     val uiState: StateFlow<PositionsUiState> = combine(
         tradingRepository.positions,
         marketDataRepository.instruments,
         tradingRepository.accountState,
         tradingRepository.capitalTransactions,
-        feedHealthFlow
-    ) { positions: List<Position>,
-        instruments: List<Instrument>,
-        account: AccountState,
-        capitalTxns: List<CapitalTransaction>,
-        health: FeedHealthData ->
+        feedHealthFlow,
+        aiFlow
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        val positions = values[0] as List<Position>
+        @Suppress("UNCHECKED_CAST")
+        val instruments = values[1] as List<Instrument>
+        val account = values[2] as AccountState
+        @Suppress("UNCHECKED_CAST")
+        val capitalTxns = values[3] as List<CapitalTransaction>
+        val health = values[4] as FeedHealthData
+        @Suppress("UNCHECKED_CAST")
+        val aiPair = values[5] as Pair<AiUiState<AiSignalSecondOpinion>, AiConnectionStatus>
+
+        latestAuditSnapshot = AuditSnapshot(account, positions, instruments)
         val instMap: Map<String, Instrument> = instruments.associateBy { it.symbol }
         val segStatuses = health.statuses
         var indiaUnrealised = BigDecimal.ZERO
@@ -117,13 +142,35 @@ class PositionsViewModel @Inject constructor(
             capitalTransactions = capitalTxns,
             riskControlsSuspended = health.suspended,
             suspendedBannerMessage = health.bannerMsg,
-            liveStatusMessage = health.msg
+            liveStatusMessage = health.msg,
+            aiRiskAuditState = aiPair.first,
+            aiConnectionStatus = aiPair.second
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = PositionsUiState()
     )
+
+    fun switchAiModel(modelName: String) {
+        aiMarketRepository.switchActiveModel(modelName)
+    }
+
+    fun runAiPortfolioRiskAudit() {
+        val snap = latestAuditSnapshot
+        viewModelScope.launch {
+            _aiRiskAuditState.value = AiUiState.Loading
+            val res = aiMarketRepository.auditOpenPositions(
+                account = snap.account,
+                positions = snap.positions,
+                instruments = snap.instruments
+            )
+            _aiRiskAuditState.value = res.fold(
+                onSuccess = { AiUiState.Success(it) },
+                onFailure = { AiUiState.Error(it.message ?: "AI portfolio risk audit failed.") }
+            )
+        }
+    }
 
     fun saveInlineRiskControls(
         positionId: String,
@@ -250,5 +297,11 @@ class PositionsViewModel @Inject constructor(
         val suspended: Boolean,
         val bannerMsg: String,
         val msg: String
+    )
+
+    private data class AuditSnapshot(
+        val account: AccountState = AccountState(BigDecimal("1000000"), BigDecimal("1000000"), BigDecimal.ZERO),
+        val positions: List<Position> = emptyList(),
+        val instruments: List<Instrument> = emptyList()
     )
 }

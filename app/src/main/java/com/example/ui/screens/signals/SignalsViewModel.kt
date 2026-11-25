@@ -2,6 +2,7 @@ package com.example.ui.screens.signals
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.ai.AiConnectionStatus
 import com.example.data.ai.AiMarketRepository
 import com.example.data.repository.TradingPreferencesRepository
 import com.example.data.signal.SignalRepository
@@ -60,6 +61,7 @@ data class SignalsUiState(
     val signalNotificationsEnabled: Boolean = true,
     val selectedItem: SignalUiItem? = null,
     val selectedAiState: AiUiState<AiSignalSecondOpinion> = AiUiState.Idle,
+    val aiConnectionStatus: AiConnectionStatus = AiConnectionStatus(),
     val isRefreshing: Boolean = false
 )
 
@@ -79,9 +81,10 @@ class SignalsViewModel @Inject constructor(
         _selectedId,
         _isRefreshing,
         _aiStates,
-        prefsRepository.configFlow
-    ) { selectedId, refreshing, aiStates, config ->
-        MetaBits(selectedId, refreshing, aiStates, config.signalNotificationsEnabled)
+        prefsRepository.configFlow,
+        aiMarketRepository.connectionStatus
+    ) { selectedId, refreshing, aiStates, config, aiStatus ->
+        MetaBits(selectedId, refreshing, aiStates, config.signalNotificationsEnabled, aiStatus)
     }
 
     private val historyFlow = combine(
@@ -162,6 +165,7 @@ class SignalsViewModel @Inject constructor(
             signalNotificationsEnabled = meta.signalNotificationsEnabled,
             selectedItem = selected,
             selectedAiState = selectedAi,
+            aiConnectionStatus = meta.aiStatus,
             isRefreshing = meta.refreshing
         )
     }.stateIn(
@@ -199,6 +203,10 @@ class SignalsViewModel @Inject constructor(
 
     fun selectSignal(item: SignalUiItem?) {
         _selectedId.value = item?.signal?.id
+    }
+
+    fun switchAiModel(modelName: String) {
+        aiMarketRepository.switchActiveModel(modelName)
     }
 
     fun analyzeSignalWithAi(signal: TradeSignal) {
@@ -295,6 +303,7 @@ class SignalsViewModel @Inject constructor(
         val selectedId: String?,
         val refreshing: Boolean,
         val aiStates: Map<String, AiUiState<AiSignalSecondOpinion>>,
-        val signalNotificationsEnabled: Boolean
+        val signalNotificationsEnabled: Boolean,
+        val aiStatus: AiConnectionStatus
     )
 }

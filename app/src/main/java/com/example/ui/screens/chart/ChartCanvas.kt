@@ -437,6 +437,142 @@ fun PriceChartCanvas(
             }
         }
 
+        // AI Renko Supertrend (Institutional adaptive ATR trail + dynamic BUY/SELL pill badges)
+        if (overlays.renkoSupertrend) {
+            val st = analysis.renkoSupertrend
+            val bullTrailColor = Color(0xFF00E676)
+            val bearTrailColor = Color(0xFFFF5252)
+            drawPath(seriesPath(st.bullLine, window, xOf, yOf), bullTrailColor, style = Stroke(2.3f))
+            drawPath(seriesPath(st.bearLine, window, xOf, yOf), bearTrailColor, style = Stroke(2.3f))
+            st.currentTrail?.let { trailPrice ->
+                val ty = yOf(trailPrice).coerceIn(topHudH + 8f, plotBottom - 8f)
+                val tCol = if (st.currentBullish) bullTrailColor else bearTrailColor
+                drawAxisPricePill(tm, chartW, axisW, ty, fmtPrice(trailPrice), tCol.copy(alpha = 0.85f), Color.Black)
+            }
+            st.signals
+                .filter { it.index in window.start until window.end }
+                .takeLast(8)
+                .forEach { sig ->
+                    val sx = xOf(sig.index)
+                    val sy = yOf(sig.trailLevel).coerceIn(topHudH + 16f, plotBottom - 18f)
+                    val col = if (sig.isBullish) bullTrailColor else bearTrailColor
+                    val pillText = if (sig.isBullish) "▲ BUY" else "▼ SELL"
+                    val pillW = if (sig.isBullish) 36f else 40f
+                    val pillH = 14f
+                    val pillX = (sx - pillW / 2f).coerceIn(2f, (chartW - pillW - 2f).coerceAtLeast(2f))
+                    val pillY = if (sig.isBullish) (sy + 4f).coerceAtMost(plotBottom - pillH - 2f)
+                    else (sy - pillH - 4f).coerceAtLeast(topHudH + 2f)
+                    drawCircle(col, radius = 3.6f, center = Offset(sx, sy))
+                    drawRoundRect(
+                        color = col.copy(alpha = 0.92f),
+                        topLeft = Offset(pillX, pillY),
+                        size = Size(pillW, pillH),
+                        cornerRadius = CornerRadius(4f, 4f)
+                    )
+                    safeText(tm, pillText, pillX + 3f, pillY + 1f, Color.Black, sizeSp = 8, bold = true)
+                }
+        }
+
+        // Red Bar Indicator: bearish price-action highlights, reversal zones, 12:45 range & inside bars
+        if (overlays.redBar) {
+            val rb = analysis.redBar
+            // Highlight strong bearish price-action candles with vivid crimson halo
+            rb.bearishHighlightIndices
+                .filter { it in window.start until window.end }
+                .forEach { idx ->
+                    val c = candles[idx]
+                    val cx = xOf(idx)
+                    val hiY = yOf(c.high)
+                    val loY = yOf(c.low)
+                    val padW = (barW * 0.92f).coerceAtLeast(4f)
+                    drawRoundRect(
+                        color = Color(0xFFFF1744).copy(alpha = 0.22f),
+                        topLeft = Offset(cx - padW / 2f, hiY - 2f),
+                        size = Size(padW, (loY - hiY + 4f).coerceAtLeast(6f)),
+                        cornerRadius = CornerRadius(3f, 3f)
+                    )
+                }
+            // Potential bearish reversal zones (Red Engulfing / Rejection supply boxes)
+            rb.reversalZones
+                .filter { it.originIndex < window.end }
+                .forEach { rz ->
+                    val left = xOf(max(rz.originIndex, window.start)) - barW / 2f
+                    val topY = yOf(rz.top)
+                    val botY = yOf(rz.bottom)
+                    val zoneW = (chartW - left).coerceAtLeast(0f)
+                    val zoneH = abs(botY - topY).coerceAtLeast(2f)
+                    drawRect(Color(0xFFFF1744).copy(alpha = 0.14f), Offset(left, min(topY, botY)), Size(zoneW, zoneH))
+                    drawRect(Color(0xFFFF5252).copy(alpha = 0.65f), Offset(left, min(topY, botY)), Size(zoneW, zoneH), style = Stroke(1f))
+                    safeText(tm, rz.label, left + 3f, min(topY, botY) - 11f, Color(0xFFFF5252), 8, bold = true)
+                }
+            // 12:45 IST Midday Breakout range
+            rb.midday1245Range?.let { md ->
+                val fromX = if (md.candleIndex in window.start until window.end) xOf(md.candleIndex) else 0f
+                val hiY = yOf(md.high)
+                val loY = yOf(md.low)
+                hLine(hiY, fromX, chartW, palette.amber.copy(alpha = 0.85f), 1.3f, dashed = true)
+                hLine(loY, fromX, chartW, palette.amber.copy(alpha = 0.85f), 1.3f, dashed = true)
+                safeText(tm, "12:45 H", fromX + 4f, hiY - 12f, palette.amber, 8, bold = true)
+                safeText(tm, "12:45 L", fromX + 4f, loY + 2f, palette.amber, 8, bold = true)
+            }
+            rb.breakoutEvents
+                .filter {
+                    it.index in window.start until window.end &&
+                        (it.kind == com.example.domain.analysis.RedBarEventKind.MIDDAY_1245_BREAKOUT ||
+                            it.kind == com.example.domain.analysis.RedBarEventKind.MIDDAY_1245_BREAKDOWN)
+                }
+                .forEach { ev ->
+                    val bx = xOf(ev.index)
+                    val by = yOf(ev.price).coerceIn(topHudH + 10f, plotBottom - 10f)
+                    val col = if (ev.kind.bullish) palette.bull else palette.bear
+                    drawCircle(col, radius = 4f, center = Offset(bx, by))
+                    safeText(tm, ev.kind.shortLabel, bx - 14f, if (ev.kind.bullish) by - 14f else by + 4f, col, 8, bold = true)
+                }
+            rb.insideBars
+                .filter { it.index in window.start until window.end }
+                .takeLast(6)
+                .forEach { ib ->
+                    val ix = xOf(ib.index)
+                    val iy = yOf(ib.high) - 6f
+                    val col = if (ib.isRed) palette.bear.copy(alpha = 0.9f) else palette.bull.copy(alpha = 0.9f)
+                    drawCircle(col, radius = 2.6f, center = Offset(ix, iy.coerceIn(topHudH + 4f, plotBottom - 4f)))
+                }
+        }
+
+        // First-Red-Bar Intraday Breakout Reference Range (independently toggleable in indicator strip)
+        if (overlays.firstRedRange) {
+            val rb = analysis.redBar
+            rb.firstRedRange?.let { fr ->
+                val fromX = if (fr.candleIndex in window.start until window.end) xOf(fr.candleIndex) else 0f
+                val hiY = yOf(fr.high)
+                val loY = yOf(fr.low)
+                val midY = yOf(fr.midpoint)
+                drawRect(
+                    palette.bear.copy(alpha = 0.10f),
+                    Offset(fromX, min(hiY, loY)),
+                    Size((chartW - fromX).coerceAtLeast(0f), abs(loY - hiY).coerceAtLeast(1f))
+                )
+                hLine(hiY, fromX, chartW, palette.bear.copy(alpha = 0.9f), 1.5f, dashed = true)
+                hLine(loY, fromX, chartW, palette.bear.copy(alpha = 0.9f), 1.5f, dashed = true)
+                hLine(midY, fromX, chartW, palette.muted.copy(alpha = 0.7f), 0.9f, dashed = true)
+                safeText(tm, "1st Red H ${fmtPrice(fr.high)}", fromX + 4f, hiY - 12f, palette.bear, 8, bold = true)
+                safeText(tm, "1st Red L ${fmtPrice(fr.low)}", fromX + 4f, loY + 2f, palette.bear, 8, bold = true)
+            }
+            rb.breakoutEvents
+                .filter {
+                    it.index in window.start until window.end &&
+                        (it.kind == com.example.domain.analysis.RedBarEventKind.FIRST_RED_BREAKOUT ||
+                            it.kind == com.example.domain.analysis.RedBarEventKind.FIRST_RED_BREAKDOWN)
+                }
+                .forEach { ev ->
+                    val bx = xOf(ev.index)
+                    val by = yOf(ev.price).coerceIn(topHudH + 10f, plotBottom - 10f)
+                    val col = if (ev.kind.bullish) palette.bull else palette.bear
+                    drawCircle(col, radius = 4f, center = Offset(bx, by))
+                    safeText(tm, ev.kind.shortLabel, bx - 14f, if (ev.kind.bullish) by - 14f else by + 4f, col, 8, bold = true)
+                }
+        }
+
         // Liquidity pools
         if (overlays.liquidity) {
             analysis.smc.liquidity.forEach { lv ->

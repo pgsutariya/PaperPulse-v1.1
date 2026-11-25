@@ -4,10 +4,14 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
+import com.example.data.ai.AiConnectionStatus
+import com.example.data.ai.AiMarketRepository
 import com.example.data.repository.MarketDataRepository
+import com.example.data.repository.TradingPreferencesRepository
 import com.example.data.repository.TradingRepository
 import com.example.data.signal.SignalRepository
 import com.example.domain.analysis.AdvancedIndicators
+import com.example.domain.analysis.AiRenkoConfig
 import com.example.domain.analysis.AmdState
 import com.example.domain.analysis.ChartAnalysis
 import com.example.domain.analysis.EmaCrossSetup
@@ -19,6 +23,8 @@ import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
 import com.example.domain.model.ProductType
 import com.example.domain.model.ValidityType
+import com.example.domain.signal.AiSignalSecondOpinion
+import com.example.domain.signal.AiUiState
 import com.example.domain.signal.SignalDirection
 import com.example.domain.signal.TechnicalIndicators
 import com.example.domain.signal.Timeframe
@@ -54,10 +60,16 @@ data class ChartOverlays(
     val premiumDiscount: Boolean = false,
     val volumeProfile: Boolean = false,
     val divergences: Boolean = true,
-    val setupLevels: Boolean = true
+    val setupLevels: Boolean = true,
+    val renkoSupertrend: Boolean = true,
+    val redBar: Boolean = true,
+    val firstRedRange: Boolean = true
 )
 
 enum class OverlayKey(val label: String) {
+    RENKO_SUPERTREND("AI Renko ST"),
+    RED_BAR("Red Bar"),
+    FIRST_RED_RANGE("1st Red Range"),
     EMA_9_21("EMA 9/21"),
     EMA_50_200("EMA 50/200"),
     VWAP("VWAP"),
@@ -104,7 +116,16 @@ data class ChartUiState(
     val isExpanded: Boolean = false,
     val measureMode: Boolean = false,
     val measureStartIndex: Int? = null,
-    val measureEndIndex: Int? = null
+    val measureEndIndex: Int? = null,
+    val chartEngine: ChartEngineMode = ChartEngineMode.CANVAS,
+    val tvChartStyle: TvChartStyle = TvChartStyle.CANDLES,
+    val tvLogScale: Boolean = false,
+    val tvMagnetCrosshair: Boolean = true,
+    val tvZoomCommandSeq: Int = 0,
+    val tvZoomDirection: Int = 0,
+    val renkoConfig: AiRenkoConfig = AiRenkoConfig(),
+    val aiChartState: AiUiState<AiSignalSecondOpinion> = AiUiState.Idle,
+    val aiConnectionStatus: AiConnectionStatus = AiConnectionStatus()
 )
 
 private data class ComputedFrame(
@@ -118,7 +139,9 @@ class ChartViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     marketDataRepository: MarketDataRepository,
     tradingRepository: TradingRepository,
-    private val signalRepository: SignalRepository
+    private val tradingPreferencesRepository: TradingPreferencesRepository,
+    private val signalRepository: SignalRepository,
+    private val aiMarketRepository: AiMarketRepository
 ) : ViewModel() {
 
     private val route = savedStateHandle.toRoute<ChartRoute>()
@@ -137,6 +160,7 @@ class ChartViewModel @Inject constructor(
     private val _historyNote = MutableStateFlow("")
     private val _riskPercent = MutableStateFlow(1.0)
     private val _interactive = MutableStateFlow(InteractiveChartState())
+    private val _aiChartState = MutableStateFlow<AiUiState<AiSignalSecondOpinion>>(AiUiState.Idle)
 
     private var refreshJob: Job? = null
 
@@ -148,13 +172,25 @@ class ChartViewModel @Inject constructor(
         StatusBits(pan, loading, note, risk, inter)
     }
 
+    private val aiFlow = combine(_aiChartState, aiMarketRepository.connectionStatus) { aiState, conn ->
+        aiState to conn
+    }
+
     val uiState: StateFlow<ChartUiState> = combine(
         marketDataRepository.observeInstrument(symbol),
         tradingRepository.accountState,
         viewSettings,
         statusFlow,
-        _computed
-    ) { inst, account, view, status, computed ->
+        _computed,
+        aiFlow
+    ) { values ->
+        val inst = values[0] as Instrument?
+        val account = values[1] as com.example.domain.model.AccountState
+        val view = values[2] as ViewSettings
+        val status = values[3] as StatusBits
+        val computed = values[4] as ComputedFrame
+        @Suppress("UNCHECKED_CAST")
+        val aiPair = values[5] as Pair<AiUiState<AiSignalSecondOpinion>, AiConnectionStatus>
         ChartUiState(
             symbol = symbol,
             instrument = inst,
@@ -174,12 +210,66 @@ class ChartViewModel @Inject constructor(
             isExpanded = status.interactive.isExpanded,
             measureMode = status.interactive.measureMode,
             measureStartIndex = status.interactive.measureStartIndex,
-            measureEndIndex = status.interactive.measureEndIndex
+            measureEndIndex = status.interactive.measureEndIndex,
+            chartEngine = status.interactive.chartEngine,
+            tvChartStyle = status.interactive.tvChartStyle,
+            tvLogScale = status.interactive.tvLogScale,
+            tvMagnetCrosshair = status.interactive.tvMagnetCrosshair,
+            tvZoomCommandSeq = status.interactive.tvZoomCommandSeq,
+            tvZoomDirection = status.interactive.tvZoomDirection,
+            renkoConfig = status.interactive.renkoConfig,
+            aiChartState = aiPair.first,
+            aiConnectionStatus = aiPair.second
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ChartUiState(symbol = symbol))
 
     init {
+        viewModelScope.launch {
+            tradingPreferencesRepository.chartEngineFlow.collect { saved ->
+                val mode = runCatching { ChartEngineMode.valueOf(saved) }.getOrDefault(ChartEngineMode.CANVAS)
+                _interactive.update { cur ->
+                    if (cur.chartEngine == mode) cur else cur.copy(chartEngine = mode)
+                }
+            }
+        }
         startRefreshLoop(loadHistoryFirst = true)
+    }
+
+    fun switchAiModel(modelName: String) {
+        aiMarketRepository.switchActiveModel(modelName)
+    }
+
+    fun analyzeChartWithAi() {
+        val current = uiState.value
+        val analysis = current.analysis ?: return
+        val summary = buildString {
+            append("Trend: ${analysis.smc.trend.name}; ")
+            append("Last Close: ${analysis.lastClose}; ")
+            append("Regime: ${analysis.quant.regime}; ")
+            analysis.smc.structureBreaks.lastOrNull()?.let {
+                append("Last Break: ${it.label} @ ${it.level}; ")
+            }
+            analysis.smc.dealingRange?.let {
+                append("Zone: ${it.zoneOf(analysis.lastClose)}; ")
+            }
+            append("Active Demand Zones: ${analysis.smc.activeDemand.size}, Supply Zones: ${analysis.smc.activeSupply.size}; ")
+            append("Volume > MA20: ${analysis.volumeAboveMa}; ")
+            append("Cumulative Delta: ${analysis.orderFlow.sessionCumDelta}")
+        }
+        viewModelScope.launch {
+            _aiChartState.value = AiUiState.Loading
+            val res = aiMarketRepository.analyzeChartStructure(
+                symbol = symbol,
+                timeframeLabel = current.timeframe.label,
+                instrument = current.instrument,
+                recentCandles = analysis.candles.takeLast(20),
+                structureSummary = summary
+            )
+            _aiChartState.value = res.fold(
+                onSuccess = { AiUiState.Success(it) },
+                onFailure = { AiUiState.Error(it.message ?: "AI chart analysis failed.") }
+            )
+        }
     }
 
     fun setTimeframe(tf: Timeframe) {
@@ -197,6 +287,9 @@ class ChartViewModel @Inject constructor(
 
     fun toggleOverlay(key: OverlayKey) = _overlays.update { o ->
         when (key) {
+            OverlayKey.RENKO_SUPERTREND -> o.copy(renkoSupertrend = !o.renkoSupertrend)
+            OverlayKey.RED_BAR -> o.copy(redBar = !o.redBar)
+            OverlayKey.FIRST_RED_RANGE -> o.copy(firstRedRange = !o.firstRedRange)
             OverlayKey.EMA_9_21 -> o.copy(ema921 = !o.ema921)
             OverlayKey.EMA_50_200 -> o.copy(ema50200 = !o.ema50200)
             OverlayKey.VWAP -> o.copy(vwap = !o.vwap)
@@ -217,8 +310,73 @@ class ChartViewModel @Inject constructor(
         _pane.value = pane
     }
 
-    fun zoom(zoomIn: Boolean) = _visibleBars.update { bars ->
-        (if (zoomIn) bars - 20 else bars + 20).coerceIn(25, 480)
+    fun setChartEngine(mode: ChartEngineMode) {
+        _interactive.update {
+            it.copy(
+                chartEngine = mode,
+                measureMode = if (mode == ChartEngineMode.TRADINGVIEW) false else it.measureMode,
+                measureStartIndex = if (mode == ChartEngineMode.TRADINGVIEW) null else it.measureStartIndex,
+                measureEndIndex = if (mode == ChartEngineMode.TRADINGVIEW) null else it.measureEndIndex
+            )
+        }
+        viewModelScope.launch {
+            tradingPreferencesRepository.updateChartEngine(mode.name)
+        }
+    }
+
+    fun setTvChartStyle(style: TvChartStyle) {
+        _interactive.update { it.copy(tvChartStyle = style) }
+    }
+
+    fun toggleTvLogScale() {
+        _interactive.update { it.copy(tvLogScale = !it.tvLogScale) }
+    }
+
+    fun toggleTvMagnetCrosshair() {
+        _interactive.update { it.copy(tvMagnetCrosshair = !it.tvMagnetCrosshair) }
+    }
+
+    fun setRenkoBrickMultiplier(multiplier: Double) {
+        val clamped = multiplier.coerceIn(0.30, 2.50)
+        _interactive.update { it.copy(renkoConfig = it.renkoConfig.copy(brickSizeMultiplier = clamped)) }
+        recomputeSoon()
+    }
+
+    fun setRenkoAtrSensitivity(sensitivity: Double) {
+        val clamped = sensitivity.coerceIn(1.2, 4.5)
+        _interactive.update { it.copy(renkoConfig = it.renkoConfig.copy(atrSensitivity = clamped)) }
+        recomputeSoon()
+    }
+
+    fun setRenkoAtrPeriod(period: Int) {
+        val clamped = period.coerceIn(5, 30)
+        _interactive.update { it.copy(renkoConfig = it.renkoConfig.copy(atrPeriod = clamped)) }
+        recomputeSoon()
+    }
+
+    fun toggleRenkoAdaptiveMode() {
+        _interactive.update { it.copy(renkoConfig = it.renkoConfig.copy(adaptiveMode = !it.renkoConfig.adaptiveMode)) }
+        recomputeSoon()
+    }
+
+    fun resetRenkoDefaults() {
+        _interactive.update { it.copy(renkoConfig = AiRenkoConfig()) }
+        recomputeSoon()
+    }
+
+    fun zoom(zoomIn: Boolean) {
+        if (_interactive.value.chartEngine == ChartEngineMode.TRADINGVIEW) {
+            _interactive.update {
+                it.copy(
+                    tvZoomCommandSeq = it.tvZoomCommandSeq + 1,
+                    tvZoomDirection = if (zoomIn) 1 else -1
+                )
+            }
+        } else {
+            _visibleBars.update { bars ->
+                (if (zoomIn) bars - 20 else bars + 20).coerceIn(25, 480)
+            }
+        }
     }
 
     fun zoomByScale(scaleFactor: Float) {
@@ -348,9 +506,18 @@ class ChartViewModel @Inject constructor(
         val ltfs = listOf(Timeframe.M1, Timeframe.M3, Timeframe.M5, Timeframe.M15).associateWith {
             signalRepository.getRecentCandles(symbol, it)
         }
+        val renkoCfg = _interactive.value.renkoConfig
         val computed = withContext(Dispatchers.Default) {
             val analysis = runCatching {
-                if (candles.size >= 30) MarketAnalyzer.analyze(candles, tf, segment, htf) else null
+                if (candles.size >= 30) {
+                    MarketAnalyzer.analyze(
+                        candles = candles,
+                        timeframe = tf,
+                        segment = segment,
+                        higherTimeframe = htf,
+                        renkoConfig = renkoCfg
+                    )
+                } else null
             }.getOrNull()
             val amd = listOf(Timeframe.H1 to h1, Timeframe.H4 to h4, Timeframe.D1 to d1)
                 .filter { it.second.size >= 10 }
@@ -384,7 +551,14 @@ class ChartViewModel @Inject constructor(
         val isExpanded: Boolean = false,
         val measureMode: Boolean = false,
         val measureStartIndex: Int? = null,
-        val measureEndIndex: Int? = null
+        val measureEndIndex: Int? = null,
+        val chartEngine: ChartEngineMode = ChartEngineMode.CANVAS,
+        val tvChartStyle: TvChartStyle = TvChartStyle.CANDLES,
+        val tvLogScale: Boolean = false,
+        val tvMagnetCrosshair: Boolean = true,
+        val tvZoomCommandSeq: Int = 0,
+        val tvZoomDirection: Int = 0,
+        val renkoConfig: AiRenkoConfig = AiRenkoConfig()
     )
 
     private data class StatusBits(

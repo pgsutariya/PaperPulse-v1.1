@@ -47,8 +47,16 @@ class TradeNotificationManager @Inject constructor(
             ).apply {
                 description = "New strategy signals, BTST/STBT setups, and signal Target/SL alerts."
             }
+            val priceAlertChannel = NotificationChannel(
+                CHANNEL_PRICE_ALERTS,
+                "Watchlist Price Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Instant alerts when a Watchlist symbol hits your target price."
+            }
             manager.createNotificationChannel(tradeChannel)
             manager.createNotificationChannel(signalChannel)
+            manager.createNotificationChannel(priceAlertChannel)
         }
     }
 
@@ -70,6 +78,10 @@ class TradeNotificationManager @Inject constructor(
         val config = runCatching { prefsRepository.getConfig() }.getOrNull() ?: return
         if (!config.signalNotificationsEnabled) return
         post(CHANNEL_SIGNALS, title, body, NotificationCompat.PRIORITY_DEFAULT)
+    }
+
+    fun notifyPriceAlert(title: String, body: String) {
+        post(CHANNEL_PRICE_ALERTS, title, body, NotificationCompat.PRIORITY_HIGH)
     }
 
     private fun post(channelId: String, title: String, body: String, priority: Int) {
@@ -100,5 +112,6 @@ class TradeNotificationManager @Inject constructor(
     companion object {
         const val CHANNEL_TRADE_ACTIVITY = "paperpulse_trade_activity"
         const val CHANNEL_SIGNALS = "paperpulse_signals"
+        const val CHANNEL_PRICE_ALERTS = "paperpulse_price_alerts"
     }
 }

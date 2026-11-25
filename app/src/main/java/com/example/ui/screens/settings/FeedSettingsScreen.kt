@@ -33,12 +33,20 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
+import com.example.data.ai.AiConnectionState
 import com.example.data.ai.AiProvider
 import com.example.data.ai.AiProviderConfig
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -70,6 +78,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -136,9 +145,13 @@ fun FeedSettingsScreen(
 
     val savedAi = state.aiConfig
     var selectedAiProvider by remember(savedAi.provider) { mutableStateOf(savedAi.provider) }
-    var aiApiKey by remember(savedAi.apiKey) { mutableStateOf(savedAi.apiKey) }
-    var aiModelName by remember(savedAi.modelName) { mutableStateOf(savedAi.modelName) }
-    var aiBaseUrl by remember(savedAi.customBaseUrl) { mutableStateOf(savedAi.customBaseUrl) }
+    var aiApiKey by remember(savedAi.provider, savedAi.apiKey) { mutableStateOf(savedAi.apiKey) }
+    var aiModelName by remember(savedAi.provider, savedAi.modelName) { mutableStateOf(savedAi.effectiveModel) }
+    var aiBaseUrl by remember(savedAi.provider, savedAi.customBaseUrl) { mutableStateOf(savedAi.effectiveBaseUrl) }
+    var aiAutoConnect by remember(savedAi.autoConnect) { mutableStateOf(savedAi.autoConnect) }
+    var showAiKey by remember { mutableStateOf(false) }
+    var modelDropdownExpanded by remember { mutableStateOf(false) }
+    var customModelMode by remember(savedAi.provider) { mutableStateOf(false) }
 
     var slippageText by remember(state.config.slippageBps) { mutableStateOf(state.config.slippageBps.toString()) }
     var flatBrokerageText by remember(state.config.flatBrokerage) { mutableStateOf(state.config.flatBrokerage.toPlainString()) }
@@ -267,22 +280,73 @@ fun FeedSettingsScreen(
                 }
             }
 
-            // 0a. AI Provider Configuration (Firebase Built-in / Gemini / Claude / DeepSeek / OpenAI)
+            // 0a. AI Agent, Auto-Connect & Model Switcher Configuration
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, tradingColors.border)
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))
             ) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                        Text("AI PROVIDER CONFIGURATION", style = MaterialTheme.typography.labelLarge)
+                val aiConn = state.aiConnectionStatus
+                val isSameAgentStatus = aiConn.provider == selectedAiProvider
+                val dropdownModels = remember(selectedAiProvider, aiConn.provider, aiConn.availableModels, aiModelName) {
+                    val base = if (aiConn.provider == selectedAiProvider && aiConn.availableModels.isNotEmpty()) {
+                        aiConn.availableModels
+                    } else {
+                        selectedAiProvider.availableModels
                     }
+                    (listOf(aiModelName.trim()).filter { it.isNotBlank() } + base + selectedAiProvider.availableModels).distinct()
+                }
+                val badgeBg = when {
+                    !isSameAgentStatus -> MaterialTheme.colorScheme.surfaceContainerHigh
+                    aiConn.state == AiConnectionState.CONNECTED -> tradingColors.bullishContainer
+                    aiConn.state == AiConnectionState.CONNECTING -> tradingColors.amberContainer
+                    aiConn.state == AiConnectionState.ERROR -> tradingColors.bearishContainer
+                    else -> MaterialTheme.colorScheme.surfaceContainerHigh
+                }
+                val badgeFg = when {
+                    !isSameAgentStatus -> MaterialTheme.colorScheme.onSurfaceVariant
+                    aiConn.state == AiConnectionState.CONNECTED -> tradingColors.bullish
+                    aiConn.state == AiConnectionState.CONNECTING -> tradingColors.amber
+                    aiConn.state == AiConnectionState.ERROR -> tradingColors.bearish
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                val badgeText = when {
+                    !isSameAgentStatus -> "UNSAVED AGENT"
+                    aiConn.state == AiConnectionState.CONNECTED -> "CONNECTED${aiConn.latencyMs?.let { " • ${it}ms" } ?: ""}"
+                    aiConn.state == AiConnectionState.CONNECTING -> "CONNECTING..."
+                    aiConn.state == AiConnectionState.ERROR -> "CONN ERROR"
+                    else -> "READY"
+                }
+
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            Text("AI AGENT & API CONFIG", style = MaterialTheme.typography.labelLarge)
+                        }
+                        Surface(shape = RoundedCornerShape(8.dp), color = badgeBg) {
+                            Text(
+                                text = badgeText,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = badgeFg,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
                     Text(
-                        "Choose built-in Firebase AI or configure your own Gemini, Claude, DeepSeek, or OpenAI-compatible key (fixes App Check errors on standalone APKs).",
+                        selectedAiProvider.description,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+
+                    // AI Agent selector
+                    Text("SELECT AI AGENT", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(
                         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -291,13 +355,14 @@ fun FeedSettingsScreen(
                             FilterChip(
                                 selected = selectedAiProvider == provider,
                                 onClick = {
+                                    val savedForAgent = viewModel.loadSavedDraftForAgent(provider)
                                     selectedAiProvider = provider
-                                    if (aiModelName.isBlank() || AiProvider.entries.any { it.defaultModel == aiModelName }) {
-                                        aiModelName = provider.defaultModel
-                                    }
-                                    if (aiBaseUrl.isBlank() || AiProvider.entries.any { it.defaultBaseUrl == aiBaseUrl }) {
-                                        aiBaseUrl = provider.defaultBaseUrl
-                                    }
+                                    aiApiKey = savedForAgent.apiKey
+                                    aiModelName = savedForAgent.effectiveModel
+                                    aiBaseUrl = savedForAgent.effectiveBaseUrl
+                                    customModelMode = false
+                                    val nextDraft = savedForAgent.copy(autoConnect = aiAutoConnect)
+                                    viewModel.saveAiConfig(nextDraft, autoConnectNow = aiAutoConnect)
                                 },
                                 label = { Text(provider.shortLabel) },
                                 modifier = Modifier.testTag("ai_provider_chip_${provider.name.lowercase()}")
@@ -305,52 +370,235 @@ fun FeedSettingsScreen(
                         }
                     }
 
-                    if (selectedAiProvider.requiresApiKey) {
-                        OutlinedTextField(
-                            value = aiApiKey,
-                            onValueChange = { aiApiKey = it },
-                            label = { Text("${selectedAiProvider.shortLabel} API Key (Encrypted)") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().testTag("ai_api_key_input")
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(
-                                value = aiModelName,
-                                onValueChange = { aiModelName = it },
-                                label = { Text("Model (${selectedAiProvider.defaultModel})") },
-                                singleLine = true,
-                                modifier = Modifier.weight(1f).testTag("ai_model_input")
+                    // Auto-Connect to API toggle
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Auto-Connect to API & Sync Models", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "Automatically validates credentials & refreshes available models on key entry or agent switch.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            if (selectedAiProvider == AiProvider.OPENAI_COMPATIBLE) {
-                                OutlinedTextField(
-                                    value = aiBaseUrl,
-                                    onValueChange = { aiBaseUrl = it },
-                                    label = { Text("HTTPS Base URL") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f).testTag("ai_base_url_input")
-                                )
-                            }
                         }
-                    } else {
-                        EncryptedNoticeBanner("Uses Firebase AI Logic (zero API key needed in AI Studio emulator). On sideloaded APKs, switch to Gemini, Claude, DeepSeek, or OpenAI above.")
-                    }
-
-                    Button(
-                        onClick = {
-                            viewModel.saveAiConfig(
-                                AiProviderConfig(
+                        Switch(
+                            checked = aiAutoConnect,
+                            onCheckedChange = { enabled ->
+                                aiAutoConnect = enabled
+                                val updatedDraft = AiProviderConfig(
                                     provider = selectedAiProvider,
                                     apiKey = aiApiKey,
                                     modelName = aiModelName,
-                                    customBaseUrl = aiBaseUrl
+                                    customBaseUrl = aiBaseUrl,
+                                    autoConnect = enabled
                                 )
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth().testTag("save_ai_config_button"),
-                        shape = RoundedCornerShape(10.dp)
+                                viewModel.saveAiConfig(updatedDraft, autoConnectNow = enabled)
+                            },
+                            modifier = Modifier.testTag("ai_auto_connect_switch")
+                        )
+                    }
+
+                    if (selectedAiProvider.requiresApiKey) {
+                        OutlinedTextField(
+                            value = aiApiKey,
+                            onValueChange = { newKey ->
+                                aiApiKey = newKey
+                                if (aiAutoConnect) {
+                                    viewModel.scheduleAutoConnect(
+                                        AiProviderConfig(
+                                            provider = selectedAiProvider,
+                                            apiKey = newKey,
+                                            modelName = aiModelName,
+                                            customBaseUrl = aiBaseUrl,
+                                            autoConnect = true
+                                        )
+                                    )
+                                }
+                            },
+                            label = { Text("${selectedAiProvider.shortLabel} API Key (AES-256 Encrypted)") },
+                            visualTransformation = if (showAiKey) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { showAiKey = !showAiKey }) {
+                                    Icon(
+                                        imageVector = if (showAiKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                        contentDescription = if (showAiKey) "Hide API Key" else "Show API Key"
+                                    )
+                                }
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_api_key_input")
+                        )
+                    } else {
+                        EncryptedNoticeBanner("Uses Firebase AI Logic with App Check & reCAPTCHA Enterprise (zero API key needed). Switch Agent above to use your own Gemini, Claude, DeepSeek, or OpenAI key.")
+                    }
+
+                    // Model Switcher Dropdown dynamically populated per AI Agent
+                    ExposedDropdownMenuBox(
+                        expanded = modelDropdownExpanded,
+                        onExpandedChange = { modelDropdownExpanded = !modelDropdownExpanded },
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Save AI Provider (${selectedAiProvider.shortLabel})")
+                        OutlinedTextField(
+                            value = aiModelName.ifBlank { selectedAiProvider.defaultModel },
+                            onValueChange = {},
+                            readOnly = true,
+                            label = {
+                                Text(
+                                    "Active ${selectedAiProvider.shortLabel} Model (${dropdownModels.size} available)"
+                                )
+                            },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelDropdownExpanded) },
+                            colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                            singleLine = true,
+                            modifier = Modifier
+                                .menuAnchor()
+                                .fillMaxWidth()
+                                .testTag("ai_model_switcher_dropdown")
+                        )
+                        ExposedDropdownMenu(
+                            expanded = modelDropdownExpanded,
+                            onDismissRequest = { modelDropdownExpanded = false }
+                        ) {
+                            dropdownModels.forEach { modelId ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = modelId + if (modelId == selectedAiProvider.defaultModel) " (Recommended)" else "",
+                                            fontWeight = if (modelId == aiModelName) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (modelId == aiModelName) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    },
+                                    onClick = {
+                                        aiModelName = modelId
+                                        customModelMode = false
+                                        modelDropdownExpanded = false
+                                        viewModel.saveAiConfig(
+                                            AiProviderConfig(
+                                                provider = selectedAiProvider,
+                                                apiKey = aiApiKey,
+                                                modelName = modelId,
+                                                customBaseUrl = aiBaseUrl,
+                                                autoConnect = aiAutoConnect
+                                            ),
+                                            autoConnectNow = false
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("ai_model_option_$modelId")
+                                )
+                            }
+                            HorizontalDivider(color = tradingColors.border)
+                            DropdownMenuItem(
+                                text = { Text("Enter custom model ID...", color = MaterialTheme.colorScheme.primary) },
+                                onClick = {
+                                    customModelMode = true
+                                    modelDropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+
+                    if (customModelMode) {
+                        OutlinedTextField(
+                            value = aiModelName,
+                            onValueChange = { aiModelName = it },
+                            label = { Text("Custom ${selectedAiProvider.shortLabel} Model ID") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_model_input")
+                        )
+                    }
+
+                    if (selectedAiProvider == AiProvider.OPENAI_COMPATIBLE) {
+                        OutlinedTextField(
+                            value = aiBaseUrl,
+                            onValueChange = { aiBaseUrl = it },
+                            label = { Text("HTTPS Base URL (OpenAI / OpenRouter / Groq)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_base_url_input")
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(
+                                "OpenAI" to "https://api.openai.com/v1",
+                                "OpenRouter" to "https://openrouter.ai/api/v1",
+                                "Groq" to "https://api.groq.com/openai/v1"
+                            ).forEach { (presetLabel, presetUrl) ->
+                                FilterChip(
+                                    selected = aiBaseUrl.trimEnd('/') == presetUrl,
+                                    onClick = { aiBaseUrl = presetUrl },
+                                    label = { Text(presetLabel) }
+                                )
+                            }
+                        }
+                    }
+
+                    // Live Auto-Connect Status Banner
+                    if (isSameAgentStatus && aiConn.message.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = badgeBg,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_connection_status_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (aiConn.state == AiConnectionState.CONNECTING) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = badgeFg)
+                                }
+                                Text(
+                                    text = aiConn.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = badgeFg
+                                )
+                            }
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.testAndSyncAiModels(
+                                    AiProviderConfig(
+                                        provider = selectedAiProvider,
+                                        apiKey = aiApiKey,
+                                        modelName = aiModelName,
+                                        customBaseUrl = aiBaseUrl,
+                                        autoConnect = aiAutoConnect
+                                    )
+                                )
+                            },
+                            enabled = aiConn.state != AiConnectionState.CONNECTING,
+                            modifier = Modifier.weight(1f).testTag("test_sync_ai_button"),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Rounded.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Test & Sync")
+                        }
+                        Button(
+                            onClick = {
+                                viewModel.saveAiConfig(
+                                    AiProviderConfig(
+                                        provider = selectedAiProvider,
+                                        apiKey = aiApiKey,
+                                        modelName = aiModelName,
+                                        customBaseUrl = aiBaseUrl,
+                                        autoConnect = aiAutoConnect
+                                    ),
+                                    autoConnectNow = aiAutoConnect
+                                )
+                            },
+                            modifier = Modifier.weight(1f).testTag("save_ai_config_button"),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("Save (${selectedAiProvider.shortLabel})")
+                        }
                     }
                 }
             }

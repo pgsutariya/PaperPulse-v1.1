@@ -1,8 +1,11 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,16 +16,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Send
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,15 +46,122 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.ai.AiConnectionState
+import com.example.data.ai.AiConnectionStatus
 import com.example.domain.signal.AiSignalBias
 import com.example.domain.signal.AiSignalSecondOpinion
 import com.example.domain.signal.AiSignalVerdict
 import com.example.domain.signal.AiUiState
 import com.example.ui.theme.LocalTradingColors
 import com.example.ui.theme.MonoPriceSmall
+
+@Composable
+fun AiAgentModelSwitcherBar(
+    connectionStatus: AiConnectionStatus,
+    onSwitchModel: ((String) -> Unit)? = null,
+    onOpenAiSettings: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    val tradingColors = LocalTradingColors.current
+    var dropdownExpanded by remember { mutableStateOf(false) }
+
+    val statusDotColor = when (connectionStatus.state) {
+        AiConnectionState.CONNECTED -> tradingColors.bullish
+        AiConnectionState.CONNECTING -> tradingColors.amber
+        AiConnectionState.ERROR -> tradingColors.bearish
+        AiConnectionState.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(modifier = Modifier.weight(1f)) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                border = BorderStroke(1.dp, tradingColors.border),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(enabled = onSwitchModel != null) { dropdownExpanded = true }
+                    .testTag("inline_ai_model_switcher")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(statusDotColor)
+                    )
+                    Text(
+                        text = "${connectionStatus.provider.shortLabel} • ${connectionStatus.activeModel}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (onSwitchModel != null) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowDropDown,
+                            contentDescription = "Switch AI model",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            if (onSwitchModel != null) {
+                DropdownMenu(
+                    expanded = dropdownExpanded,
+                    onDismissRequest = { dropdownExpanded = false }
+                ) {
+                    connectionStatus.availableModels.forEach { modelId ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = modelId,
+                                    fontWeight = if (modelId == connectionStatus.activeModel) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (modelId == connectionStatus.activeModel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            onClick = {
+                                dropdownExpanded = false
+                                onSwitchModel(modelId)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        if (onOpenAiSettings != null) {
+            OutlinedButton(
+                onClick = onOpenAiSettings,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.testTag("ai_card_open_settings_button")
+            ) {
+                Icon(Icons.Rounded.Tune, contentDescription = "Configure AI API", modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("AI API", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
 
 @Composable
 fun AiSecondOpinionCard(
@@ -56,7 +171,10 @@ fun AiSecondOpinionCard(
     aiState: AiUiState<AiSignalSecondOpinion>,
     onAnalyze: () -> Unit,
     ctaTestTag: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    connectionStatus: AiConnectionStatus? = null,
+    onSwitchModel: ((String) -> Unit)? = null,
+    onOpenAiSettings: (() -> Unit)? = null
 ) {
     val tradingColors = LocalTradingColors.current
 
@@ -108,6 +226,14 @@ fun AiSecondOpinionCard(
                         )
                     }
                 }
+            }
+
+            if (connectionStatus != null) {
+                AiAgentModelSwitcherBar(
+                    connectionStatus = connectionStatus,
+                    onSwitchModel = onSwitchModel,
+                    onOpenAiSettings = onOpenAiSettings
+                )
             }
 
             when (aiState) {
@@ -180,12 +306,26 @@ fun AiSecondOpinionCard(
                                     color = tradingColors.bearish
                                 )
                             }
-                            OutlinedButton(
-                                onClick = onAnalyze,
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                            ) {
-                                Text("Retry Analysis", style = MaterialTheme.typography.labelMedium)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = onAnalyze,
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                ) {
+                                    Text("Retry", style = MaterialTheme.typography.labelMedium)
+                                }
+                                if (onOpenAiSettings != null) {
+                                    Button(
+                                        onClick = onOpenAiSettings,
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                        modifier = Modifier.testTag("ai_error_configure_api_button")
+                                    ) {
+                                        Icon(Icons.Rounded.Tune, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Configure AI API", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
                             }
                         }
                     }
@@ -311,7 +451,10 @@ fun AiSecondOpinionCard(
 fun AiPortfolioCoachCard(
     coachState: AiUiState<String>,
     onAskQuestion: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    connectionStatus: AiConnectionStatus? = null,
+    onSwitchModel: ((String) -> Unit)? = null,
+    onOpenAiSettings: (() -> Unit)? = null
 ) {
     val tradingColors = LocalTradingColors.current
     var promptText by remember { mutableStateOf("") }
@@ -348,6 +491,14 @@ fun AiPortfolioCoachCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+            }
+
+            if (connectionStatus != null) {
+                AiAgentModelSwitcherBar(
+                    connectionStatus = connectionStatus,
+                    onSwitchModel = onSwitchModel,
+                    onOpenAiSettings = onOpenAiSettings
+                )
             }
 
             Row(
@@ -435,24 +586,40 @@ fun AiPortfolioCoachCard(
                         shape = RoundedCornerShape(10.dp),
                         color = tradingColors.bearishContainer
                     ) {
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.ErrorOutline,
-                                contentDescription = "Coach Error",
-                                tint = tradingColors.bearish,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = coachState.message,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = tradingColors.bearish
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.ErrorOutline,
+                                    contentDescription = "Coach Error",
+                                    tint = tradingColors.bearish,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = coachState.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = tradingColors.bearish
+                                )
+                            }
+                            if (onOpenAiSettings != null) {
+                                Button(
+                                    onClick = onOpenAiSettings,
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.testTag("ai_coach_configure_api_button")
+                                ) {
+                                    Icon(Icons.Rounded.Tune, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Configure AI API", style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
                         }
                     }
                 }

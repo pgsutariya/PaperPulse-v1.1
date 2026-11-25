@@ -2,10 +2,17 @@ package com.example.ui.screens.watchlist
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.alerts.PriceAlert
+import com.example.data.alerts.PriceAlertCondition
+import com.example.data.alerts.PriceAlertRepository
 import com.example.data.feed.live.AngelScripSearchResult
 import com.example.data.feed.live.FeedType
 import com.example.data.feed.live.LiveConnectionStatus
 import com.example.data.feed.live.SegmentFeedStatus
+import com.example.data.news.MarketNewsArticle
+import com.example.data.news.MarketNewsFeedState
+import com.example.data.news.MarketNewsRepository
+import com.example.data.news.WatchlistNewsGroundingEngine
 import com.example.data.repository.MarketDataRepository
 import com.example.data.repository.TradingRepository
 import com.example.domain.engine.MarketClock
@@ -28,6 +35,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -54,30 +62,62 @@ data class WatchlistUiState(
     val liveSearchResults: List<AngelScripSearchResult> = emptyList(),
     val isLiveSearching: Boolean = false,
     val liveSearchError: String? = null,
-    val addingToken: String? = null
+    val addingToken: String? = null,
+    val watchlistNewsState: MarketNewsFeedState = MarketNewsFeedState(),
+    val watchlistNewsSymbols: List<String> = emptyList(),
+    val selectedNewsSymbol: String? = null,
+    val filteredWatchlistNews: List<MarketNewsArticle> = emptyList(),
+    val priceAlerts: List<PriceAlert> = emptyList(),
+    val activeAlertsBySymbol: Map<String, List<PriceAlert>> = emptyMap(),
+    val ltpBySymbol: Map<String, BigDecimal> = emptyMap()
 )
 
 @HiltViewModel
 class WatchlistViewModel @Inject constructor(
     private val marketDataRepository: MarketDataRepository,
-    tradingRepository: TradingRepository
+    tradingRepository: TradingRepository,
+    private val marketNewsRepository: MarketNewsRepository,
+    private val priceAlertRepository: PriceAlertRepository
 ) : ViewModel() {
 
     private val searchQuery = MutableStateFlow("")
     private val selectedSegment = MutableStateFlow<MarketSegment?>(null)
     private val selectedType = MutableStateFlow<InstrumentType?>(null)
+    private val selectedNewsSymbol = MutableStateFlow<String?>(null)
 
     private val _liveSearchState = MutableStateFlow(LiveSearchSnapshot())
     private val _openSymbolEvents = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val openSymbolEvents: SharedFlow<String> = _openSymbolEvents.asSharedFlow()
 
     private var liveSearchJob: Job? = null
+    @Volatile
+    private var latestAllInstruments: List<Instrument> = emptyList()
+
+    init {
+        viewModelScope.launch {
+            val initialInstruments = marketDataRepository.instruments.first { it.isNotEmpty() }
+            latestAllInstruments = initialInstruments
+            marketNewsRepository.refreshForWatchlist(
+                instruments = initialInstruments,
+                focusSymbol = null,
+                force = false
+            )
+        }
+    }
 
     private val clockFlow = flow {
         while (true) {
             emit(MarketClock.formatCurrentIstClock())
             delay(1000L)
         }
+    }
+
+    private val newsBundleFlow = combine(
+        marketNewsRepository.state,
+        selectedNewsSymbol,
+        priceAlertRepository.allAlerts
+    ) { newsState, newsSymbol, alerts ->
+        NewsAndAlertsBundle(newsState, newsSymbol, alerts)
     }
 
     private val feedHealthFlow = combine(
@@ -113,10 +153,12 @@ class WatchlistViewModel @Inject constructor(
         marketDataRepository.connectionState,
         feedHealthFlow,
         clockFlow,
-        _liveSearchState
+        _liveSearchState,
+        newsBundleFlow
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val allInstruments = values[0] as List<Instrument>
+        latestAllInstruments = allInstruments
         val query = values[1] as String
         val segmentFilter = values[2] as MarketSegment?
         val typeFilter = values[3] as InstrumentType?
@@ -127,6 +169,10 @@ class WatchlistViewModel @Inject constructor(
         val health = values[7] as FeedHealthSnapshot
         val istClock = values[8] as String
         val liveSearch = values[9] as LiveSearchSnapshot
+        val newsBundle = values[10] as NewsAndAlertsBundle
+        val newsState = newsBundle.newsState
+        val newsSymbol = newsBundle.selectedSymbol
+        val allAlerts = newsBundle.alerts
 
         val ltpMap = allInstruments.associate { it.symbol to it.ltp }
         var indiaUnrealised = BigDecimal.ZERO
@@ -155,6 +201,22 @@ class WatchlistViewModel @Inject constructor(
             matchesQuery && matchesSegment && matchesType
         }
 
+        val activeNewsScope = if (filtered.isNotEmpty()) filtered else allInstruments
+        val watchlistSymbols = WatchlistNewsGroundingEngine.extractWatchlistSymbols(activeNewsScope)
+        val effectiveNewsSymbol = newsSymbol?.takeIf { sym ->
+            watchlistSymbols.any { it.equals(sym, ignoreCase = true) }
+        }
+        val filteredNews = WatchlistNewsGroundingEngine.filterArticlesForWatchlist(
+            articles = newsState.articles,
+            watchlist = activeNewsScope,
+            selectedSymbol = effectiveNewsSymbol,
+            watchlistOnly = true
+        )
+
+        val activeAlertsBySymbol = allAlerts
+            .filter { it.isActive }
+            .groupBy { it.symbol }
+
         WatchlistUiState(
             instruments = filtered,
             searchQuery = query,
@@ -175,13 +237,76 @@ class WatchlistViewModel @Inject constructor(
             liveSearchResults = liveSearch.results,
             isLiveSearching = liveSearch.isSearching,
             liveSearchError = liveSearch.error,
-            addingToken = liveSearch.addingToken
+            addingToken = liveSearch.addingToken,
+            watchlistNewsState = newsState,
+            watchlistNewsSymbols = watchlistSymbols,
+            selectedNewsSymbol = effectiveNewsSymbol,
+            filteredWatchlistNews = filteredNews,
+            priceAlerts = allAlerts,
+            activeAlertsBySymbol = activeAlertsBySymbol,
+            ltpBySymbol = ltpMap
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = WatchlistUiState()
     )
+
+    fun hasNotificationPermission(): Boolean = priceAlertRepository.hasSystemNotificationPermission()
+
+    fun createPriceAlert(
+        instrument: Instrument,
+        targetPrice: BigDecimal,
+        condition: PriceAlertCondition,
+        note: String
+    ) {
+        viewModelScope.launch {
+            priceAlertRepository.createAlert(
+                instrument = instrument,
+                targetPrice = targetPrice,
+                condition = condition,
+                note = note
+            )
+        }
+    }
+
+    fun deletePriceAlert(alertId: String) {
+        viewModelScope.launch {
+            priceAlertRepository.deleteAlert(alertId)
+        }
+    }
+
+    fun rearmPriceAlert(alert: PriceAlert) {
+        viewModelScope.launch {
+            val ltp = latestAllInstruments.firstOrNull { it.symbol == alert.symbol }?.ltp ?: alert.targetPrice
+            priceAlertRepository.rearmAlert(alert, ltp)
+        }
+    }
+
+    fun clearTriggeredPriceAlerts() {
+        viewModelScope.launch {
+            priceAlertRepository.clearTriggeredAlerts()
+        }
+    }
+
+    fun onSelectNewsSymbol(symbol: String?) {
+        selectedNewsSymbol.value = symbol?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    fun refreshWatchlistNews(focusSymbol: String? = selectedNewsSymbol.value, force: Boolean = true) {
+        viewModelScope.launch {
+            val currentList = latestAllInstruments.ifEmpty {
+                marketDataRepository.instruments.first()
+            }
+            if (currentList.isNotEmpty()) {
+                marketNewsRepository.refreshForWatchlist(
+                    instruments = currentList,
+                    focusSymbol = focusSymbol,
+                    force = force
+                )
+            }
+        }
+    }
 
     fun onSearchChange(query: String) {
         searchQuery.value = query
@@ -273,6 +398,12 @@ class WatchlistViewModel @Inject constructor(
         val isSearching: Boolean = false,
         val error: String? = null,
         val addingToken: String? = null
+    )
+
+    private data class NewsAndAlertsBundle(
+        val newsState: MarketNewsFeedState,
+        val selectedSymbol: String?,
+        val alerts: List<PriceAlert>
     )
 
     private data class FeedHealthSnapshot(

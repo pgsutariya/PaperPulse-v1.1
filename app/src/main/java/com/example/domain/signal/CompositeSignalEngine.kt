@@ -2,6 +2,7 @@ package com.example.domain.signal
 
 import com.example.domain.analysis.TradingStyle
 import com.example.domain.model.InstrumentType
+import com.example.domain.signal.evaluators.AiRenkoSupertrendEvaluator
 import com.example.domain.signal.evaluators.AsrTradingEvaluator
 import com.example.domain.signal.evaluators.BtstStbtEvaluator
 import com.example.domain.signal.evaluators.Confluence70Evaluator
@@ -13,6 +14,7 @@ import com.example.domain.signal.evaluators.NclTradingEvaluator
 import com.example.domain.signal.evaluators.PivotBreakoutEvaluator
 import com.example.domain.signal.evaluators.QuantBreakoutEvaluator
 import com.example.domain.signal.evaluators.QuantMeanReversionEvaluator
+import com.example.domain.signal.evaluators.RedBarBreakoutEvaluator
 import com.example.domain.signal.evaluators.SmcIctEvaluator
 import com.example.domain.signal.evaluators.TrapReversalEvaluator
 import com.example.domain.signal.evaluators.ReversalConfluenceEvaluator
@@ -48,7 +50,9 @@ class CompositeSignalEngine(
             TrapReversalEvaluator(),
             PivotBreakoutEvaluator(),
             QuantMeanReversionEvaluator(),
-            QuantBreakoutEvaluator()
+            QuantBreakoutEvaluator(),
+            AiRenkoSupertrendEvaluator(),
+            RedBarBreakoutEvaluator()
         )
     )
 

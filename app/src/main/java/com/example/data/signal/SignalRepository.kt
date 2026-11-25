@@ -20,6 +20,7 @@ import com.example.domain.signal.SignalContext
 import com.example.domain.signal.SignalDirection
 import com.example.domain.signal.SignalEngine
 import com.example.domain.signal.SignalOutcome
+import com.example.domain.signal.SignalProbabilityCalculator
 import com.example.domain.signal.SignalRecord
 import com.example.domain.signal.Timeframe
 import com.example.domain.signal.TradeSignal
@@ -42,7 +43,8 @@ import javax.inject.Singleton
 data class SignalUiItem(
     val signal: TradeSignal,
     val userStatus: String,
-    val isSaved: Boolean
+    val isSaved: Boolean,
+    val winProbabilityPercent: Int = SignalProbabilityCalculator.estimate(signal)
 )
 
 @Singleton
@@ -73,11 +75,16 @@ class SignalRepository @Inject constructor(
         }
     }
 
+    val signalRecords: Flow<List<SignalRecord>> = signalRecordDao.observeAll().map { entities ->
+        entities.map { it.toDomain() }
+    }
+
     val activeSignals: Flow<List<SignalUiItem>> = combine(
         signalDao.observeAll(),
         savedSignalDao.observeSavedIds(),
+        signalRecords,
         expiryClock
-    ) { entities, savedIds, _ ->
+    ) { entities, savedIds, records, _ ->
         val savedSet = savedIds.toSet()
         val now = Instant.now()
         entities.mapNotNull { entity ->
@@ -89,26 +96,29 @@ class SignalRepository @Inject constructor(
             SignalUiItem(
                 signal = domain,
                 userStatus = entity.userStatus,
-                isSaved = domain.id in savedSet
+                isSaved = domain.id in savedSet,
+                winProbabilityPercent = SignalProbabilityCalculator.estimate(domain, records)
             )
         }.sortedWith(
-            compareByDescending<SignalUiItem> { it.signal.confidence.rank }
+            compareByDescending<SignalUiItem> { it.winProbabilityPercent }
+                .thenByDescending { it.signal.confidence.rank }
                 .thenByDescending { it.signal.generatedAt.epochSecond }
         )
     }
 
-    val savedSignals: Flow<List<SignalUiItem>> = savedSignalDao.observeAll().map { entities ->
+    val savedSignals: Flow<List<SignalUiItem>> = combine(
+        savedSignalDao.observeAll(),
+        signalRecords
+    ) { entities, records ->
         entities.map { entity ->
+            val domain = entity.toDomain()
             SignalUiItem(
-                signal = entity.toDomain(),
+                signal = domain,
                 userStatus = "SAVED",
-                isSaved = true
+                isSaved = true,
+                winProbabilityPercent = SignalProbabilityCalculator.estimate(domain, records)
             )
         }
-    }
-
-    val signalRecords: Flow<List<SignalRecord>> = signalRecordDao.observeAll().map { entities ->
-        entities.map { it.toDomain() }
     }
 
     val signalAccuracy: Flow<SignalAccuracyStats> = signalRecords.map { records ->

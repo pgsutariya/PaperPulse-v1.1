@@ -41,6 +41,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -60,6 +61,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.ai.AiConnectionStatus
 import com.example.data.signal.SignalUiItem
 import com.example.domain.analysis.RiskRewardLadder
 import com.example.domain.engine.MarketClock
@@ -94,6 +96,7 @@ import java.util.Locale
 fun SignalsScreen(
     onCreateOrderFromSignal: (InstrumentDetailRoute) -> Unit,
     onOpenChart: (symbol: String, timeframe: String) -> Unit = { _, _ -> },
+    onOpenFeedSettings: () -> Unit = {},
     viewModel: SignalsViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -376,7 +379,13 @@ fun SignalsScreen(
             SignalDetailSheetContent(
                 item = item,
                 aiState = state.selectedAiState,
+                aiConnectionStatus = state.aiConnectionStatus,
                 onAnalyzeAi = { viewModel.analyzeSignalWithAi(item.signal) },
+                onSwitchAiModel = viewModel::switchAiModel,
+                onOpenAiSettings = {
+                    viewModel.selectSignal(null)
+                    onOpenFeedSettings()
+                },
                 onAccept = { viewModel.acceptSignal(item.signal.id) },
                 onDismiss = { viewModel.dismissSignal(item.signal) },
                 onToggleSave = { viewModel.toggleSave(item) },
@@ -675,6 +684,55 @@ private fun SignalCard(
                 PriceMetricCell("R:R", String.format(Locale.US, "1:%.1f", sig.riskRewardRatio), MaterialTheme.colorScheme.primary)
             }
 
+            // Winning Probability Strip
+            val winProb = item.winProbabilityPercent
+            val probColor = when {
+                winProb >= 65 -> tradingColors.bullish
+                winProb >= 55 -> tradingColors.amber
+                else -> tradingColors.bearish
+            }
+            val probBg = when {
+                winProb >= 65 -> tradingColors.bullishContainer
+                winProb >= 55 -> tradingColors.amberContainer
+                else -> tradingColors.bearishContainer
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("signal_win_prob_${sig.symbol}"),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Winning Probability",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Surface(shape = RoundedCornerShape(6.dp), color = probBg) {
+                        Text(
+                            text = "$winProb% Win",
+                            style = MonoPriceSmall,
+                            color = probColor,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                LinearProgressIndicator(
+                    progress = { (winProb / 100f).coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = probColor,
+                    trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                )
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -743,7 +801,10 @@ private fun PriceMetricCell(label: String, value: String, valueColor: Color) {
 private fun SignalDetailSheetContent(
     item: SignalUiItem,
     aiState: AiUiState<AiSignalSecondOpinion>,
+    aiConnectionStatus: AiConnectionStatus,
     onAnalyzeAi: () -> Unit,
+    onSwitchAiModel: (String) -> Unit,
+    onOpenAiSettings: () -> Unit,
     onAccept: () -> Unit,
     onDismiss: () -> Unit,
     onToggleSave: () -> Unit,
@@ -804,6 +865,23 @@ private fun SignalDetailSheetContent(
                 DetailRow("Target 1", RiskMath.formatPrice(sig.target1, sig.segment), tradingColors.bullish)
                 DetailRow("Target 2", RiskMath.formatPrice(sig.target2, sig.segment), tradingColors.bullish)
                 DetailRow("Max Risk:Reward", String.format(Locale.US, "1 : %.2f", sig.riskRewardRatio), MaterialTheme.colorScheme.primary)
+                val sheetWinProb = item.winProbabilityPercent
+                val sheetProbColor = when {
+                    sheetWinProb >= 65 -> tradingColors.bullish
+                    sheetWinProb >= 55 -> tradingColors.amber
+                    else -> tradingColors.bearish
+                }
+                DetailRow("Winning Probability", "$sheetWinProb%", sheetProbColor)
+                LinearProgressIndicator(
+                    progress = { (sheetWinProb / 100f).coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .testTag("sheet_signal_win_prob_bar"),
+                    color = sheetProbColor,
+                    trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                )
                 sig.expiresAt?.let { exp ->
                     DetailRow("Valid Until", "${MarketClock.formatIstDate(exp.toEpochMilli())} ${MarketClock.formatIstTime(exp.toEpochMilli())} IST", MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -862,7 +940,10 @@ private fun SignalDetailSheetContent(
             ctaLabel = "Analyze Setup with AI",
             aiState = aiState,
             onAnalyze = onAnalyzeAi,
-            ctaTestTag = "ai_analyze_signal_button"
+            ctaTestTag = "ai_analyze_signal_button",
+            connectionStatus = aiConnectionStatus,
+            onSwitchModel = onSwitchAiModel,
+            onOpenAiSettings = onOpenAiSettings
         )
 
         Row(

@@ -60,7 +60,9 @@ data class ChartAnalysis(
     val setups: List<StyleSetupReport>,
     val quant: QuantSnapshot,
     val orderFlow: OrderFlowSnapshot,
-    val killZone: SessionCalendar.KillZone?
+    val killZone: SessionCalendar.KillZone?,
+    val renkoSupertrend: AiRenkoSupertrendSnapshot = AiRenkoSupertrendSnapshot(),
+    val redBar: RedBarSnapshot = RedBarSnapshot()
 ) {
     val lastClose: Double get() = candles.lastOrNull()?.close ?: 0.0
     val volumeAboveMa: Boolean
@@ -77,7 +79,8 @@ object MarketAnalyzer {
         timeframe: Timeframe,
         segment: MarketSegment?,
         higherTimeframe: Timeframe?,
-        backtestRatio: Double = 2.0
+        backtestRatio: Double = 2.0,
+        renkoConfig: AiRenkoConfig = AiRenkoConfig()
     ): ChartAnalysis {
         val closes = candles.map { it.close }
         val intraday = timeframe.isIntraday
@@ -137,13 +140,27 @@ object MarketAnalyzer {
             AdvancedIndicators.volumeDivergences(candles) +
             AdvancedIndicators.deltaDivergences(candles, segment)
 
+        val ema21Series = TechnicalIndicators.ema(closes, 21)
+        val ema50Series = TechnicalIndicators.ema(closes, 50)
+        val renkoSupertrend = AiRenkoSupertrendEngine.compute(
+            candles = candles,
+            ema21 = ema21Series,
+            ema50 = ema50Series,
+            config = renkoConfig
+        )
+        val redBar = RedBarIndicatorEngine.compute(
+            candles = candles,
+            timeframe = timeframe,
+            segment = segment
+        )
+
         return ChartAnalysis(
             candles = candles,
             timeframe = timeframe,
             segment = segment,
             ema9 = TechnicalIndicators.ema(closes, 9),
-            ema21 = TechnicalIndicators.ema(closes, 21),
-            ema50 = TechnicalIndicators.ema(closes, 50),
+            ema21 = ema21Series,
+            ema50 = ema50Series,
             ema200 = TechnicalIndicators.ema(closes, 200),
             vwap = AdvancedIndicators.vwapWithBands(candles, segment, resetEachSession = intraday),
             volumeMa20 = volMa,
@@ -180,7 +197,9 @@ object MarketAnalyzer {
             ),
             killZone = candles.lastOrNull()?.let {
                 SessionCalendar.activeKillZone(it.timestamp.toEpochMilli(), segment)
-            }
+            },
+            renkoSupertrend = renkoSupertrend,
+            redBar = redBar
         )
     }
 

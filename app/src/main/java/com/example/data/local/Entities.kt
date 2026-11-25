@@ -348,8 +348,34 @@ data class TradeJournalEntity(
     val exchangeCharges: BigDecimal = BigDecimal.ZERO,
     val sebiCharges: BigDecimal = BigDecimal.ZERO,
     val stampDuty: BigDecimal = BigDecimal.ZERO,
-    val gst: BigDecimal = BigDecimal.ZERO
+    val gst: BigDecimal = BigDecimal.ZERO,
+    val tagsCsv: String = ""
 )
+
+fun parseTagsCsv(csv: String): List<String> {
+    if (csv.isBlank()) return emptyList()
+    val seen = LinkedHashSet<String>()
+    val result = mutableListOf<String>()
+    csv.split("|", ",").forEach { raw ->
+        val cleaned = raw.trim()
+        if (cleaned.isNotEmpty() && seen.add(cleaned.lowercase())) {
+            result.add(cleaned)
+        }
+    }
+    return result
+}
+
+fun encodeTagsCsv(tags: List<String>): String {
+    val seen = LinkedHashSet<String>()
+    val cleaned = mutableListOf<String>()
+    tags.forEach { raw ->
+        val norm = raw.trim().replace("|", " ").replace(",", " ").replace(Regex("\\s+"), " ").take(28)
+        if (norm.isNotEmpty() && seen.add(norm.lowercase())) {
+            cleaned.add(norm)
+        }
+    }
+    return cleaned.joinToString("|")
+}
 
 fun TradeJournalEntity.toDomain(): TradeJournalEntry = TradeJournalEntry(
     id = id,
@@ -374,7 +400,8 @@ fun TradeJournalEntity.toDomain(): TradeJournalEntry = TradeJournalEntry(
     exchangeCharges = exchangeCharges,
     sebiCharges = sebiCharges,
     stampDuty = stampDuty,
-    gst = gst
+    gst = gst,
+    tags = parseTagsCsv(tagsCsv)
 )
 
 @Entity(tableName = "capital_transactions")

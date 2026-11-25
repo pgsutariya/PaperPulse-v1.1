@@ -232,7 +232,8 @@ data class TradeJournalEntry(
     val exchangeCharges: BigDecimal = BigDecimal.ZERO,
     val sebiCharges: BigDecimal = BigDecimal.ZERO,
     val stampDuty: BigDecimal = BigDecimal.ZERO,
-    val gst: BigDecimal = BigDecimal.ZERO
+    val gst: BigDecimal = BigDecimal.ZERO,
+    val tags: List<String> = emptyList()
 )
 
 enum class CapitalTransactionType(val label: String) {

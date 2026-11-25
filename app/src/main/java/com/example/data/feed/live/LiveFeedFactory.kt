@@ -1,7 +1,9 @@
 package com.example.data.feed.live
 
 import com.example.data.feed.PriceFeed
+import com.example.data.feed.PublicMarketQuotePoller
 import com.example.data.feed.SimulatedFeed
+import com.example.data.repository.TradingPreferencesRepository
 import com.example.domain.model.FeedConnectionState
 import com.example.domain.model.Instrument
 import com.example.domain.model.PriceTick
@@ -77,12 +79,33 @@ internal class SharedFeedSlot(
 }
 
 @Singleton
-class DefaultLiveFeedFactory @Inject constructor(
-    @Named("liveWs") private val okHttpClient: OkHttpClient,
+class DefaultLiveFeedFactory private constructor(
+    private val okHttpClient: OkHttpClient,
     private val credentialsStore: SecureBrokerCredentialsStore,
     private val appScope: CoroutineScope,
-    private val singletonAngelOneFeed: AngelOnePriceFeed
+    private val singletonAngelOneFeed: AngelOnePriceFeed,
+    private val publicQuotePoller: PublicMarketQuotePoller?,
+    private val prefsRepository: TradingPreferencesRepository?,
+    @Suppress("UNUSED_PARAMETER") internalTag: Boolean
 ) : LiveFeedFactory {
+
+    @Inject
+    constructor(
+        @Named("liveWs") okHttpClient: OkHttpClient,
+        credentialsStore: SecureBrokerCredentialsStore,
+        appScope: CoroutineScope,
+        singletonAngelOneFeed: AngelOnePriceFeed,
+        publicQuotePoller: PublicMarketQuotePoller,
+        prefsRepository: TradingPreferencesRepository
+    ) : this(
+        okHttpClient = okHttpClient,
+        credentialsStore = credentialsStore,
+        appScope = appScope,
+        singletonAngelOneFeed = singletonAngelOneFeed,
+        publicQuotePoller = publicQuotePoller,
+        prefsRepository = prefsRepository,
+        internalTag = true
+    )
 
     constructor(
         okHttpClient: OkHttpClient,
@@ -92,7 +115,10 @@ class DefaultLiveFeedFactory @Inject constructor(
         okHttpClient = okHttpClient,
         credentialsStore = credentialsStore,
         appScope = appScope,
-        singletonAngelOneFeed = AngelOnePriceFeed(okHttpClient, credentialsStore, appScope)
+        singletonAngelOneFeed = AngelOnePriceFeed(okHttpClient, credentialsStore, appScope),
+        publicQuotePoller = null,
+        prefsRepository = null,
+        internalTag = false
     )
 
     private val sharedSlots = ConcurrentHashMap<FeedType, SharedFeedSlot>()
@@ -102,10 +128,27 @@ class DefaultLiveFeedFactory @Inject constructor(
     override fun create(feedType: FeedType, simulatedTickIntervalMs: Long): FeedInstanceBundle {
         return when (feedType) {
             FeedType.SIMULATED -> {
-                val sim = SimulatedFeed(appScope).apply {
-                    tickIntervalMs = simulatedTickIntervalMs
+                val poller = publicQuotePoller
+                val prefs = prefsRepository
+                if (poller != null && prefs != null) {
+                    val slot = sharedSlots.computeIfAbsent(FeedType.SIMULATED) {
+                        val liveAnchoredSim = SimulatedFeed(appScope, poller, prefs).apply {
+                            tickIntervalMs = simulatedTickIntervalMs
+                        }
+                        SharedFeedSlot(
+                            delegate = liveAnchoredSim,
+                            liveStatusSource = kotlinx.coroutines.flow.MutableStateFlow(LiveConnectionStatus.CONNECTED),
+                            statusDetailSource = kotlinx.coroutines.flow.MutableStateFlow("Live NSE/BSE/MCX Public + Sim")
+                        )
+                    }
+                    (slot.delegate as? SimulatedFeed)?.tickIntervalMs = simulatedTickIntervalMs
+                    FeedInstanceBundle(slot.createHandle(), null, null)
+                } else {
+                    val sim = SimulatedFeed(appScope).apply {
+                        tickIntervalMs = simulatedTickIntervalMs
+                    }
+                    FeedInstanceBundle(sim, null, null)
                 }
-                FeedInstanceBundle(sim, null, null)
             }
             FeedType.BINANCE_LIVE -> {
                 val slot = sharedSlots.computeIfAbsent(FeedType.BINANCE_LIVE) {

@@ -2,10 +2,22 @@ package com.example.ui.screens.journal
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.ai.AiConnectionStatus
 import com.example.data.ai.AiMarketRepository
+import com.example.data.news.MarketNewsArticle
+import com.example.data.news.MarketNewsCategory
+import com.example.data.news.MarketNewsFeedState
+import com.example.data.news.MarketNewsRepository
+import com.example.data.news.WatchlistNewsGroundingEngine
 import com.example.data.repository.MarketDataRepository
 import com.example.data.repository.TradingRepository
 import com.example.data.signal.SignalRepository
+import com.example.domain.analytics.JournalRiskAnalytics
+import com.example.domain.analytics.RiskManagementScorecard
+import com.example.domain.analytics.TradeCorrelationAnalytics
+import com.example.domain.analytics.TradeCorrelationMatrix
+import com.example.domain.analytics.TradingIntensityHeatmapData
+import com.example.domain.engine.MarketClock
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.AccountState
 import com.example.domain.model.CapitalTransaction
@@ -17,21 +29,48 @@ import com.example.domain.model.TradeJournalEntry
 import com.example.domain.signal.AiUiState
 import com.example.domain.signal.InstrumentTradePerformance
 import com.example.domain.signal.TradeSignal
+import com.example.ui.components.CalendarDaySentiment
+import com.example.ui.components.CalendarHeatmapDay
+import com.example.ui.components.DailyRealizedPnlPoint
+import com.example.ui.components.MonthlyHeatmapData
+import com.example.ui.components.TradeSummaryReportMetrics
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
+import java.math.RoundingMode
+import java.time.Instant
+import java.time.YearMonth
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import javax.inject.Inject
 
 data class JournalUiState(
     val entries: List<TradeJournalEntry> = emptyList(),
+    val filteredEntries: List<TradeJournalEntry> = emptyList(),
+    val selectedTagFilter: String? = null,
+    val tagCounts: Map<String, Int> = emptyMap(),
     val instrumentPerformance: List<InstrumentTradePerformance> = emptyList(),
     val capitalTransactions: List<CapitalTransaction> = emptyList(),
+    val indiaDailyPnl30d: List<DailyRealizedPnlPoint> = emptyList(),
+    val cryptoDailyPnl30d: List<DailyRealizedPnlPoint> = emptyList(),
+    val indiaCalendarHeatmap: MonthlyHeatmapData = MonthlyHeatmapData(),
+    val cryptoCalendarHeatmap: MonthlyHeatmapData = MonthlyHeatmapData(),
+    val canGoNextHeatmapMonth: Boolean = false,
+    val indiaIntensityHeatmap: TradingIntensityHeatmapData = TradingIntensityHeatmapData(),
+    val cryptoIntensityHeatmap: TradingIntensityHeatmapData = TradingIntensityHeatmapData(),
+    val indiaRiskScorecard: RiskManagementScorecard = RiskManagementScorecard(),
+    val cryptoRiskScorecard: RiskManagementScorecard = RiskManagementScorecard(),
+    val indiaCorrelationMatrix: TradeCorrelationMatrix = TradeCorrelationMatrix(),
+    val cryptoCorrelationMatrix: TradeCorrelationMatrix = TradeCorrelationMatrix(),
+    val indiaTradeSummary: TradeSummaryReportMetrics = TradeSummaryReportMetrics(),
+    val cryptoTradeSummary: TradeSummaryReportMetrics = TradeSummaryReportMetrics(),
     val grossPnl: BigDecimal = BigDecimal.ZERO,
     val totalCharges: BigDecimal = BigDecimal.ZERO,
     val totalBrokerage: BigDecimal = BigDecimal.ZERO,
@@ -43,21 +82,71 @@ data class JournalUiState(
     val cryptoNetRealisedPnl: BigDecimal = BigDecimal.ZERO,
     val cryptoUnrealisedPnl: BigDecimal = BigDecimal.ZERO,
     val winRatePercent: Int = 0,
-    val coachState: AiUiState<String> = AiUiState.Idle
+    val coachState: AiUiState<String> = AiUiState.Idle,
+    val aiConnectionStatus: AiConnectionStatus = AiConnectionStatus(),
+    val newsFeedState: MarketNewsFeedState = MarketNewsFeedState(),
+    val selectedNewsCategory: MarketNewsCategory = MarketNewsCategory.ALL,
+    val watchlistNewsOnly: Boolean = true,
+    val watchlistNewsSymbols: List<String> = emptyList(),
+    val selectedNewsSymbol: String? = null,
+    val filteredNewsArticles: List<MarketNewsArticle> = emptyList()
 )
 
 @HiltViewModel
 class JournalViewModel @Inject constructor(
     private val tradingRepository: TradingRepository,
-    marketDataRepository: MarketDataRepository,
+    private val marketDataRepository: MarketDataRepository,
     signalRepository: SignalRepository,
-    private val aiMarketRepository: AiMarketRepository
+    private val aiMarketRepository: AiMarketRepository,
+    private val marketNewsRepository: MarketNewsRepository
 ) : ViewModel() {
 
     private val _coachState = MutableStateFlow<AiUiState<String>>(AiUiState.Idle)
+    private val _selectedTagFilter = MutableStateFlow<String?>(null)
+    private val _selectedNewsCategory = MutableStateFlow(MarketNewsCategory.ALL)
+    private val _watchlistNewsOnly = MutableStateFlow(true)
+    private val _selectedNewsSymbol = MutableStateFlow<String?>(null)
+    private val _selectedHeatmapMonth = MutableStateFlow(YearMonth.now(MarketClock.IST_ZONE))
     private var coachJob: Job? = null
 
     private var latestSnapshot = CoachSnapshot()
+
+    private val newsFilterFlow = combine(
+        marketNewsRepository.state,
+        _selectedNewsCategory,
+        _watchlistNewsOnly,
+        _selectedNewsSymbol
+    ) { newsState, newsCat, watchlistOnly, newsSymbol ->
+        NewsTabAuxState(newsState, newsCat, watchlistOnly, newsSymbol)
+    }
+
+    private val aiAndFilterFlow = combine(
+        _coachState,
+        aiMarketRepository.connectionStatus,
+        _selectedTagFilter,
+        newsFilterFlow
+    ) { coach, status, tagFilter, newsAux ->
+        AuxJournalState(
+            coachState = coach,
+            aiStatus = status,
+            selectedTagFilter = tagFilter,
+            newsState = newsAux.newsState,
+            selectedNewsCategory = newsAux.selectedNewsCategory,
+            watchlistNewsOnly = newsAux.watchlistNewsOnly,
+            selectedNewsSymbol = newsAux.selectedNewsSymbol
+        )
+    }
+
+    init {
+        viewModelScope.launch {
+            val instruments = marketDataRepository.instruments.first { it.isNotEmpty() }
+            marketNewsRepository.refreshForWatchlist(
+                instruments = instruments,
+                focusSymbol = null,
+                force = false
+            )
+        }
+    }
 
     val uiState: StateFlow<JournalUiState> = combine(
         tradingRepository.journalEntries,
@@ -66,7 +155,8 @@ class JournalViewModel @Inject constructor(
         tradingRepository.accountState,
         signalRepository.activeSignals,
         tradingRepository.capitalTransactions,
-        _coachState
+        aiAndFilterFlow,
+        _selectedHeatmapMonth
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val entries = values[0] as List<TradeJournalEntry>
@@ -79,8 +169,8 @@ class JournalViewModel @Inject constructor(
         val signalItems = values[4] as List<com.example.data.signal.SignalUiItem>
         @Suppress("UNCHECKED_CAST")
         val capitalTxns = values[5] as List<CapitalTransaction>
-        @Suppress("UNCHECKED_CAST")
-        val coachState = values[6] as AiUiState<String>
+        val aux = values[6] as AuxJournalState
+        val selectedMonth = values[7] as YearMonth
 
         latestSnapshot = CoachSnapshot(
             account = account,
@@ -107,6 +197,9 @@ class JournalViewModel @Inject constructor(
                 indiaUnrealised = indiaUnrealised.add(pnl)
             }
         }
+
+        val tagCounts = computeTagCounts(entries)
+        val filteredEntries = filterEntriesByTag(entries, aux.selectedTagFilter)
 
         val indiaEntries = entries.filter { it.segment != MarketSegment.CRYPTO }
         val cryptoEntries = entries.filter { it.segment == MarketSegment.CRYPTO }
@@ -145,10 +238,66 @@ class JournalViewModel @Inject constructor(
             }
             .sortedWith(compareByDescending<InstrumentTradePerformance> { it.totalTrades }.thenByDescending { it.netPnl })
 
+        // Compute 30D daily P&L & Trade Summary Report against the active tag filter when selected
+        val filteredIndia = filteredEntries.filter { it.segment != MarketSegment.CRYPTO }
+        val filteredCrypto = filteredEntries.filter { it.segment == MarketSegment.CRYPTO }
+        val nowMillis = System.currentTimeMillis()
+        val indiaDaily30d = buildDailyPnlSeries(filteredIndia, days = 30, nowMillis = nowMillis)
+        val cryptoDaily30d = buildDailyPnlSeries(filteredCrypto, days = 30, nowMillis = nowMillis)
+        val indiaHeatmap = buildMonthlyCalendarHeatmap(filteredIndia, selectedMonth)
+        val cryptoHeatmap = buildMonthlyCalendarHeatmap(filteredCrypto, selectedMonth)
+        val currentMonth = YearMonth.now(MarketClock.IST_ZONE)
+        val indiaIntensity = JournalRiskAnalytics.buildTradingIntensityHeatmap(filteredIndia)
+        val cryptoIntensity = JournalRiskAnalytics.buildTradingIntensityHeatmap(filteredCrypto)
+        val indiaScorecard = JournalRiskAnalytics.buildRiskManagementScorecard(
+            entries = filteredIndia,
+            startingCapital = account.virtualCapital
+        )
+        val cryptoScorecard = JournalRiskAnalytics.buildRiskManagementScorecard(
+            entries = filteredCrypto,
+            startingCapital = account.cryptoVirtualCapital
+        )
+        val indiaCorrelation = TradeCorrelationAnalytics.buildCorrelationMatrix(filteredIndia)
+        val cryptoCorrelation = TradeCorrelationAnalytics.buildCorrelationMatrix(filteredCrypto)
+        val indiaSummary = buildTradeSummaryReport(filteredIndia)
+        val cryptoSummary = buildTradeSummaryReport(filteredCrypto)
+
+        val watchlistSymbols = WatchlistNewsGroundingEngine.extractWatchlistSymbols(instruments)
+        val effectiveNewsSymbol = aux.selectedNewsSymbol?.takeIf { sym ->
+            watchlistSymbols.any { it.equals(sym, ignoreCase = true) }
+        }
+        val watchlistFilteredNews = WatchlistNewsGroundingEngine.filterArticlesForWatchlist(
+            articles = aux.newsState.articles,
+            watchlist = instruments,
+            selectedSymbol = effectiveNewsSymbol,
+            watchlistOnly = aux.watchlistNewsOnly
+        )
+        val filteredNews = if (aux.selectedNewsCategory == MarketNewsCategory.ALL) {
+            watchlistFilteredNews
+        } else {
+            watchlistFilteredNews.filter { it.category == aux.selectedNewsCategory }
+        }
+
         JournalUiState(
             entries = entries,
+            filteredEntries = filteredEntries,
+            selectedTagFilter = aux.selectedTagFilter,
+            tagCounts = tagCounts,
             instrumentPerformance = byInstrument,
             capitalTransactions = capitalTxns,
+            indiaDailyPnl30d = indiaDaily30d,
+            cryptoDailyPnl30d = cryptoDaily30d,
+            indiaCalendarHeatmap = indiaHeatmap,
+            cryptoCalendarHeatmap = cryptoHeatmap,
+            canGoNextHeatmapMonth = selectedMonth.isBefore(currentMonth),
+            indiaIntensityHeatmap = indiaIntensity,
+            cryptoIntensityHeatmap = cryptoIntensity,
+            indiaRiskScorecard = indiaScorecard,
+            cryptoRiskScorecard = cryptoScorecard,
+            indiaCorrelationMatrix = indiaCorrelation,
+            cryptoCorrelationMatrix = cryptoCorrelation,
+            indiaTradeSummary = indiaSummary,
+            cryptoTradeSummary = cryptoSummary,
             grossPnl = gross,
             totalCharges = charges,
             totalBrokerage = brokerage,
@@ -160,13 +309,102 @@ class JournalViewModel @Inject constructor(
             cryptoNetRealisedPnl = cryptoNet,
             cryptoUnrealisedPnl = cryptoUnrealised,
             winRatePercent = winRate,
-            coachState = coachState
+            coachState = aux.coachState,
+            aiConnectionStatus = aux.aiStatus,
+            newsFeedState = aux.newsState,
+            selectedNewsCategory = aux.selectedNewsCategory,
+            watchlistNewsOnly = aux.watchlistNewsOnly,
+            watchlistNewsSymbols = watchlistSymbols,
+            selectedNewsSymbol = effectiveNewsSymbol,
+            filteredNewsArticles = filteredNews
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = JournalUiState()
     )
+
+    fun switchAiModel(modelName: String) {
+        aiMarketRepository.switchActiveModel(modelName)
+    }
+
+    fun selectTagFilter(tag: String?) {
+        _selectedTagFilter.value = tag?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    fun previousHeatmapMonth() {
+        _selectedHeatmapMonth.value = _selectedHeatmapMonth.value.minusMonths(1)
+    }
+
+    fun nextHeatmapMonth() {
+        val currentMonth = YearMonth.now(MarketClock.IST_ZONE)
+        val candidate = _selectedHeatmapMonth.value.plusMonths(1)
+        if (!candidate.isAfter(currentMonth)) {
+            _selectedHeatmapMonth.value = candidate
+        }
+    }
+
+    fun toggleTagOnEntry(entryId: String, currentTags: List<String>, tag: String) {
+        val cleaned = tag.trim()
+        if (cleaned.isEmpty()) return
+        val exists = currentTags.any { it.equals(cleaned, ignoreCase = true) }
+        val updated = if (exists) {
+            currentTags.filterNot { it.equals(cleaned, ignoreCase = true) }
+        } else {
+            currentTags + cleaned
+        }
+        viewModelScope.launch {
+            tradingRepository.updateJournalTags(entryId, updated)
+        }
+    }
+
+    fun addTagToEntry(entryId: String, currentTags: List<String>, newTag: String) {
+        val cleaned = newTag.trim()
+        if (cleaned.isEmpty()) return
+        if (currentTags.any { it.equals(cleaned, ignoreCase = true) }) return
+        viewModelScope.launch {
+            tradingRepository.updateJournalTags(entryId, currentTags + cleaned)
+        }
+    }
+
+    fun removeTagFromEntry(entryId: String, currentTags: List<String>, tagToRemove: String) {
+        val updated = currentTags.filterNot { it.equals(tagToRemove, ignoreCase = true) }
+        viewModelScope.launch {
+            tradingRepository.updateJournalTags(entryId, updated)
+        }
+    }
+
+    fun selectNewsCategory(category: MarketNewsCategory) {
+        _selectedNewsCategory.value = category
+    }
+
+    fun setWatchlistNewsOnly(enabled: Boolean) {
+        _watchlistNewsOnly.value = enabled
+        if (!enabled) {
+            _selectedNewsSymbol.value = null
+        }
+    }
+
+    fun selectNewsSymbol(symbol: String?) {
+        _selectedNewsSymbol.value = symbol?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    fun refreshNews(focusSymbol: String? = _selectedNewsSymbol.value, force: Boolean = true) {
+        viewModelScope.launch {
+            val instruments = latestSnapshot.instruments.ifEmpty {
+                marketDataRepository.instruments.first()
+            }
+            if (instruments.isNotEmpty()) {
+                marketNewsRepository.refreshForWatchlist(
+                    instruments = instruments,
+                    focusSymbol = focusSymbol,
+                    force = force
+                )
+            } else {
+                marketNewsRepository.refresh(force = force)
+            }
+        }
+    }
 
     fun askAiCoach(question: String) {
         val snap = latestSnapshot
@@ -191,6 +429,23 @@ class JournalViewModel @Inject constructor(
         }
     }
 
+    private data class NewsTabAuxState(
+        val newsState: MarketNewsFeedState,
+        val selectedNewsCategory: MarketNewsCategory,
+        val watchlistNewsOnly: Boolean,
+        val selectedNewsSymbol: String?
+    )
+
+    private data class AuxJournalState(
+        val coachState: AiUiState<String>,
+        val aiStatus: AiConnectionStatus,
+        val selectedTagFilter: String?,
+        val newsState: MarketNewsFeedState,
+        val selectedNewsCategory: MarketNewsCategory,
+        val watchlistNewsOnly: Boolean,
+        val selectedNewsSymbol: String?
+    )
+
     private data class CoachSnapshot(
         val account: AccountState = AccountState(BigDecimal("1000000"), BigDecimal("1000000"), BigDecimal.ZERO),
         val positions: List<Position> = emptyList(),
@@ -198,4 +453,228 @@ class JournalViewModel @Inject constructor(
         val journalEntries: List<TradeJournalEntry> = emptyList(),
         val activeSignals: List<TradeSignal> = emptyList()
     )
+
+    companion object {
+        private val shortDayFormatter = DateTimeFormatter.ofPattern("dd MMM", Locale.US)
+        private val fullDayFormatter = DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.US)
+        private val monthYearFormatter = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.US)
+
+        fun buildMonthlyCalendarHeatmap(
+            entries: List<TradeJournalEntry>,
+            yearMonth: YearMonth
+        ): MonthlyHeatmapData {
+            val groupedByDate = entries
+                .groupBy { entry ->
+                    Instant.ofEpochMilli(entry.closedAtMillis).atZone(MarketClock.IST_ZONE).toLocalDate()
+                }
+                .filterKeys { YearMonth.from(it) == yearMonth }
+
+            val dailyNetByDate = groupedByDate.mapValues { (_, list) ->
+                list.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+            }
+            val maxAbsPnl = dailyNetByDate.values
+                .maxOfOrNull { it.abs().toDouble() }
+                ?.takeIf { it > 0.0 }
+                ?: 1.0
+
+            val daysInMonth = yearMonth.lengthOfMonth()
+            val firstDayOfWeekOffset = yearMonth.atDay(1).dayOfWeek.value - 1 // Monday=0 .. Sunday=6
+
+            var positiveDays = 0
+            var negativeDays = 0
+            var neutralDays = 0
+            var monthNet = BigDecimal.ZERO
+
+            val days = (1..daysInMonth).map { dom ->
+                val date = yearMonth.atDay(dom)
+                val dayTrades = groupedByDate[date].orEmpty()
+                val net = dailyNetByDate[date] ?: BigDecimal.ZERO
+                val wins = dayTrades.count { it.netPnl > BigDecimal.ZERO }
+                val losses = dayTrades.count { it.netPnl < BigDecimal.ZERO }
+                val sentiment = when {
+                    dayTrades.isEmpty() -> CalendarDaySentiment.NO_TRADE
+                    net > BigDecimal.ZERO -> {
+                        positiveDays += 1
+                        CalendarDaySentiment.POSITIVE
+                    }
+                    net < BigDecimal.ZERO -> {
+                        negativeDays += 1
+                        CalendarDaySentiment.NEGATIVE
+                    }
+                    else -> {
+                        neutralDays += 1
+                        CalendarDaySentiment.NEUTRAL
+                    }
+                }
+                monthNet = monthNet.add(net)
+                val intensity = if (dayTrades.isEmpty() || sentiment == CalendarDaySentiment.NEUTRAL) {
+                    0f
+                } else {
+                    (net.abs().toDouble() / maxAbsPnl).toFloat().coerceIn(0.15f, 1f)
+                }
+
+                CalendarHeatmapDay(
+                    date = date,
+                    netPnl = net,
+                    tradeCount = dayTrades.size,
+                    wins = wins,
+                    losses = losses,
+                    sentiment = sentiment,
+                    intensity = intensity
+                )
+            }
+
+            return MonthlyHeatmapData(
+                yearMonth = yearMonth,
+                monthLabel = yearMonth.format(monthYearFormatter),
+                leadingEmptyCells = firstDayOfWeekOffset,
+                days = days,
+                positiveDays = positiveDays,
+                negativeDays = negativeDays,
+                neutralDays = neutralDays,
+                monthNetPnl = monthNet
+            )
+        }
+
+        fun computeTagCounts(entries: List<TradeJournalEntry>): Map<String, Int> {
+            val canonicalByLower = LinkedHashMap<String, String>()
+            val countsByLower = LinkedHashMap<String, Int>()
+            entries.forEach { entry ->
+                entry.tags.forEach { tag ->
+                    val cleaned = tag.trim()
+                    if (cleaned.isNotEmpty()) {
+                        val key = cleaned.lowercase(Locale.US)
+                        canonicalByLower.putIfAbsent(key, cleaned)
+                        countsByLower[key] = (countsByLower[key] ?: 0) + 1
+                    }
+                }
+            }
+            val result = LinkedHashMap<String, Int>()
+            canonicalByLower.forEach { (key, display) ->
+                result[display] = countsByLower[key] ?: 0
+            }
+            return result
+        }
+
+        fun filterEntriesByTag(
+            entries: List<TradeJournalEntry>,
+            selectedTag: String?
+        ): List<TradeJournalEntry> {
+            val target = selectedTag?.trim()?.takeIf { it.isNotEmpty() } ?: return entries
+            return entries.filter { entry ->
+                entry.tags.any { it.equals(target, ignoreCase = true) }
+            }
+        }
+
+        fun buildDailyPnlSeries(
+            entries: List<TradeJournalEntry>,
+            days: Int = 30,
+            nowMillis: Long = System.currentTimeMillis()
+        ): List<DailyRealizedPnlPoint> {
+            val safeDays = days.coerceAtLeast(1)
+            val todayIst = Instant.ofEpochMilli(nowMillis).atZone(MarketClock.IST_ZONE).toLocalDate()
+            val startDate = todayIst.minusDays((safeDays - 1).toLong())
+
+            val groupedByDate = entries.groupBy { entry ->
+                Instant.ofEpochMilli(entry.closedAtMillis).atZone(MarketClock.IST_ZONE).toLocalDate()
+            }
+
+            return (0 until safeDays).map { offset ->
+                val date = startDate.plusDays(offset.toLong())
+                val dayTrades = groupedByDate[date].orEmpty()
+                val netPnl = dayTrades.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+                val wins = dayTrades.count { it.netPnl > BigDecimal.ZERO }
+                val losses = dayTrades.count { it.netPnl < BigDecimal.ZERO }
+                DailyRealizedPnlPoint(
+                    dayStartMillis = date.atStartOfDay(MarketClock.IST_ZONE).toInstant().toEpochMilli(),
+                    shortDateLabel = date.format(shortDayFormatter),
+                    fullDateLabel = date.format(fullDayFormatter),
+                    netPnl = netPnl,
+                    tradeCount = dayTrades.size,
+                    wins = wins,
+                    losses = losses
+                )
+            }
+        }
+
+        fun buildTradeSummaryReport(entries: List<TradeJournalEntry>): TradeSummaryReportMetrics {
+            if (entries.isEmpty()) return TradeSummaryReportMetrics()
+
+            val total = entries.size
+            val winsList = entries.filter { it.netPnl > BigDecimal.ZERO }
+            val lossesList = entries.filter { it.netPnl < BigDecimal.ZERO }
+            val breakEvenCount = total - winsList.size - lossesList.size
+
+            val totalNet = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+            val totalCharges = entries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
+            val grossProfit = winsList.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+            val grossLossAbs = lossesList.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl.abs()) }
+
+            val winRate = (winsList.size * 100.0) / total.toDouble()
+            val avgPnl = totalNet.divide(BigDecimal(total), 2, RoundingMode.HALF_UP)
+            val avgWin = if (winsList.isEmpty()) BigDecimal.ZERO else {
+                grossProfit.divide(BigDecimal(winsList.size), 2, RoundingMode.HALF_UP)
+            }
+            val avgLoss = if (lossesList.isEmpty()) BigDecimal.ZERO else {
+                grossLossAbs.divide(BigDecimal(lossesList.size), 2, RoundingMode.HALF_UP).negate()
+            }
+
+            val profitFactor: Double? = when {
+                grossLossAbs > BigDecimal.ZERO -> grossProfit.toDouble() / grossLossAbs.toDouble()
+                grossProfit > BigDecimal.ZERO -> Double.POSITIVE_INFINITY
+                else -> 0.0
+            }
+
+            val payoffRatio: Double? = when {
+                avgLoss < BigDecimal.ZERO -> avgWin.toDouble() / avgLoss.abs().toDouble()
+                avgWin > BigDecimal.ZERO -> Double.POSITIVE_INFINITY
+                else -> null
+            }
+
+            val largestWin = winsList.maxOfOrNull { it.netPnl } ?: BigDecimal.ZERO
+            val largestLoss = lossesList.minOfOrNull { it.netPnl } ?: BigDecimal.ZERO
+
+            var maxWinStreak = 0
+            var maxLossStreak = 0
+            var curWinStreak = 0
+            var curLossStreak = 0
+            entries.sortedBy { it.closedAtMillis }.forEach { e ->
+                when {
+                    e.netPnl > BigDecimal.ZERO -> {
+                        curWinStreak += 1
+                        curLossStreak = 0
+                        if (curWinStreak > maxWinStreak) maxWinStreak = curWinStreak
+                    }
+                    e.netPnl < BigDecimal.ZERO -> {
+                        curLossStreak += 1
+                        curWinStreak = 0
+                        if (curLossStreak > maxLossStreak) maxLossStreak = curLossStreak
+                    }
+                    else -> {
+                        curWinStreak = 0
+                        curLossStreak = 0
+                    }
+                }
+            }
+
+            return TradeSummaryReportMetrics(
+                totalTrades = total,
+                winningTrades = winsList.size,
+                losingTrades = lossesList.size,
+                breakEvenTrades = breakEvenCount,
+                winRatePercent = winRate,
+                avgPnlPerTrade = avgPnl,
+                avgWin = avgWin,
+                avgLoss = avgLoss,
+                profitFactor = profitFactor,
+                payoffRatio = payoffRatio,
+                largestWin = largestWin,
+                largestLoss = largestLoss,
+                maxWinStreak = maxWinStreak,
+                maxLossStreak = maxLossStreak,
+                totalNetPnl = totalNet,
+                totalCharges = totalCharges
+            )
+        }
+    }
 }

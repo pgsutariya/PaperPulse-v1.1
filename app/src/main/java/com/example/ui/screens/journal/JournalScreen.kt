@@ -2,8 +2,11 @@ package com.example.ui.screens.journal
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,13 +16,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
+import androidx.compose.material.icons.rounded.Assessment
 import androidx.compose.material.icons.rounded.Book
+import androidx.compose.material.icons.rounded.LocalOffer
+import androidx.compose.material.icons.rounded.Newspaper
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -34,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -42,33 +51,51 @@ import com.example.domain.engine.RiskMath
 import com.example.domain.model.CapitalTransaction
 import com.example.domain.model.CapitalTransactionType
 import com.example.domain.model.TradeJournalEntry
+import com.example.domain.signal.InstrumentTradePerformance
+import com.example.ui.components.AddTradeTagButton
 import com.example.ui.components.AiPortfolioCoachCard
+import com.example.ui.components.DailyPnlBarChartCard
 import com.example.ui.components.EmptyStatePanel
+import com.example.ui.components.MarketNewsArticleCard
+import com.example.ui.components.MarketNewsHeaderStrip
+import com.example.ui.components.PnlCalendarHeatmapCard
+import com.example.ui.components.RiskManagementScorecardCard
+import com.example.ui.components.SearchGroundingBriefingCard
 import com.example.ui.components.SegmentBadge
+import com.example.ui.components.TradeCorrelationMatrixCard
+import com.example.ui.components.TradeSummaryReportCard
+import com.example.ui.components.TradeTagEditorDialog
+import com.example.ui.components.TradeTagFilterBar
+import com.example.ui.components.TradeTagPill
+import com.example.ui.components.TradingIntensityHeatmapCard
+import com.example.ui.components.WatchlistSymbolNewsFilterBar
 import com.example.ui.theme.LocalTradingColors
 import com.example.ui.theme.MonoPriceMedium
 import com.example.ui.theme.MonoPriceSmall
 import java.math.BigDecimal
-
-import androidx.compose.material.icons.rounded.Assessment
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.ui.text.style.TextOverflow
-import com.example.domain.signal.InstrumentTradePerformance
 import java.util.Locale
 
 private enum class JournalTab(val label: String) {
     TRADES("Trades"),
-    BY_INSTRUMENT("Instruments"),
+    NEWS("News"),
+    BY_INSTRUMENT("Symbols"),
     CAPITAL("Capital")
 }
 
 @Composable
 fun JournalScreen(
+    onOpenFeedSettings: () -> Unit = {},
+    onOpenInstrument: (String) -> Unit = {},
     viewModel: JournalViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val tradingColors = LocalTradingColors.current
     var selectedTab by remember { mutableStateOf(JournalTab.TRADES) }
+    var tagEditorEntryId by remember { mutableStateOf<String?>(null) }
+
+    val tagEditorEntry = remember(tagEditorEntryId, state.entries) {
+        tagEditorEntryId?.let { id -> state.entries.firstOrNull { it.id == id } }
+    }
 
     Column(
         modifier = Modifier
@@ -157,22 +184,30 @@ fun JournalScreen(
 
         Spacer(Modifier.height(10.dp))
 
-        // Closed Trades vs By Instrument vs Capital Ledger Tabs
+        // Closed Trades vs Live News vs By Instrument vs Capital Ledger Tabs
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             JournalTab.entries.forEach { tab ->
                 val count = when (tab) {
                     JournalTab.TRADES -> state.entries.size
+                    JournalTab.NEWS -> state.filteredNewsArticles.size
                     JournalTab.BY_INSTRUMENT -> state.instrumentPerformance.size
                     JournalTab.CAPITAL -> state.capitalTransactions.size
                 }
                 FilterChip(
                     selected = selectedTab == tab,
-                    onClick = { selectedTab = tab },
+                    onClick = {
+                        selectedTab = tab
+                        if (tab == JournalTab.NEWS && state.newsFeedState.articles.isEmpty()) {
+                            viewModel.refreshNews(force = false)
+                        }
+                    },
                     label = { Text("${tab.label} ($count)", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    modifier = Modifier.weight(1f).testTag("journal_tab_${tab.name.lowercase()}"),
+                    modifier = Modifier.testTag("journal_tab_${tab.name.lowercase()}"),
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                         selectedLabelColor = MaterialTheme.colorScheme.primary
@@ -190,10 +225,67 @@ fun JournalScreen(
         ) {
             when (selectedTab) {
                 JournalTab.TRADES -> {
+                    item(key = "trade_tag_filter_bar") {
+                        TradeTagFilterBar(
+                            totalTradeCount = state.entries.size,
+                            tagCounts = state.tagCounts,
+                            selectedTag = state.selectedTagFilter,
+                            onSelectTag = viewModel::selectTagFilter
+                        )
+                    }
+
+                    item(key = "daily_pnl_30d_chart") {
+                        DailyPnlBarChartCard(
+                            indiaDailySeries = state.indiaDailyPnl30d,
+                            cryptoDailySeries = state.cryptoDailyPnl30d
+                        )
+                    }
+
+                    item(key = "pnl_calendar_heatmap_card") {
+                        PnlCalendarHeatmapCard(
+                            indiaHeatmap = state.indiaCalendarHeatmap,
+                            cryptoHeatmap = state.cryptoCalendarHeatmap,
+                            canGoNextMonth = state.canGoNextHeatmapMonth,
+                            onPreviousMonth = viewModel::previousHeatmapMonth,
+                            onNextMonth = viewModel::nextHeatmapMonth
+                        )
+                    }
+
+                    item(key = "trading_intensity_heatmap_card") {
+                        TradingIntensityHeatmapCard(
+                            indiaHeatmap = state.indiaIntensityHeatmap,
+                            cryptoHeatmap = state.cryptoIntensityHeatmap
+                        )
+                    }
+
+                    item(key = "risk_management_scorecard_card") {
+                        RiskManagementScorecardCard(
+                            indiaScorecard = state.indiaRiskScorecard,
+                            cryptoScorecard = state.cryptoRiskScorecard
+                        )
+                    }
+
+                    item(key = "trade_correlation_matrix_card") {
+                        TradeCorrelationMatrixCard(
+                            indiaMatrix = state.indiaCorrelationMatrix,
+                            cryptoMatrix = state.cryptoCorrelationMatrix
+                        )
+                    }
+
+                    item(key = "trade_summary_report_card") {
+                        TradeSummaryReportCard(
+                            indiaReport = state.indiaTradeSummary,
+                            cryptoReport = state.cryptoTradeSummary
+                        )
+                    }
+
                     item(key = "ai_coach_card") {
                         AiPortfolioCoachCard(
                             coachState = state.coachState,
-                            onAskQuestion = viewModel::askAiCoach
+                            onAskQuestion = viewModel::askAiCoach,
+                            connectionStatus = state.aiConnectionStatus,
+                            onSwitchModel = viewModel::switchAiModel,
+                            onOpenAiSettings = onOpenFeedSettings
                         )
                     }
 
@@ -202,14 +294,79 @@ fun JournalScreen(
                             EmptyStatePanel(
                                 icon = Icons.Rounded.Book,
                                 title = "No closed trades yet",
-                                subtitle = "Closed positions appear here with itemized brokerage, STT/CTT, exchange, SEBI, stamp duty, GST, net P&L, and trade notes."
+                                subtitle = "Closed positions appear here with custom tags (Breakout, Reversal, News), itemized brokerage & taxes, net P&L, and trade notes."
+                            )
+                        }
+                    } else if (state.filteredEntries.isEmpty() && state.selectedTagFilter != null) {
+                        item(key = "journal_tag_filtered_empty") {
+                            EmptyStatePanel(
+                                icon = Icons.Rounded.LocalOffer,
+                                title = "No trades tagged #${state.selectedTagFilter}",
+                                subtitle = "Tap + Tag on any closed trade to label it as #${state.selectedTagFilter}, or tap Clear above to view all trades."
                             )
                         }
                     } else {
-                        items(state.entries, key = { it.id }) { entry ->
+                        items(state.filteredEntries, key = { it.id }) { entry ->
                             JournalEntryCard(
                                 entry = entry,
-                                onSaveNotes = { notes -> viewModel.saveNotes(entry.id, notes) }
+                                onSaveNotes = { notes -> viewModel.saveNotes(entry.id, notes) },
+                                onOpenTagEditor = { tagEditorEntryId = entry.id },
+                                onFilterByTag = viewModel::selectTagFilter,
+                                onRemoveTag = { tag -> viewModel.removeTagFromEntry(entry.id, entry.tags, tag) }
+                            )
+                        }
+                    }
+                }
+                JournalTab.NEWS -> {
+                    item(key = "journal_news_watchlist_filter") {
+                        WatchlistSymbolNewsFilterBar(
+                            watchlistSymbols = state.watchlistNewsSymbols,
+                            watchlistOnly = state.watchlistNewsOnly,
+                            selectedSymbol = state.selectedNewsSymbol,
+                            onToggleWatchlistOnly = viewModel::setWatchlistNewsOnly,
+                            onSelectSymbol = viewModel::selectNewsSymbol,
+                            onSearchGroundSymbol = { sym -> viewModel.refreshNews(focusSymbol = sym, force = true) },
+                            isGroundingLoading = state.newsFeedState.isGroundingLoading
+                        )
+                    }
+
+                    item(key = "journal_news_grounding_brief") {
+                        SearchGroundingBriefingCard(
+                            feedState = state.newsFeedState,
+                            onRetryGrounding = { viewModel.refreshNews(focusSymbol = state.selectedNewsSymbol, force = true) },
+                            compact = false
+                        )
+                    }
+
+                    item(key = "journal_news_header") {
+                        MarketNewsHeaderStrip(
+                            feedState = state.newsFeedState,
+                            selectedCategory = state.selectedNewsCategory,
+                            onSelectCategory = viewModel::selectNewsCategory,
+                            onRefresh = { viewModel.refreshNews(focusSymbol = state.selectedNewsSymbol, force = true) }
+                        )
+                    }
+
+                    val newsBusy = state.newsFeedState.isLoading || state.newsFeedState.isGroundingLoading
+                    if (state.filteredNewsArticles.isEmpty() && !newsBusy) {
+                        item(key = "journal_news_empty") {
+                            EmptyStatePanel(
+                                icon = Icons.Rounded.Newspaper,
+                                title = if (state.selectedNewsSymbol != null) {
+                                    "No news yet for ${state.selectedNewsSymbol}"
+                                } else {
+                                    "No watchlist headlines loaded yet"
+                                },
+                                subtitle = state.newsFeedState.groundingError
+                                    ?: state.newsFeedState.errorMessage
+                                    ?: "Tap Refresh above to pull Google Search-grounded headlines filtered by your Watchlist symbols."
+                            )
+                        }
+                    } else {
+                        items(state.filteredNewsArticles, key = { it.id }) { article ->
+                            MarketNewsArticleCard(
+                                article = article,
+                                onOpenSymbol = onOpenInstrument
                             )
                         }
                     }
@@ -246,6 +403,21 @@ fun JournalScreen(
                 }
             }
         }
+    }
+
+    if (tagEditorEntry != null) {
+        TradeTagEditorDialog(
+            symbol = tagEditorEntry.symbol,
+            currentTags = tagEditorEntry.tags,
+            suggestedTags = state.tagCounts.keys.toList(),
+            onToggleTag = { tag ->
+                viewModel.toggleTagOnEntry(tagEditorEntry.id, tagEditorEntry.tags, tag)
+            },
+            onAddCustomTag = { custom ->
+                viewModel.addTagToEntry(tagEditorEntry.id, tagEditorEntry.tags, custom)
+            },
+            onDismiss = { tagEditorEntryId = null }
+        )
     }
 }
 
@@ -302,10 +474,14 @@ private fun InstrumentTradePerformanceCard(perf: InstrumentTradePerformance) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun JournalEntryCard(
     entry: TradeJournalEntry,
-    onSaveNotes: (String) -> Unit
+    onSaveNotes: (String) -> Unit,
+    onOpenTagEditor: () -> Unit,
+    onFilterByTag: (String) -> Unit,
+    onRemoveTag: (String) -> Unit
 ) {
     val tradingColors = LocalTradingColors.current
     val isWin = entry.netPnl >= BigDecimal.ZERO
@@ -341,6 +517,26 @@ private fun JournalEntryCard(
                     text = RiskMath.formatSignedCurrency(entry.netPnl, entry.segment),
                     style = MonoPriceMedium,
                     color = netColor
+                )
+            }
+
+            // Custom Trade Tags Row + Add Tag button
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                entry.tags.forEach { tag ->
+                    TradeTagPill(
+                        tag = tag,
+                        onClick = { onFilterByTag(tag) },
+                        onRemove = { onRemoveTag(tag) },
+                        modifier = Modifier.testTag("entry_tag_${entry.id}_${tag.lowercase().replace(" ", "_")}")
+                    )
+                }
+                AddTradeTagButton(
+                    onClick = onOpenTagEditor,
+                    modifier = Modifier.testTag("add_tag_button_${entry.id}")
                 )
             }
 

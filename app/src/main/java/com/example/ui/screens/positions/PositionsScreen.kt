@@ -66,6 +66,7 @@ import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
 import com.example.domain.model.ProductType
 import com.example.domain.model.TrailMode
+import com.example.ui.components.AiSecondOpinionCard
 import com.example.ui.components.EmptyStatePanel
 import com.example.ui.components.FeedHealthBadge
 import com.example.ui.components.FeedLostWarningBanner
@@ -80,6 +81,7 @@ import java.math.RoundingMode
 @Composable
 fun PositionsScreen(
     onOpenDetail: (String) -> Unit,
+    onOpenFeedSettings: () -> Unit = {},
     viewModel: PositionsViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -259,6 +261,19 @@ fun PositionsScreen(
                     contentPadding = PaddingValues(bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    item(key = "positions_ai_risk_audit") {
+                        AiSecondOpinionCard(
+                            title = "AI Portfolio Risk Audit",
+                            subtitle = "Checks open SL/Target coverage, concentration & margin buffer",
+                            ctaLabel = "Audit Open Positions with AI",
+                            aiState = state.aiRiskAuditState,
+                            onAnalyze = viewModel::runAiPortfolioRiskAudit,
+                            ctaTestTag = "positions_ai_risk_audit_button",
+                            connectionStatus = state.aiConnectionStatus,
+                            onSwitchModel = viewModel::switchAiModel,
+                            onOpenAiSettings = onOpenFeedSettings
+                        )
+                    }
                     items(state.items, key = { it.position.id }) { item ->
                         PositionCard(
                             item = item,
@@ -334,15 +349,29 @@ private fun PositionCard(
     val isProfit = item.unrealisedPnl >= BigDecimal.ZERO
     val pnlColor = if (isProfit) tradingColors.bullish else tradingColors.bearish
 
-    var expandedEditor by remember { mutableStateOf(false) }
-    var slText by remember(pos.activeSlPrice) { mutableStateOf(pos.activeSlPrice?.toPlainString() ?: "") }
-    var targetText by remember(pos.activeTargetPrice) { mutableStateOf(pos.activeTargetPrice?.toPlainString() ?: "") }
-    var tslEnabled by remember(pos.isTslEnabled) { mutableStateOf(pos.isTslEnabled) }
-    var tslMode by remember(pos.tslTrailMode) { mutableStateOf(pos.tslTrailMode) }
-    var tslValueText by remember(pos.tslTrailValue) { mutableStateOf(pos.tslTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8") }
-    var ttEnabled by remember(pos.isTrailingTargetEnabled) { mutableStateOf(pos.isTrailingTargetEnabled) }
-    var ttMode by remember(pos.trailingTargetTrailMode) { mutableStateOf(pos.trailingTargetTrailMode) }
-    var ttValueText by remember(pos.trailingTargetTrailValue) { mutableStateOf(pos.trailingTargetTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8") }
+    var expandedEditor by remember(pos.id) { mutableStateOf(false) }
+    var slText by remember(pos.id) { mutableStateOf(pos.activeSlPrice?.toPlainString() ?: "") }
+    var targetText by remember(pos.id) { mutableStateOf(pos.activeTargetPrice?.toPlainString() ?: "") }
+    var tslEnabled by remember(pos.id) { mutableStateOf(pos.isTslEnabled) }
+    var tslMode by remember(pos.id) { mutableStateOf(pos.tslTrailMode) }
+    var tslValueText by remember(pos.id) { mutableStateOf(pos.tslTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8") }
+    var ttEnabled by remember(pos.id) { mutableStateOf(pos.isTrailingTargetEnabled) }
+    var ttMode by remember(pos.id) { mutableStateOf(pos.trailingTargetTrailMode) }
+    var ttValueText by remember(pos.id) { mutableStateOf(pos.trailingTargetTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8") }
+
+    // Sync persisted risk values when opening the editor, without clobbering active typing on ticks
+    LaunchedEffect(expandedEditor, pos.id) {
+        if (expandedEditor) {
+            slText = pos.activeSlPrice?.toPlainString() ?: ""
+            targetText = pos.activeTargetPrice?.toPlainString() ?: ""
+            tslEnabled = pos.isTslEnabled
+            tslMode = pos.tslTrailMode
+            tslValueText = pos.tslTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8"
+            ttEnabled = pos.isTrailingTargetEnabled
+            ttMode = pos.trailingTargetTrailMode
+            ttValueText = pos.trailingTargetTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8"
+        }
+    }
 
     Surface(
         modifier = Modifier.fillMaxWidth().testTag("position_card_${pos.symbol}"),
@@ -543,19 +572,19 @@ private fun PositionCard(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = slText,
-                            onValueChange = { slText = it },
+                            onValueChange = { slText = sanitizeRiskDecimal(it) },
                             label = { Text("SL Price (${pos.segment.currencySymbol})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f).testTag("inline_sl_input_${pos.symbol}")
                         )
                         OutlinedTextField(
                             value = targetText,
-                            onValueChange = { targetText = it },
+                            onValueChange = { targetText = sanitizeRiskDecimal(it) },
                             label = { Text("Target Price (${pos.segment.currencySymbol})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f).testTag("inline_target_input_${pos.symbol}")
                         )
                     }
 
@@ -574,7 +603,7 @@ private fun PositionCard(
                             }
                             OutlinedTextField(
                                 value = tslValueText,
-                                onValueChange = { tslValueText = it },
+                                onValueChange = { tslValueText = sanitizeRiskDecimal(it) },
                                 label = { Text("Trail") },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 singleLine = true,
@@ -598,7 +627,7 @@ private fun PositionCard(
                             }
                             OutlinedTextField(
                                 value = ttValueText,
-                                onValueChange = { ttValueText = it },
+                                onValueChange = { ttValueText = sanitizeRiskDecimal(it) },
                                 label = { Text("Trail") },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 singleLine = true,
@@ -610,14 +639,14 @@ private fun PositionCard(
                     Button(
                         onClick = {
                             onSaveRisk(
-                                slText.toBigDecimalOrNull(),
-                                targetText.toBigDecimalOrNull(),
+                                slText.trim().toBigDecimalOrNull(),
+                                targetText.trim().toBigDecimalOrNull(),
                                 tslEnabled,
                                 tslMode,
-                                tslValueText.toBigDecimalOrNull() ?: BigDecimal("1"),
+                                tslValueText.trim().toBigDecimalOrNull() ?: BigDecimal("1"),
                                 ttEnabled,
                                 ttMode,
-                                ttValueText.toBigDecimalOrNull() ?: BigDecimal("1")
+                                ttValueText.trim().toBigDecimalOrNull() ?: BigDecimal("1")
                             )
                             expandedEditor = false
                         },
@@ -927,3 +956,12 @@ private fun CapitalManagementDialog(
         }
     )
 }
+
+private fun sanitizeRiskDecimal(input: String): String {
+    val filtered = input.filter { it.isDigit() || it == '.' }
+    val firstDot = filtered.indexOf('.')
+    return if (firstDot == -1) filtered else {
+        filtered.substring(0, firstDot + 1) + filtered.substring(firstDot + 1).replace(".", "")
+    }
+}
+

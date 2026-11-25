@@ -96,6 +96,7 @@ fun InstrumentDetailScreen(
     onOrderPlacedNavigate: (message: String, goToOrdersTab: Boolean) -> Unit,
     onOpenOptionChain: (String) -> Unit = {},
     onOpenChart: (String) -> Unit = {},
+    onOpenFeedSettings: () -> Unit = {},
     viewModel: InstrumentDetailViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -712,7 +713,10 @@ fun InstrumentDetailScreen(
                 ctaLabel = "Audit Draft Order with AI",
                 aiState = state.aiAuditState,
                 onAnalyze = viewModel::runAiSetupAudit,
-                ctaTestTag = "ai_audit_setup_button"
+                ctaTestTag = "ai_audit_setup_button",
+                connectionStatus = state.aiConnectionStatus,
+                onSwitchModel = viewModel::switchAiModel,
+                onOpenAiSettings = onOpenFeedSettings
             )
 
             // 6. Margin Summary & Place Order CTA

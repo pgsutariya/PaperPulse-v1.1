@@ -84,7 +84,9 @@ enum class SignalStrategy(val label: String, val shortLabel: String) {
     MOMENTUM_BREAKOUT("Momentum Breakout (SMA 10/30 + RSI)", "MOM BO"),
     EMA50_RSI_MACD("50 EMA + RSI + MACD Trend", "EMA50 MACD"),
     ASR_TRADING("ASR Support & Resistance", "ASR"),
-    NCL_TRADING("NCL Narrow Candle Breakout", "NCL");
+    NCL_TRADING("NCL Narrow Candle Breakout", "NCL"),
+    AI_RENKO_SUPERTREND("AI Renko Supertrend (Brahmastra)", "RENKO ST"),
+    RED_BAR_BREAKOUT("Red Bar / 12:45 Breakout", "RED BAR");
 
     /** Suggested paper-trading product for this strategy family. */
     val prefersCarryForward: Boolean

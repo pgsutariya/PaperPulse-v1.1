@@ -17,10 +17,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CandlestickChart
 import androidx.compose.material.icons.rounded.CloseFullscreen
 import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material.icons.rounded.ShowChart
 import androidx.compose.material.icons.rounded.Straighten
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -31,9 +33,13 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -46,16 +52,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.domain.analysis.AiRenkoConfig
 import com.example.domain.analysis.BreakoutKind
 import com.example.domain.analysis.ChartAnalysis
 import com.example.domain.analysis.EmaCrossSetup
 import com.example.domain.analysis.LiquiditySide
 import com.example.domain.analysis.LiquidityStatus
 import com.example.domain.analysis.MdrStage
+import com.example.domain.analysis.RedBarBreakoutStatus
+import com.example.domain.analysis.RenkoConviction
 import com.example.domain.analysis.SetupState
 import com.example.domain.analysis.StyleSetupReport
+import com.example.domain.engine.MarketClock
 import com.example.domain.signal.SignalDirection
 import com.example.domain.signal.Timeframe
+import com.example.ui.components.AiSecondOpinionCard
 import com.example.ui.components.SegmentBadge
 import com.example.ui.navigation.InstrumentDetailRoute
 import com.example.ui.theme.LocalTradingColors
@@ -83,6 +94,7 @@ private fun big(v: Double): String = when {
 fun ChartScreen(
     onBack: () -> Unit,
     onTrade: (InstrumentDetailRoute) -> Unit,
+    onOpenFeedSettings: () -> Unit = {},
     viewModel: ChartViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -118,15 +130,17 @@ fun ChartScreen(
                     }
                 },
                 actions = {
-                    IconButton(
-                        onClick = viewModel::toggleMeasureMode,
-                        modifier = Modifier.testTag("chart_measure_toggle")
-                    ) {
-                        Icon(
-                            Icons.Rounded.Straighten,
-                            contentDescription = "Measure time & price range",
-                            tint = if (state.measureMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        )
+                    if (state.chartEngine == ChartEngineMode.CANVAS) {
+                        IconButton(
+                            onClick = viewModel::toggleMeasureMode,
+                            modifier = Modifier.testTag("chart_measure_toggle")
+                        ) {
+                            Icon(
+                                Icons.Rounded.Straighten,
+                                contentDescription = "Measure time & price range",
+                                tint = if (state.measureMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     }
                     IconButton(
                         onClick = { viewModel.zoom(zoomIn = true) },
@@ -165,6 +179,10 @@ fun ChartScreen(
                     .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                ChartEngineToggleRow(
+                    selected = state.chartEngine,
+                    onSelect = viewModel::setChartEngine
+                )
                 ChipRow {
                     Timeframe.entries.forEach { tf ->
                         FilterChip(
@@ -174,7 +192,7 @@ fun ChartScreen(
                         )
                     }
                 }
-                if (state.measureMode) {
+                if (state.chartEngine == ChartEngineMode.CANVAS && state.measureMode) {
                     Text(
                         "Measure Mode ON — tap two candles on chart for Δ Price, Δ %, Bars & Time Range",
                         style = MaterialTheme.typography.labelSmall,
@@ -196,36 +214,59 @@ fun ChartScreen(
                         shape = RoundedCornerShape(12.dp),
                         color = palette.canvasBg,
                         border = BorderStroke(1.dp, palette.axisDivider),
-                        modifier = Modifier.fillMaxWidth().weight(1f)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .testTag("panel_chart_container")
                     ) {
-                        Column(Modifier.fillMaxSize().padding(2.dp)) {
-                            PriceChartCanvas(
+                        if (state.chartEngine == ChartEngineMode.TRADINGVIEW) {
+                            TradingViewChartPanel(
+                                symbol = state.symbol,
                                 analysis = analysis,
                                 overlays = state.overlays,
-                                window = window,
+                                lowerPane = state.lowerPane,
                                 focusSetup = focus,
-                                palette = palette,
-                                measureMode = state.measureMode,
-                                measureStartIndex = state.measureStartIndex,
-                                measureEndIndex = state.measureEndIndex,
-                                onMeasureTap = viewModel::onMeasureTap,
-                                onPinchZoom = viewModel::zoomByScale,
-                                onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(0.76f)
-                                    .testTag("chart_price_canvas")
+                                chartStyle = state.tvChartStyle,
+                                logScale = state.tvLogScale,
+                                magnetCrosshair = state.tvMagnetCrosshair,
+                                zoomCommandSeq = state.tvZoomCommandSeq,
+                                zoomDirection = state.tvZoomDirection,
+                                onSelectChartStyle = viewModel::setTvChartStyle,
+                                onToggleLogScale = viewModel::toggleTvLogScale,
+                                onToggleMagnetCrosshair = viewModel::toggleTvMagnetCrosshair,
+                                onFallbackToCanvas = { viewModel.setChartEngine(ChartEngineMode.CANVAS) },
+                                modifier = Modifier.fillMaxSize().padding(2.dp)
                             )
-                            LowerPaneCanvas(
-                                analysis = analysis,
-                                pane = state.lowerPane,
-                                window = window,
-                                showDivergences = state.overlays.divergences,
-                                palette = palette,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(0.24f)
-                            )
+                        } else {
+                            Column(Modifier.fillMaxSize().padding(2.dp)) {
+                                PriceChartCanvas(
+                                    analysis = analysis,
+                                    overlays = state.overlays,
+                                    window = window,
+                                    focusSetup = focus,
+                                    palette = palette,
+                                    measureMode = state.measureMode,
+                                    measureStartIndex = state.measureStartIndex,
+                                    measureEndIndex = state.measureEndIndex,
+                                    onMeasureTap = viewModel::onMeasureTap,
+                                    onPinchZoom = viewModel::zoomByScale,
+                                    onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(0.76f)
+                                        .testTag("chart_price_canvas")
+                                )
+                                LowerPaneCanvas(
+                                    analysis = analysis,
+                                    pane = state.lowerPane,
+                                    window = window,
+                                    showDivergences = state.overlays.divergences,
+                                    palette = palette,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(0.24f)
+                                )
+                            }
                         }
                     }
                 }
@@ -271,9 +312,22 @@ fun ChartScreen(
                     FilterChip(
                         selected = isOverlayOn(state.overlays, key),
                         onClick = { viewModel.toggleOverlay(key) },
-                        label = { Text(key.label) }
+                        label = { Text(key.label) },
+                        modifier = Modifier.testTag("chart_overlay_${key.name.lowercase(Locale.US)}")
                     )
                 }
+            }
+
+            if (state.overlays.renkoSupertrend) {
+                AiRenkoControlsStrip(
+                    config = state.renkoConfig,
+                    analysis = state.analysis,
+                    onBrickMultChange = viewModel::setRenkoBrickMultiplier,
+                    onAtrSensitivityChange = viewModel::setRenkoAtrSensitivity,
+                    onAtrPeriodSelect = viewModel::setRenkoAtrPeriod,
+                    onToggleAdaptive = viewModel::toggleRenkoAdaptiveMode,
+                    onReset = viewModel::resetRenkoDefaults
+                )
             }
 
             if (state.isLoadingHistory) {
@@ -282,7 +336,7 @@ fun ChartScreen(
             if (state.historyNote.isNotBlank()) {
                 Text(state.historyNote, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (state.measureMode) {
+            if (state.chartEngine == ChartEngineMode.CANVAS && state.measureMode) {
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -296,6 +350,11 @@ fun ChartScreen(
                     )
                 }
             }
+
+            ChartEngineToggleRow(
+                selected = state.chartEngine,
+                onSelect = viewModel::setChartEngine
+            )
 
             val analysis = state.analysis
             if (analysis == null) {
@@ -314,49 +373,77 @@ fun ChartScreen(
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = palette.canvasBg,
-                border = BorderStroke(1.dp, palette.axisDivider)
+                border = BorderStroke(1.dp, palette.axisDivider),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("panel_chart_container")
             ) {
-                Column(Modifier.padding(2.dp)) {
-                    PriceChartCanvas(
+                if (state.chartEngine == ChartEngineMode.TRADINGVIEW) {
+                    TradingViewChartPanel(
+                        symbol = state.symbol,
                         analysis = analysis,
                         overlays = state.overlays,
-                        window = window,
+                        lowerPane = state.lowerPane,
                         focusSetup = focus,
-                        palette = palette,
-                        measureMode = state.measureMode,
-                        measureStartIndex = state.measureStartIndex,
-                        measureEndIndex = state.measureEndIndex,
-                        onMeasureTap = viewModel::onMeasureTap,
-                        onPinchZoom = viewModel::zoomByScale,
-                        onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
+                        chartStyle = state.tvChartStyle,
+                        logScale = state.tvLogScale,
+                        magnetCrosshair = state.tvMagnetCrosshair,
+                        zoomCommandSeq = state.tvZoomCommandSeq,
+                        zoomDirection = state.tvZoomDirection,
+                        onSelectChartStyle = viewModel::setTvChartStyle,
+                        onToggleLogScale = viewModel::toggleTvLogScale,
+                        onToggleMagnetCrosshair = viewModel::toggleTvMagnetCrosshair,
+                        onFallbackToCanvas = { viewModel.setChartEngine(ChartEngineMode.CANVAS) },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(380.dp)
-                            .testTag("chart_price_canvas")
+                            .height(520.dp)
+                            .padding(2.dp)
                     )
-                    LowerPaneCanvas(
-                        analysis = analysis,
-                        pane = state.lowerPane,
-                        window = window,
-                        showDivergences = state.overlays.divergences,
-                        palette = palette,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(120.dp)
-                    )
+                } else {
+                    Column(Modifier.padding(2.dp)) {
+                        PriceChartCanvas(
+                            analysis = analysis,
+                            overlays = state.overlays,
+                            window = window,
+                            focusSetup = focus,
+                            palette = palette,
+                            measureMode = state.measureMode,
+                            measureStartIndex = state.measureStartIndex,
+                            measureEndIndex = state.measureEndIndex,
+                            onMeasureTap = viewModel::onMeasureTap,
+                            onPinchZoom = viewModel::zoomByScale,
+                            onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(380.dp)
+                                .testTag("chart_price_canvas")
+                        )
+                        LowerPaneCanvas(
+                            analysis = analysis,
+                            pane = state.lowerPane,
+                            window = window,
+                            showDivergences = state.overlays.divergences,
+                            palette = palette,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(120.dp)
+                        )
+                    }
                 }
             }
 
-            val maxPan = (analysis.candles.size - state.visibleBars).coerceAtLeast(0)
-            if (maxPan > 0) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Scroll back", style = MaterialTheme.typography.labelSmall)
-                    Slider(
-                        value = state.panBars.toFloat().coerceIn(0f, maxPan.toFloat()),
-                        onValueChange = { viewModel.setPan(it.toInt()) },
-                        valueRange = 0f..maxPan.toFloat(),
-                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
-                    )
+            if (state.chartEngine == ChartEngineMode.CANVAS) {
+                val maxPan = (analysis.candles.size - state.visibleBars).coerceAtLeast(0)
+                if (maxPan > 0) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Scroll back", style = MaterialTheme.typography.labelSmall)
+                        Slider(
+                            value = state.panBars.toFloat().coerceIn(0f, maxPan.toFloat()),
+                            onValueChange = { viewModel.setPan(it.toInt()) },
+                            valueRange = 0f..maxPan.toFloat(),
+                            modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                        )
+                    }
                 }
             }
 
@@ -372,6 +459,18 @@ fun ChartScreen(
 
             LegendRow(palette)
 
+            AiSecondOpinionCard(
+                title = "AI Chart Structure Read",
+                subtitle = "Interprets ${state.timeframe.label} SMC trend, zones, volume delta & recent candles",
+                ctaLabel = "Analyze Chart with AI",
+                aiState = state.aiChartState,
+                onAnalyze = viewModel::analyzeChartWithAi,
+                ctaTestTag = "chart_ai_analyze_button",
+                connectionStatus = state.aiConnectionStatus,
+                onSwitchModel = viewModel::switchAiModel,
+                onOpenAiSettings = onOpenFeedSettings
+            )
+
             SetupsPanel(
                 reports = analysis.setups,
                 riskPercent = state.riskPercent,
@@ -379,6 +478,8 @@ fun ChartScreen(
                 quantityFor = viewModel::suggestedQuantity,
                 onTrade = { setup, ratio -> viewModel.buildOrderRoute(setup, ratio)?.let(onTrade) }
             )
+            AiRenkoSupertrendPanel(analysis)
+            RedBarIndicatorPanel(analysis)
             StructurePanel(analysis)
             LiquidityPanel(analysis)
             SessionModelPanel(state)
@@ -398,6 +499,9 @@ fun ChartScreen(
 }
 
 private fun isOverlayOn(o: ChartOverlays, key: OverlayKey): Boolean = when (key) {
+    OverlayKey.RENKO_SUPERTREND -> o.renkoSupertrend
+    OverlayKey.RED_BAR -> o.redBar
+    OverlayKey.FIRST_RED_RANGE -> o.firstRedRange
     OverlayKey.EMA_9_21 -> o.ema921
     OverlayKey.EMA_50_200 -> o.ema50200
     OverlayKey.VWAP -> o.vwap
@@ -411,6 +515,72 @@ private fun isOverlayOn(o: ChartOverlays, key: OverlayKey): Boolean = when (key)
     OverlayKey.VP -> o.volumeProfile
     OverlayKey.DIVERGENCE -> o.divergences
     OverlayKey.SETUP -> o.setupLevels
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChartEngineToggleRow(
+    selected: ChartEngineMode,
+    onSelect: (ChartEngineMode) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("panel_chart_engine_toggle"),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(
+                text = "Chart Engine",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = if (selected == ChartEngineMode.TRADINGVIEW) {
+                    "TradingView Lightweight Charts • Pinch, Log, Magnet & Heikin Ashi"
+                } else {
+                    "Native Canvas • Measure Tool, HTF Shadow & Volume Profile"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        SingleChoiceSegmentedButtonRow {
+            ChartEngineMode.entries.forEachIndexed { index, mode ->
+                SegmentedButton(
+                    selected = selected == mode,
+                    onClick = { onSelect(mode) },
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = ChartEngineMode.entries.size
+                    ),
+                    icon = {
+                        Icon(
+                            imageVector = if (mode == ChartEngineMode.TRADINGVIEW) {
+                                Icons.Rounded.CandlestickChart
+                            } else {
+                                Icons.Rounded.ShowChart
+                            },
+                            contentDescription = null
+                        )
+                    },
+                    modifier = Modifier.testTag(
+                        if (mode == ChartEngineMode.TRADINGVIEW) "chart_engine_tradingview" else "chart_engine_canvas"
+                    ),
+                    label = {
+                        Text(
+                            text = mode.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1
+                        )
+                    }
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -429,6 +599,8 @@ private fun ChipRow(content: @Composable () -> Unit) {
 @Composable
 private fun LegendRow(palette: ChartPalette) {
     ChipRow {
+        LegendDot("AI Renko ST", Color(0xFF00E676))
+        LegendDot("1st Red / 12:45", palette.bear)
         LegendDot("EMA9", palette.cyan)
         LegendDot("EMA21", palette.amber)
         LegendDot("EMA50", palette.violet)
@@ -541,6 +713,246 @@ private fun SetupsPanel(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun AiRenkoControlsStrip(
+    config: AiRenkoConfig,
+    analysis: ChartAnalysis?,
+    onBrickMultChange: (Double) -> Unit,
+    onAtrSensitivityChange: (Double) -> Unit,
+    onAtrPeriodSelect: (Int) -> Unit,
+    onToggleAdaptive: () -> Unit,
+    onReset: () -> Unit
+) {
+    val colors = LocalTradingColors.current
+    val st = analysis?.renkoSupertrend
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, colors.border),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("renko_controls_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "AI RENKO ST CONTROLS",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    if (st != null && st.currentTrail != null) {
+                        val bull = st.currentBullish
+                        val sigColor = if (bull) colors.bullish else colors.bearish
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = sigColor.copy(alpha = 0.16f),
+                            border = BorderStroke(1.dp, sigColor.copy(alpha = 0.45f)),
+                            modifier = Modifier.testTag("renko_live_signal_badge")
+                        ) {
+                            Text(
+                                text = "${if (bull) "▲ BUY" else "▼ SELL"} • Trail ${f2(st.currentTrail)}",
+                                style = MonoPriceSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = sigColor,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+                TextButton(
+                    onClick = onReset,
+                    modifier = Modifier.testTag("renko_reset_button")
+                ) {
+                    Text("Reset", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            // Brick Size Multiplier Slider
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val brickPts = st?.currentBrickSize?.takeIf { it > 0.0 }?.let { " (${f2(it)})" } ?: ""
+                Text(
+                    text = "Brick ${String.format(Locale.US, "%.2f", config.brickSizeMultiplier)}x$brickPts",
+                    style = MonoPriceSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Slider(
+                    value = config.brickSizeMultiplier.toFloat(),
+                    onValueChange = { onBrickMultChange(it.toDouble()) },
+                    valueRange = 0.30f..2.50f,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("renko_brick_size_slider")
+                )
+            }
+
+            // ATR Sensitivity Slider
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val effFactor = st?.currentFactor?.let { " (Eff ${String.format(Locale.US, "%.2f", it)}x)" } ?: ""
+                Text(
+                    text = "ATR Sens ${String.format(Locale.US, "%.1f", config.atrSensitivity)}x$effFactor",
+                    style = MonoPriceSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Slider(
+                    value = config.atrSensitivity.toFloat(),
+                    onValueChange = { onAtrSensitivityChange(it.toDouble()) },
+                    valueRange = 1.2f..4.5f,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("renko_atr_sensitivity_slider")
+                )
+            }
+
+            // ATR Period + Adaptive Volatility Toggle Chips
+            ChipRow {
+                Text("ATR", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                listOf(7, 10, 14, 21).forEach { period ->
+                    FilterChip(
+                        selected = config.atrPeriod == period,
+                        onClick = { onAtrPeriodSelect(period) },
+                        label = { Text("$period") },
+                        modifier = Modifier.testTag("renko_atr_period_$period")
+                    )
+                }
+                FilterChip(
+                    selected = config.adaptiveMode,
+                    onClick = onToggleAdaptive,
+                    label = { Text(if (config.adaptiveMode) "Adaptive AI: ON" else "Adaptive AI: OFF") },
+                    modifier = Modifier.testTag("renko_adaptive_toggle")
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AiRenkoSupertrendPanel(a: ChartAnalysis) {
+    val colors = LocalTradingColors.current
+    val st = a.renkoSupertrend
+    Panel("AI RENKO SUPERTREND • INSTITUTIONAL ENGINE") {
+        val trendColor = if (st.currentBullish) colors.bullish else colors.bearish
+        KeyValue("Renko Trend", if (st.currentBullish) "BULLISH ↑" else "BEARISH ↓", trendColor)
+        KeyValue("Adaptive Trail Stop", f2(st.currentTrail), trendColor)
+        KeyValue("Adaptive Brick Size", "${f2(st.currentBrickSize)} (${st.totalBricksFormed} bricks)")
+        KeyValue(
+            "Volatility Regime (ATR7/21)",
+            "${st.volatilityRegime.label} • ${String.format(Locale.US, "%.2f", st.volatilityRatio)}x"
+        )
+        KeyValue("Adaptive Supertrend Factor", String.format(Locale.US, "%.2fx ATR", st.currentFactor))
+        KeyValue(
+            "ADX(14) Chop Filter",
+            st.currentAdx?.let {
+                "${String.format(Locale.US, "%.1f", it)} • ${if (st.isChoppyMarket) "CHOPPY (Caution)" else "TRENDING"}"
+            } ?: "--",
+            if (st.isChoppyMarket) colors.amber else colors.bullish
+        )
+        KeyValue(
+            "EMA 21/50 Confirmation",
+            if (st.emaAligned) "ALIGNED" else "Counter-trend / Neutral",
+            if (st.emaAligned) colors.bullish else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (st.signals.isNotEmpty()) {
+            Text("Recent Adaptive Renko Flips", style = MaterialTheme.typography.labelSmall)
+            st.signals.takeLast(3).reversed().forEach { sig ->
+                val barsAgo = (a.candles.lastIndex - sig.index).coerceAtLeast(0)
+                val sigCol = when {
+                    sig.conviction == RenkoConviction.CHOP_FILTERED -> colors.amber
+                    sig.isBullish -> colors.bullish
+                    else -> colors.bearish
+                }
+                KeyValue(
+                    "${if (sig.isBullish) "BUY" else "SELL"} (${barsAgo}b ago)",
+                    "${f2(sig.price)} • ${sig.conviction.label}",
+                    sigCol
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RedBarIndicatorPanel(a: ChartAnalysis) {
+    val colors = LocalTradingColors.current
+    val rb = a.redBar
+    Panel("RED BAR INDICATOR • FIRST RED & 12:45 BREAKOUT") {
+        val fr = rb.firstRedRange
+        if (fr == null) {
+            Text("No red reference candle detected in current session yet.", style = MaterialTheme.typography.bodySmall)
+        } else {
+            val statusColor = when (fr.status) {
+                RedBarBreakoutStatus.BREAKOUT_UP -> colors.bullish
+                RedBarBreakoutStatus.BREAKDOWN_DOWN -> colors.bearish
+                RedBarBreakoutStatus.INSIDE_RANGE -> colors.amber
+            }
+            KeyValue("First Red Candle (${MarketClock.formatIstShortTime(fr.timestampMillis)})", "${f2(fr.low)} – ${f2(fr.high)}")
+            KeyValue("First Red 50% Retracement", f2(fr.midpoint), MaterialTheme.colorScheme.primary)
+            KeyValue("First Red Status", fr.status.label, statusColor)
+        }
+
+        val md = rb.midday1245Range
+        if (md != null) {
+            val mdColor = when (md.status) {
+                RedBarBreakoutStatus.BREAKOUT_UP -> colors.bullish
+                RedBarBreakoutStatus.BREAKDOWN_DOWN -> colors.bearish
+                RedBarBreakoutStatus.INSIDE_RANGE -> colors.amber
+            }
+            KeyValue("12:45 IST Range", "${f2(md.low)} – ${f2(md.high)}", colors.amber)
+            KeyValue("12:45 Breakout Status", md.status.label, mdColor)
+        } else {
+            KeyValue("12:45 IST Range", "Awaiting 12:45 IST bar", MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        KeyValue(
+            "Price vs Volume Bar",
+            "${if (rb.latestPriceCandleRed) "Red Price" else "Green Price"} • ${if (rb.latestVolumeBarRed) "Red Vol" else "Green Vol"}",
+            if (rb.hasLatestVolumePriceMismatch) colors.amber else MaterialTheme.colorScheme.onSurface
+        )
+        if (rb.hasLatestVolumePriceMismatch) {
+            Text(
+                "Note: Price candle compares Close vs Open; Volume bar compares Close vs Prev Close.",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.amber
+            )
+        }
+        rb.latestInsideBar?.let { ib ->
+            val barsAgo = (a.candles.lastIndex - ib.index).coerceAtLeast(0)
+            KeyValue(
+                "Latest Inside Bar",
+                "${if (ib.isRed) "Red IB" else "Green IB"} (${f2(ib.low)}–${f2(ib.high)}) • ${barsAgo}b ago",
+                if (ib.isRed) colors.bearish else colors.bullish
+            )
+        }
+        if (rb.reversalZones.isNotEmpty()) {
+            val latestZone = rb.reversalZones.last()
+            KeyValue(
+                "Bearish Reversal Zones (${rb.reversalZones.size})",
+                "${latestZone.label} ${f2(latestZone.bottom)}–${f2(latestZone.top)}",
+                colors.bearish
+            )
         }
     }
 }

@@ -61,7 +61,11 @@ object AppModule {
             PaperPulseDatabase::class.java,
             "paperpulse.db"
         )
-            .addMigrations(PaperPulseDatabase.MIGRATION_3_4)
+            .addMigrations(
+                PaperPulseDatabase.MIGRATION_3_4,
+                PaperPulseDatabase.MIGRATION_4_5,
+                PaperPulseDatabase.MIGRATION_5_6
+            )
             .fallbackToDestructiveMigration(dropAllTables = true)
             .build()
     }
@@ -77,6 +81,7 @@ object AppModule {
     @Provides fun provideSignalDao(db: PaperPulseDatabase): com.example.data.local.SignalDao = db.signalDao()
     @Provides fun provideSavedSignalDao(db: PaperPulseDatabase): com.example.data.local.SavedSignalDao = db.savedSignalDao()
     @Provides fun provideSignalRecordDao(db: PaperPulseDatabase): com.example.data.local.SignalRecordDao = db.signalRecordDao()
+    @Provides fun providePriceAlertDao(db: PaperPulseDatabase): com.example.data.local.PriceAlertDao = db.priceAlertDao()
 }
 
 @Module

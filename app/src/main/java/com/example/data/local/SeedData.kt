@@ -9,7 +9,7 @@ import kotlin.math.sin
 
 object SeedData {
     val INITIAL_CAPITAL = BigDecimal("1000000.00")
-    val INITIAL_CRYPTO_CAPITAL = BigDecimal("10000.00")
+    val INITIAL_CRYPTO_CAPITAL = BigDecimal("100000.00")
 
     fun defaultAccount(): AccountStateEntity = AccountStateEntity(
         id = 1,

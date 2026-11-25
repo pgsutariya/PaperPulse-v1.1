@@ -2,6 +2,10 @@ package com.example.ui.screens.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.ai.AiConnectionState
+import com.example.data.ai.AiConnectionStatus
+import com.example.data.ai.AiMarketRepository
+import com.example.data.ai.AiProvider
 import com.example.data.ai.AiProviderConfig
 import com.example.data.ai.SecureAiConfigStore
 import com.example.data.feed.live.AngelOnePriceFeed
@@ -20,6 +24,8 @@ import com.example.domain.model.Instrument
 import com.example.domain.model.MarketSegment
 import com.example.domain.model.TradingConfig
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -37,6 +43,7 @@ data class FeedSettingsUiState(
     val config: TradingConfig = TradingConfig(),
     val brokerSettings: BrokerFeedSettings = BrokerFeedSettings(),
     val aiConfig: AiProviderConfig = AiProviderConfig(),
+    val aiConnectionStatus: AiConnectionStatus = AiConnectionStatus(),
     val segmentConfigs: Map<MarketSegment, SegmentFeedConfig> = emptyMap(),
     val feedStatuses: Map<FeedType, LiveConnectionStatus> = emptyMap(),
     val liveConnectionStatus: LiveConnectionStatus = LiveConnectionStatus.DISCONNECTED,
@@ -57,13 +64,27 @@ class FeedSettingsViewModel @Inject constructor(
     private val prefsRepository: TradingPreferencesRepository,
     private val tradingRepository: TradingRepository,
     private val angelOnePriceFeed: AngelOnePriceFeed,
-    private val aiConfigStore: SecureAiConfigStore
+    private val aiConfigStore: SecureAiConfigStore,
+    private val aiMarketRepository: AiMarketRepository
 ) : ViewModel() {
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
 
     private val _angelDiagnosticState = MutableStateFlow<Pair<Boolean, String?>>(false to null)
+    private var autoConnectJob: Job? = null
+
+    init {
+        val currentAi = aiConfigStore.getCurrent()
+        if (currentAi.autoConnect &&
+            aiMarketRepository.connectionStatus.value.state == AiConnectionState.IDLE &&
+            (!currentAi.provider.requiresApiKey || currentAi.apiKey.isNotBlank())
+        ) {
+            viewModelScope.launch {
+                aiMarketRepository.autoConnectAndFetchModels(currentAi)
+            }
+        }
+    }
 
     private val liveFeedStateFlow = combine(
         marketDataRepository.brokerSettings,
@@ -87,8 +108,9 @@ class FeedSettingsViewModel @Inject constructor(
 
     private val configAndAiFlow = combine(
         prefsRepository.configFlow,
-        aiConfigStore.config
-    ) { cfg, aiCfg -> cfg to aiCfg }
+        aiConfigStore.config,
+        aiMarketRepository.connectionStatus
+    ) { cfg, aiCfg, aiStatus -> Triple(cfg, aiCfg, aiStatus) }
 
     val uiState: StateFlow<FeedSettingsUiState> = combine(
         configAndAiFlow,
@@ -96,11 +118,12 @@ class FeedSettingsViewModel @Inject constructor(
         safetyStateFlow,
         marketDataRepository.instruments,
         _angelDiagnosticState
-    ) { (config, aiCfg), live, safety, instruments, diag ->
+    ) { (config, aiCfg, aiStatus), live, safety, instruments, diag ->
         FeedSettingsUiState(
             config = config,
             brokerSettings = live.settings,
             aiConfig = aiCfg,
+            aiConnectionStatus = aiStatus,
             segmentConfigs = live.segConfigs,
             feedStatuses = live.feedMap,
             liveConnectionStatus = live.connStatus,
@@ -120,10 +143,64 @@ class FeedSettingsViewModel @Inject constructor(
         initialValue = FeedSettingsUiState()
     )
 
-    fun saveAiConfig(newConfig: AiProviderConfig) {
+    fun loadSavedDraftForAgent(provider: AiProvider): AiProviderConfig {
+        val current = aiConfigStore.getCurrent()
+        return AiProviderConfig(
+            provider = provider,
+            apiKey = aiConfigStore.getSavedKeyFor(provider),
+            modelName = aiConfigStore.getSavedModelFor(provider),
+            customBaseUrl = aiConfigStore.getSavedBaseUrlFor(provider),
+            autoConnect = current.autoConnect
+        )
+    }
+
+    fun saveAiConfig(newConfig: AiProviderConfig, autoConnectNow: Boolean = true) {
         aiConfigStore.save(newConfig)
         viewModelScope.launch {
-            _messages.emit("AI provider set to ${newConfig.provider.label} (${newConfig.effectiveModel})")
+            _messages.emit("AI Agent set to ${newConfig.provider.label} (${newConfig.effectiveModel})")
+            if (autoConnectNow && newConfig.autoConnect) {
+                val status = aiMarketRepository.autoConnectAndFetchModels(newConfig)
+                if (status.state == AiConnectionState.CONNECTED && status.activeModel.isNotBlank() && newConfig.modelName.isBlank()) {
+                    aiConfigStore.updateActiveModel(status.activeModel)
+                }
+            }
+        }
+    }
+
+    fun scheduleAutoConnect(draft: AiProviderConfig) {
+        if (!draft.autoConnect) return
+        if (draft.provider.requiresApiKey && draft.apiKey.trim().length < 8) return
+        autoConnectJob?.cancel()
+        autoConnectJob = viewModelScope.launch {
+            delay(750L)
+            aiConfigStore.save(draft)
+            val status = aiMarketRepository.autoConnectAndFetchModels(draft)
+            if (status.state == AiConnectionState.CONNECTED && status.activeModel.isNotBlank() && draft.modelName.isBlank()) {
+                aiConfigStore.updateActiveModel(status.activeModel)
+            }
+        }
+    }
+
+    fun testAndSyncAiModels(draft: AiProviderConfig) {
+        autoConnectJob?.cancel()
+        aiConfigStore.save(draft)
+        viewModelScope.launch {
+            val status = aiMarketRepository.autoConnectAndFetchModels(draft)
+            if (status.state == AiConnectionState.CONNECTED) {
+                if (draft.modelName.isBlank() && status.activeModel.isNotBlank()) {
+                    aiConfigStore.updateActiveModel(status.activeModel)
+                }
+                _messages.emit(status.message)
+            } else if (status.state == AiConnectionState.ERROR) {
+                _messages.emit(status.message)
+            }
+        }
+    }
+
+    fun switchAiModel(modelName: String) {
+        val updated = aiMarketRepository.switchActiveModel(modelName)
+        viewModelScope.launch {
+            _messages.emit("Switched ${updated.provider.shortLabel} model to ${updated.effectiveModel}")
         }
     }
 

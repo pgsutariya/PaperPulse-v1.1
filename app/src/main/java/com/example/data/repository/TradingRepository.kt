@@ -258,7 +258,7 @@ class TradingRepository private constructor(
         return null
     }
 
-    suspend fun cancelOrder(orderId: String): Result<Unit> {
+    suspend fun cancelOrder(orderId: String): Result<Unit> = executionEngine.withEngineLock {
         val nowMillis = System.currentTimeMillis()
         database.withTransaction {
             val order = orderDao.getById(orderId) ?: return@withTransaction
@@ -273,25 +273,30 @@ class TradingRepository private constructor(
                 )
             )
 
-            // If this was a protective leg on an open position, clear the link on the position
+            // If this was a protective leg on an open position, clear the link & OCO status on the position
             if (order.legRole == "SL" || order.legRole == "TARGET") {
                 positionDao.getBySymbol(order.symbol).forEach { pos ->
                     if (pos.slOrderId == order.id) {
+                        pos.ocoGroupId?.let { ocoLinkDao.deactivate(it) }
                         positionDao.upsert(
                             pos.copy(
                                 slOrderId = null,
                                 activeSlPrice = null,
+                                ocoGroupId = null,
                                 isTslEnabled = false,
                                 updatedAtMillis = nowMillis
                             )
                         )
                     } else if (pos.targetOrderId == order.id) {
+                        pos.ocoGroupId?.let { ocoLinkDao.deactivate(it) }
                         positionDao.upsert(
                             pos.copy(
                                 targetOrderId = null,
                                 activeTargetPrice = null,
+                                ocoGroupId = null,
                                 isTrailingTargetEnabled = false,
                                 trailingTargetActivated = false,
+                                trailingTargetPeakPrice = null,
                                 trailingTargetExitTrigger = null,
                                 updatedAtMillis = nowMillis
                             )
@@ -300,7 +305,7 @@ class TradingRepository private constructor(
                 }
             }
         }
-        return Result.success(Unit)
+        Result.success(Unit)
     }
 
     suspend fun updatePositionRiskControls(
@@ -313,7 +318,7 @@ class TradingRepository private constructor(
         isTrailingTargetEnabled: Boolean,
         trailingTargetMode: TrailMode,
         trailingTargetValue: BigDecimal
-    ): Result<Unit> {
+    ): Result<Unit> = executionEngine.withEngineLock {
         val nowMillis = System.currentTimeMillis()
         var failure: Throwable? = null
         database.withTransaction {
@@ -328,27 +333,31 @@ class TradingRepository private constructor(
             val isBuy = pos.side == OrderSide.BUY
             val exitSide = if (isBuy) OrderSide.SELL else OrderSide.BUY
 
-            val roundedSl = newSlPrice?.takeIf { it > BigDecimal.ZERO }?.let { RiskMath.roundToTick(it.max(tickSize), tickSize) }
-            val roundedTarget = newTargetPrice?.takeIf { it > BigDecimal.ZERO }?.let { RiskMath.roundToTick(it.max(tickSize), tickSize) }
-
-            // Validate SL/Target against live LTP so the user gets immediate clear feedback instead of silent rejection or instant trigger
-            if (roundedSl != null) {
-                if (isBuy && roundedSl >= currentLtp) {
-                    failure = IllegalArgumentException("Stop Loss (${RiskMath.formatPrice(roundedSl, pos.segment)}) must be below live LTP (${RiskMath.formatPrice(currentLtp, pos.segment)}) for a BUY position")
-                    return@withTransaction
-                }
-                if (!isBuy && roundedSl <= currentLtp) {
-                    failure = IllegalArgumentException("Stop Loss (${RiskMath.formatPrice(roundedSl, pos.segment)}) must be above live LTP (${RiskMath.formatPrice(currentLtp, pos.segment)}) for a SELL position")
-                    return@withTransaction
-                }
+            if (newSlPrice != null && newSlPrice <= BigDecimal.ZERO) {
+                failure = IllegalArgumentException("Stop Loss must be greater than zero")
+                return@withTransaction
             }
-            if (roundedTarget != null) {
-                if (isBuy && roundedTarget <= currentLtp) {
-                    failure = IllegalArgumentException("Target (${RiskMath.formatPrice(roundedTarget, pos.segment)}) must be above live LTP (${RiskMath.formatPrice(currentLtp, pos.segment)}) for a BUY position")
+            if (newTargetPrice != null && newTargetPrice <= BigDecimal.ZERO) {
+                failure = IllegalArgumentException("Target must be greater than zero")
+                return@withTransaction
+            }
+
+            val roundedSl = newSlPrice?.let { RiskMath.roundToTick(it.max(tickSize), tickSize) }
+            val roundedTarget = newTargetPrice?.let { RiskMath.roundToTick(it.max(tickSize), tickSize) }
+
+            // Only enforce basic directional bracket sanity when BOTH SL & Target are supplied;
+            // allow unrestricted adding/modifying of SL or Target on existing positions regardless of tick drift.
+            if (roundedSl != null && roundedTarget != null) {
+                if (isBuy && roundedSl >= roundedTarget) {
+                    failure = IllegalArgumentException(
+                        "For a BUY position, Stop Loss (${RiskMath.formatPrice(roundedSl, pos.segment)}) must be lower than Target (${RiskMath.formatPrice(roundedTarget, pos.segment)})"
+                    )
                     return@withTransaction
                 }
-                if (!isBuy && roundedTarget >= currentLtp) {
-                    failure = IllegalArgumentException("Target (${RiskMath.formatPrice(roundedTarget, pos.segment)}) must be below live LTP (${RiskMath.formatPrice(currentLtp, pos.segment)}) for a SELL position")
+                if (!isBuy && roundedSl <= roundedTarget) {
+                    failure = IllegalArgumentException(
+                        "For a SELL position, Stop Loss (${RiskMath.formatPrice(roundedSl, pos.segment)}) must be higher than Target (${RiskMath.formatPrice(roundedTarget, pos.segment)})"
+                    )
                     return@withTransaction
                 }
             }
@@ -519,6 +528,9 @@ class TradingRepository private constructor(
                 )
             }
 
+            val targetChanged = roundedTarget != pos.activeTargetPrice
+            val keepTrailingProgress = isTrailingTargetEnabled && roundedTarget != null && !targetChanged
+
             positionDao.upsert(
                 pos.copy(
                     activeSlPrice = roundedSl,
@@ -529,21 +541,22 @@ class TradingRepository private constructor(
                     isTslEnabled = isTslEnabled && roundedSl != null,
                     tslTrailMode = tslMode,
                     tslTrailValue = tslValue,
+                    tslBestPrice = if (roundedSl != null) currentLtp else pos.tslBestPrice,
                     isTrailingTargetEnabled = isTrailingTargetEnabled && roundedTarget != null,
                     trailingTargetTrailMode = trailingTargetMode,
                     trailingTargetTrailValue = trailingTargetValue,
-                    trailingTargetActivated = if (isTrailingTargetEnabled && roundedTarget != null) pos.trailingTargetActivated else false,
-                    trailingTargetPeakPrice = if (isTrailingTargetEnabled && roundedTarget != null) pos.trailingTargetPeakPrice else null,
-                    trailingTargetExitTrigger = if (isTrailingTargetEnabled && roundedTarget != null) pos.trailingTargetExitTrigger else null,
+                    trailingTargetActivated = if (keepTrailingProgress) pos.trailingTargetActivated else false,
+                    trailingTargetPeakPrice = if (keepTrailingProgress) pos.trailingTargetPeakPrice else null,
+                    trailingTargetExitTrigger = if (keepTrailingProgress) pos.trailingTargetExitTrigger else null,
                     expiresAtMillis = protectiveExpiryMillis,
                     updatedAtMillis = nowMillis
                 )
             )
         }
-        return failure?.let { Result.failure(it) } ?: Result.success(Unit)
+        failure?.let { Result.failure(it) } ?: Result.success(Unit)
     }
 
-    suspend fun convertProductToCarryForward(positionId: String): Result<String> {
+    suspend fun convertProductToCarryForward(positionId: String): Result<String> = executionEngine.withEngineLock {
         val nowMillis = System.currentTimeMillis()
         var result: Result<String> = Result.failure(IllegalStateException("Position not found"))
         database.withTransaction {
@@ -622,7 +635,7 @@ class TradingRepository private constructor(
             }
             result = Result.success("Converted ${pos.symbol} to Carry Forward (${newValidityType.label})")
         }
-        return result
+        result
     }
 
     suspend fun exitPositionAtMarket(positionId: String): Result<Unit> {
@@ -656,7 +669,7 @@ class TradingRepository private constructor(
         newTriggerPrice: BigDecimal?,
         newAttachedSlValue: BigDecimal? = null,
         newAttachedTargetValue: BigDecimal? = null
-    ): Result<String> {
+    ): Result<String> = executionEngine.withEngineLock {
         val nowMillis = System.currentTimeMillis()
         var result: Result<String> = Result.failure(IllegalStateException("Pending order not found"))
         database.withTransaction {
@@ -731,7 +744,7 @@ class TradingRepository private constructor(
         result.getOrNull()?.let { msg ->
             notificationManager?.notifyTradeActivity("Pending Order Updated", msg)
         }
-        return result
+        result
     }
 
     /**
@@ -742,7 +755,7 @@ class TradingRepository private constructor(
     suspend fun averageRunningPosition(
         positionId: String,
         additionalQuantity: Int
-    ): Result<String> {
+    ): Result<String> = executionEngine.withEngineLock {
         val nowMillis = System.currentTimeMillis()
         val config = prefsRepository.getConfig()
         var result: Result<String> = Result.failure(IllegalStateException("Position not found"))
@@ -862,10 +875,18 @@ class TradingRepository private constructor(
                 )
             )
 
-            // Sync linked pending SL & Target orders to the new total quantity
+            // Sync linked pending SL & Target orders to the new total quantity and keep protective expiry fresh
+            val freshHorizon = maxOf(pos.expiresAtMillis, nowMillis + 30L * 86_400_000L)
             listOfNotNull(pos.slOrderId, pos.targetOrderId).forEach { legId ->
                 orderDao.getById(legId)?.takeIf { it.status == OrderStatus.PENDING }?.let { leg ->
-                    orderDao.upsert(leg.copy(quantity = newQty, lotSize = lotSize, updatedAtMillis = nowMillis))
+                    orderDao.upsert(
+                        leg.copy(
+                            quantity = newQty,
+                            lotSize = lotSize,
+                            expiresAtMillis = maxOf(leg.expiresAtMillis, freshHorizon),
+                            updatedAtMillis = nowMillis
+                        )
+                    )
                 }
             }
 
@@ -887,7 +908,7 @@ class TradingRepository private constructor(
         result.getOrNull()?.let { msg ->
             notificationManager?.notifyTradeActivity("Position Averaged", msg)
         }
-        return result
+        result
     }
 
     suspend fun addCapital(amount: BigDecimal, note: String = "Capital top-up"): Result<String> {
@@ -1046,6 +1067,10 @@ class TradingRepository private constructor(
 
     suspend fun updateJournalNotes(entryId: String, notes: String) {
         tradeJournalDao.updateNotes(entryId, notes)
+    }
+
+    suspend fun updateJournalTags(entryId: String, tags: List<String>) {
+        tradeJournalDao.updateTags(entryId, com.example.data.local.encodeTagsCsv(tags))
     }
 
     suspend fun resetPaperAccount(

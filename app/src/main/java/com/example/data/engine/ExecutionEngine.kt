@@ -97,9 +97,16 @@ class ExecutionEngine private constructor(
     @Volatile
     private var started = false
 
+    suspend fun <T> withEngineLock(block: suspend () -> T): T = evaluationMutex.withLock { block() }
+
     fun start() {
         if (started) return
         started = true
+
+        // Self-heal any legacy open positions with orphaned OCO badges or expired protective legs
+        appScope.launch(Dispatchers.IO) {
+            healOrphanedRiskState(System.currentTimeMillis())
+        }
 
         // Tick-driven evaluation
         appScope.launch(Dispatchers.IO) {
@@ -113,6 +120,138 @@ class ExecutionEngine private constructor(
             while (isActive) {
                 delay(1000L)
                 evaluateTimeEvents(System.currentTimeMillis())
+            }
+        }
+    }
+
+    suspend fun healOrphanedRiskState(nowMillis: Long) {
+        evaluationMutex.withLock {
+            val freshHorizon = nowMillis + 30L * 86_400_000L
+            val openPositions = positionDao.getAllOnce()
+            for (pos in openPositions) {
+                database.withTransaction {
+                    val current = positionDao.getById(pos.id) ?: return@withTransaction
+                    val exitSide = if (current.side == OrderSide.BUY) OrderSide.SELL else OrderSide.BUY
+                    var slOrderId = current.slOrderId
+                    var targetOrderId = current.targetOrderId
+                    var changed = false
+
+                    if (current.activeSlPrice != null) {
+                        val existingSl = slOrderId?.let { orderDao.getById(it) }
+                        if (existingSl == null || existingSl.status != OrderStatus.PENDING) {
+                            val restoredId = java.util.UUID.randomUUID().toString()
+                            orderDao.upsert(
+                                OrderEntity(
+                                    id = restoredId,
+                                    symbol = current.symbol,
+                                    segment = current.segment,
+                                    instrumentType = current.instrumentType,
+                                    side = exitSide,
+                                    orderType = OrderType.SL_M,
+                                    productType = current.productType,
+                                    quantity = current.quantity,
+                                    limitPrice = null,
+                                    triggerPrice = current.activeSlPrice,
+                                    filledPrice = null,
+                                    status = OrderStatus.PENDING,
+                                    validityType = current.validityType,
+                                    gttDays = current.gttDays,
+                                    expiresAtMillis = maxOf(current.expiresAtMillis, freshHorizon),
+                                    validityState = ValidityState.ACTIVE,
+                                    ocoGroupId = current.ocoGroupId,
+                                    parentOrderId = null,
+                                    legRole = "SL",
+                                    attachedSlMode = null,
+                                    attachedSlValue = null,
+                                    attachedTargetMode = null,
+                                    attachedTargetValue = null,
+                                    attachedTslEnabled = current.isTslEnabled,
+                                    attachedTslMode = current.tslTrailMode,
+                                    attachedTslValue = current.tslTrailValue,
+                                    attachedTrailingTargetEnabled = false,
+                                    attachedTrailingTargetMode = null,
+                                    attachedTrailingTargetValue = null,
+                                    statusReason = if (current.isTslEnabled) "Trailing SL Armed" else "Protective SL",
+                                    createdAtMillis = nowMillis,
+                                    updatedAtMillis = nowMillis,
+                                    lotSize = current.lotSize
+                                )
+                            )
+                            slOrderId = restoredId
+                            changed = true
+                        } else if (existingSl.expiresAtMillis < nowMillis + 86_400_000L) {
+                            orderDao.upsert(existingSl.copy(expiresAtMillis = freshHorizon, updatedAtMillis = nowMillis))
+                        }
+                    }
+
+                    if (current.activeTargetPrice != null) {
+                        val existingTgt = targetOrderId?.let { orderDao.getById(it) }
+                        if (existingTgt == null || existingTgt.status != OrderStatus.PENDING) {
+                            val restoredId = java.util.UUID.randomUUID().toString()
+                            orderDao.upsert(
+                                OrderEntity(
+                                    id = restoredId,
+                                    symbol = current.symbol,
+                                    segment = current.segment,
+                                    instrumentType = current.instrumentType,
+                                    side = exitSide,
+                                    orderType = OrderType.TGT_M,
+                                    productType = current.productType,
+                                    quantity = current.quantity,
+                                    limitPrice = null,
+                                    triggerPrice = current.activeTargetPrice,
+                                    filledPrice = null,
+                                    status = OrderStatus.PENDING,
+                                    validityType = current.validityType,
+                                    gttDays = current.gttDays,
+                                    expiresAtMillis = maxOf(current.expiresAtMillis, freshHorizon),
+                                    validityState = ValidityState.ACTIVE,
+                                    ocoGroupId = current.ocoGroupId,
+                                    parentOrderId = null,
+                                    legRole = "TARGET",
+                                    attachedSlMode = null,
+                                    attachedSlValue = null,
+                                    attachedTargetMode = null,
+                                    attachedTargetValue = null,
+                                    attachedTslEnabled = false,
+                                    attachedTslMode = null,
+                                    attachedTslValue = null,
+                                    attachedTrailingTargetEnabled = current.isTrailingTargetEnabled,
+                                    attachedTrailingTargetMode = current.trailingTargetTrailMode,
+                                    attachedTrailingTargetValue = current.trailingTargetTrailValue,
+                                    statusReason = if (current.isTrailingTargetEnabled) "Trailing Target Armed" else "Target Order",
+                                    createdAtMillis = nowMillis,
+                                    updatedAtMillis = nowMillis,
+                                    lotSize = current.lotSize
+                                )
+                            )
+                            targetOrderId = restoredId
+                            changed = true
+                        } else if (existingTgt.expiresAtMillis < nowMillis + 86_400_000L) {
+                            orderDao.upsert(existingTgt.copy(expiresAtMillis = freshHorizon, updatedAtMillis = nowMillis))
+                        }
+                    }
+
+                    val validOcoGroupId = if (current.activeSlPrice != null && current.activeTargetPrice != null) {
+                        current.ocoGroupId
+                    } else {
+                        null
+                    }
+                    if (validOcoGroupId != current.ocoGroupId || current.expiresAtMillis < nowMillis + 86_400_000L) {
+                        changed = true
+                    }
+                    if (changed) {
+                        positionDao.upsert(
+                            current.copy(
+                                slOrderId = slOrderId,
+                                targetOrderId = targetOrderId,
+                                ocoGroupId = validOcoGroupId,
+                                expiresAtMillis = maxOf(current.expiresAtMillis, freshHorizon),
+                                updatedAtMillis = nowMillis
+                            )
+                        )
+                    }
+                }
             }
         }
     }
@@ -227,9 +366,14 @@ class ExecutionEngine private constructor(
                 }
             }
 
-            // Auto-cancel all untriggered DAY orders (preserving GTT/GTD for Carry Forward)
+            // Auto-cancel all untriggered DAY entry orders (preserving GTT/GTD and active protective legs of Carry Forward positions)
+            val remainingOpenPositions = positionDao.getAllOnce()
+            val activeProtectiveLegIds = remainingOpenPositions
+                .flatMap { listOfNotNull(it.slOrderId, it.targetOrderId) }
+                .toSet()
             val pendingOrders = orderDao.getByStatus(OrderStatus.PENDING)
             for (order in pendingOrders) {
+                if (order.id in activeProtectiveLegIds) continue
                 if (order.validityType == ValidityType.DAY || order.productType == ProductType.INTRADAY) {
                     orderDao.upsert(
                         order.copy(
@@ -338,19 +482,26 @@ class ExecutionEngine private constructor(
                 if (ltp < workingPos.tslBestPrice) ltp else workingPos.tslBestPrice
             }
             if (ratchetedSl != workingPos.activeSlPrice || newBest != workingPos.tslBestPrice) {
-                workingPos = workingPos.copy(
-                    activeSlPrice = ratchetedSl,
-                    tslBestPrice = newBest,
-                    updatedAtMillis = nowMillis
-                )
                 database.withTransaction {
+                    val fresh = positionDao.getById(workingPos.id) ?: return@withTransaction
+                    if (!fresh.isTslEnabled || fresh.activeSlPrice == null) return@withTransaction
+                    val safeRatchet = if (isLong) {
+                        maxOf(fresh.activeSlPrice, ratchetedSl)
+                    } else {
+                        minOf(fresh.activeSlPrice, ratchetedSl)
+                    }
+                    workingPos = fresh.copy(
+                        activeSlPrice = safeRatchet,
+                        tslBestPrice = newBest,
+                        updatedAtMillis = nowMillis
+                    )
                     positionDao.upsert(workingPos)
                     workingPos.slOrderId?.let { slId ->
                         orderDao.getById(slId)?.let { slOrder ->
                             orderDao.upsert(
                                 slOrder.copy(
-                                    triggerPrice = ratchetedSl,
-                                    statusReason = "TSL ratcheted @ ${RiskMath.formatPrice(ratchetedSl, instrument.segment)}",
+                                    triggerPrice = safeRatchet,
+                                    statusReason = "TSL ratcheted @ ${RiskMath.formatPrice(safeRatchet, instrument.segment)}",
                                     updatedAtMillis = nowMillis
                                 )
                             )
@@ -413,13 +564,15 @@ class ExecutionEngine private constructor(
                 update.peakPrice != workingPos.trailingTargetPeakPrice ||
                 update.exitTrigger != workingPos.trailingTargetExitTrigger
             ) {
-                workingPos = workingPos.copy(
-                    trailingTargetActivated = update.activated,
-                    trailingTargetPeakPrice = update.peakPrice,
-                    trailingTargetExitTrigger = update.exitTrigger,
-                    updatedAtMillis = nowMillis
-                )
                 database.withTransaction {
+                    val fresh = positionDao.getById(workingPos.id) ?: return@withTransaction
+                    if (!fresh.isTrailingTargetEnabled || fresh.activeTargetPrice == null) return@withTransaction
+                    workingPos = fresh.copy(
+                        trailingTargetActivated = update.activated,
+                        trailingTargetPeakPrice = update.peakPrice,
+                        trailingTargetExitTrigger = update.exitTrigger,
+                        updatedAtMillis = nowMillis
+                    )
                     positionDao.upsert(workingPos)
                     val triggerStr = update.exitTrigger?.let { RiskMath.formatPrice(it, instrument.segment) } ?: "--"
                     workingPos.targetOrderId?.let { tgtId ->

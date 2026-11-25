@@ -4,6 +4,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
+import com.example.data.ai.AiConnectionStatus
 import com.example.data.ai.AiMarketRepository
 import com.example.data.feed.live.FeedType
 import com.example.data.feed.live.SegmentBadgeMode
@@ -85,6 +86,7 @@ data class InstrumentDetailUiState(
     val symbolSignals: List<SignalUiItem> = emptyList(),
     val prefilledFromSignal: Boolean = false,
     val aiAuditState: AiUiState<AiSignalSecondOpinion> = AiUiState.Idle,
+    val aiConnectionStatus: AiConnectionStatus = AiConnectionStatus(),
     val orderFeedbackMessage: String? = null,
     val orderFeedbackIsError: Boolean = false
 )
@@ -122,6 +124,11 @@ class InstrumentDetailViewModel @Inject constructor(
         signalRepository.observeSignalsForSymbol(symbol)
     ) { statuses, suspended, msg, sigs -> Quadruple(statuses, suspended, msg, sigs) }
 
+    private val aiCombinedFlow = combine(
+        _aiAuditState,
+        aiMarketRepository.connectionStatus
+    ) { audit, status -> audit to status }
+
     val uiState: StateFlow<InstrumentDetailUiState> = combine(
         marketDataRepository.observeInstrument(symbol),
         tradingRepository.accountState,
@@ -129,7 +136,7 @@ class InstrumentDetailViewModel @Inject constructor(
         _draft,
         _isSubmitting,
         feedHealthFlow,
-        _aiAuditState,
+        aiCombinedFlow,
         _orderFeedback
     ) { values ->
         val inst = values[0] as Instrument?
@@ -140,7 +147,7 @@ class InstrumentDetailViewModel @Inject constructor(
         @Suppress("UNCHECKED_CAST")
         val health = values[5] as Quadruple<Map<MarketSegment, SegmentFeedStatus>, Boolean, String, List<SignalUiItem>>
         @Suppress("UNCHECKED_CAST")
-        val aiAudit = values[6] as AiUiState<AiSignalSecondOpinion>
+        val aiPair = values[6] as Pair<AiUiState<AiSignalSecondOpinion>, AiConnectionStatus>
         @Suppress("UNCHECKED_CAST")
         val feedback = values[7] as Pair<String, Boolean>?
 
@@ -195,7 +202,8 @@ class InstrumentDetailViewModel @Inject constructor(
             liveStatusMessage = statusMsg,
             symbolSignals = health.fourth,
             prefilledFromSignal = hasSignalPrefill,
-            aiAuditState = aiAudit,
+            aiAuditState = aiPair.first,
+            aiConnectionStatus = aiPair.second,
             orderFeedbackMessage = feedback?.first,
             orderFeedbackIsError = feedback?.second ?: false
         )
@@ -204,6 +212,10 @@ class InstrumentDetailViewModel @Inject constructor(
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = InstrumentDetailUiState()
     )
+
+    fun switchAiModel(modelName: String) {
+        aiMarketRepository.switchActiveModel(modelName)
+    }
 
     fun runAiSetupAudit() {
         val current = uiState.value

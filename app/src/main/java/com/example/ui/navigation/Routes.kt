@@ -42,3 +42,6 @@ data class ChartRoute(
 data class OptionChainRoute(
     val initialUnderlying: String = "NIFTY"
 )
+
+@Serializable
+data object NewsRoute

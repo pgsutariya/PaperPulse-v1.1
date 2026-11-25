@@ -17,6 +17,7 @@ import com.example.domain.signal.AiUiState
 import com.example.domain.signal.Candle
 import com.example.domain.signal.TradeSignal
 import com.google.firebase.Firebase
+import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
@@ -26,7 +27,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.MediaType.Companion.toMediaType
@@ -36,10 +42,38 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.math.BigDecimal
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
+enum class AiConnectionState {
+    IDLE,
+    CONNECTING,
+    CONNECTED,
+    ERROR
+}
+
+data class AiConnectionStatus(
+    val state: AiConnectionState = AiConnectionState.IDLE,
+    val provider: AiProvider = AiProvider.FIREBASE_AI_LOGIC,
+    val activeModel: String = AiProvider.FIREBASE_AI_LOGIC.defaultModel,
+    val availableModels: List<String> = AiProvider.FIREBASE_AI_LOGIC.availableModels,
+    val latencyMs: Long? = null,
+    val message: String = "Tap Test & Sync or enter API key to auto-connect",
+    val discoveredFromApi: Boolean = false
+)
+
 interface AiMarketRepository {
+    val activeConfig: StateFlow<AiProviderConfig>
+    val connectionStatus: StateFlow<AiConnectionStatus>
+
+    suspend fun autoConnectAndFetchModels(overrideConfig: AiProviderConfig? = null): AiConnectionStatus
+
+    fun switchActiveProvider(provider: AiProvider): AiProviderConfig
+
+    fun switchActiveModel(modelName: String): AiProviderConfig
+
     suspend fun analyzeTradeSignal(
         signal: TradeSignal,
         instrument: Instrument?,
@@ -55,6 +89,20 @@ interface AiMarketRepository {
         targetPrice: BigDecimal?,
         activeSignals: List<TradeSignal>,
         recentCandles: List<Candle>
+    ): Result<AiSignalSecondOpinion>
+
+    suspend fun analyzeChartStructure(
+        symbol: String,
+        timeframeLabel: String,
+        instrument: Instrument?,
+        recentCandles: List<Candle>,
+        structureSummary: String
+    ): Result<AiSignalSecondOpinion>
+
+    suspend fun auditOpenPositions(
+        account: AccountState,
+        positions: List<Position>,
+        instruments: List<Instrument>
     ): Result<AiSignalSecondOpinion>
 
     fun streamPortfolioCoach(
@@ -73,6 +121,24 @@ class FirebaseAiMarketRepository @Inject constructor(
     private val aiConfigStore: SecureAiConfigStore,
     private val okHttpClient: OkHttpClient
 ) : AiMarketRepository {
+
+    override val activeConfig: StateFlow<AiProviderConfig> = aiConfigStore.config
+
+    private val _connectionStatus = MutableStateFlow(
+        AiConnectionStatus(
+            state = AiConnectionState.IDLE,
+            provider = aiConfigStore.getCurrent().provider,
+            activeModel = aiConfigStore.getCurrent().effectiveModel,
+            availableModels = aiConfigStore.getCurrent().provider.availableModels
+        )
+    )
+    override val connectionStatus: StateFlow<AiConnectionStatus> = _connectionStatus.asStateFlow()
+
+    private val structuredModels = ConcurrentHashMap<String, GenerativeModel>()
+    private val coachModels = ConcurrentHashMap<String, GenerativeModel>()
+    private val pingModels = ConcurrentHashMap<String, GenerativeModel>()
+    private val discoveredModelCache = ConcurrentHashMap<AiProvider, List<String>>()
+    private val connectMutex = Mutex()
 
     private val systemPrompt = """
         You are PaperPulse Quant Analyst, an objective quantitative trading & risk-control copilot for a paper-trading simulator covering Indian markets (NSE, BSE, MCX) and Crypto.
@@ -124,26 +190,300 @@ class FirebaseAiMarketRepository @Inject constructor(
         )
     )
 
-    private val structuredModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = MODEL_NAME,
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = secondOpinionSchema
-                temperature = 0.25f
-            },
-            systemInstruction = content { text(systemPrompt) }
-        )
+    private fun resolveFirebaseModelName(requested: String): String {
+        val clean = requested.trim()
+        return when {
+            clean.isBlank() || clean.startsWith("gemini-2.") || clean.startsWith("gemini-1.") -> MODEL_NAME
+            else -> clean
+        }
     }
 
-    private val coachModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = MODEL_NAME,
-            generationConfig = generationConfig {
-                temperature = 0.4f
-            },
-            systemInstruction = content { text(systemPrompt) }
+    private fun getStructuredModel(modelName: String): GenerativeModel {
+        val resolved = resolveFirebaseModelName(modelName)
+        return structuredModels.getOrPut(resolved) {
+            Firebase.ai.generativeModel(
+                modelName = resolved,
+                generationConfig = generationConfig {
+                    responseMimeType = "application/json"
+                    responseSchema = secondOpinionSchema
+                    temperature = 0.25f
+                },
+                systemInstruction = content { text(systemPrompt) }
+            )
+        }
+    }
+
+    private fun getCoachModel(modelName: String): GenerativeModel {
+        val resolved = resolveFirebaseModelName(modelName)
+        return coachModels.getOrPut(resolved) {
+            Firebase.ai.generativeModel(
+                modelName = resolved,
+                generationConfig = generationConfig {
+                    temperature = 0.4f
+                },
+                systemInstruction = content { text(systemPrompt) }
+            )
+        }
+    }
+
+    private fun getPingModel(modelName: String): GenerativeModel {
+        val resolved = resolveFirebaseModelName(modelName)
+        return pingModels.getOrPut(resolved) {
+            Firebase.ai.generativeModel(
+                modelName = resolved,
+                generationConfig = generationConfig {
+                    temperature = 0.0f
+                }
+            )
+        }
+    }
+
+    override fun switchActiveProvider(provider: AiProvider): AiProviderConfig {
+        val next = aiConfigStore.switchProvider(provider)
+        val cached = discoveredModelCache[provider] ?: provider.availableModels
+        _connectionStatus.value = AiConnectionStatus(
+            state = AiConnectionState.IDLE,
+            provider = next.provider,
+            activeModel = next.effectiveModel,
+            availableModels = mergeModels(cached, next.effectiveModel, provider.availableModels),
+            message = "Switched AI Agent to ${provider.label}"
         )
+        return next
+    }
+
+    override fun switchActiveModel(modelName: String): AiProviderConfig {
+        val next = aiConfigStore.updateActiveModel(modelName)
+        val prev = _connectionStatus.value
+        _connectionStatus.value = prev.copy(
+            provider = next.provider,
+            activeModel = next.effectiveModel,
+            availableModels = mergeModels(prev.availableModels, next.effectiveModel, next.provider.availableModels)
+        )
+        return next
+    }
+
+    override suspend fun autoConnectAndFetchModels(overrideConfig: AiProviderConfig?): AiConnectionStatus =
+        connectMutex.withLock {
+            val cfg = overrideConfig ?: aiConfigStore.getCurrent()
+            val provider = cfg.provider
+            val fallbackModels = mergeModels(
+                discoveredModelCache[provider].orEmpty(),
+                cfg.effectiveModel,
+                provider.availableModels
+            )
+
+            // If we're already connected to the exact same provider & model on a non-forced background check, reuse status
+            val existing = _connectionStatus.value
+            if (overrideConfig == null &&
+                existing.state == AiConnectionState.CONNECTED &&
+                existing.provider == provider &&
+                existing.activeModel == cfg.effectiveModel
+            ) {
+                return@withLock existing
+            }
+
+            _connectionStatus.value = AiConnectionStatus(
+                state = AiConnectionState.CONNECTING,
+                provider = provider,
+                activeModel = cfg.effectiveModel,
+                availableModels = fallbackModels,
+                message = "Connecting to ${provider.shortLabel} API..."
+            )
+
+            val startMs = System.currentTimeMillis()
+            val result: AiConnectionStatus = try {
+                if (provider == AiProvider.FIREBASE_AI_LOGIC) {
+                    if (!ensureFirebaseInitialized(context)) {
+                        AiConnectionStatus(
+                            state = AiConnectionState.ERROR,
+                            provider = provider,
+                            activeModel = cfg.effectiveModel,
+                            availableModels = fallbackModels,
+                            message = FIREBASE_NOT_INITIALIZED_MSG
+                        )
+                    } else {
+                        val pingReply = withTimeout(55_000L) {
+                            getPingModel(cfg.effectiveModel).generateContent("Reply with OK").text
+                        }
+                        val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                        AiConnectionStatus(
+                            state = AiConnectionState.CONNECTED,
+                            provider = provider,
+                            activeModel = cfg.effectiveModel,
+                            availableModels = provider.availableModels,
+                            latencyMs = elapsed,
+                            message = "Connected to Firebase AI Logic (${cfg.effectiveModel}) • ${elapsed}ms" +
+                                if (pingReply.isNullOrBlank()) "" else " • Ready",
+                            discoveredFromApi = true
+                        )
+                    }
+                } else {
+                    val key = cfg.apiKey.trim()
+                    if (key.isBlank()) {
+                        AiConnectionStatus(
+                            state = AiConnectionState.IDLE,
+                            provider = provider,
+                            activeModel = cfg.effectiveModel,
+                            availableModels = fallbackModels,
+                            message = "Enter your ${provider.shortLabel} API key to auto-connect & load live models"
+                        )
+                    } else {
+                        val fetched = withTimeout(30_000L) { fetchModelsFromApi(cfg) }
+                        val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                        val merged = mergeModels(fetched, cfg.effectiveModel, provider.availableModels)
+                        discoveredModelCache[provider] = merged
+                        val resolvedActive = if (cfg.modelName.isBlank() && fetched.isNotEmpty()) {
+                            fetched.first()
+                        } else {
+                            cfg.effectiveModel
+                        }
+                        AiConnectionStatus(
+                            state = AiConnectionState.CONNECTED,
+                            provider = provider,
+                            activeModel = resolvedActive,
+                            availableModels = merged,
+                            latencyMs = elapsed,
+                            message = "Connected to ${provider.shortLabel} • ${fetched.size} live model(s) synced in ${elapsed}ms",
+                            discoveredFromApi = fetched.isNotEmpty()
+                        )
+                    }
+                }
+            } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "AI auto-connect timed out for ${provider.name}", e)
+                AiConnectionStatus(
+                    state = AiConnectionState.ERROR,
+                    provider = provider,
+                    activeModel = cfg.effectiveModel,
+                    availableModels = fallbackModels,
+                    message = "${provider.shortLabel} timed out waiting for response. Tap Test & Sync to retry or switch AI provider."
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "AI auto-connect failed for ${provider.name}", e)
+                AiConnectionStatus(
+                    state = AiConnectionState.ERROR,
+                    provider = provider,
+                    activeModel = cfg.effectiveModel,
+                    availableModels = fallbackModels,
+                    message = if (provider == AiProvider.FIREBASE_AI_LOGIC) friendlyAiError(e)
+                    else (e.message ?: "${provider.shortLabel} connection failed.")
+                )
+            }
+
+            _connectionStatus.value = result
+            result
+        }
+
+    private suspend fun fetchModelsFromApi(cfg: AiProviderConfig): List<String> = withContext(Dispatchers.IO) {
+        val key = cfg.apiKey.trim()
+        val baseUrl = cfg.effectiveBaseUrl
+        if (!baseUrl.startsWith("https://")) {
+            throw IllegalStateException("AI Provider base URL must use HTTPS.")
+        }
+
+        val request: Request = when (cfg.provider) {
+            AiProvider.GEMINI_API -> {
+                Request.Builder()
+                    .url("$baseUrl/models")
+                    .header("x-goog-api-key", key)
+                    .get()
+                    .build()
+            }
+            AiProvider.CLAUDE_API -> {
+                Request.Builder()
+                    .url("$baseUrl/models")
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01")
+                    .get()
+                    .build()
+            }
+            AiProvider.DEEPSEEK_API, AiProvider.OPENAI_COMPATIBLE -> {
+                val rootUrl = baseUrl.removeSuffix("/chat/completions")
+                Request.Builder()
+                    .url("$rootUrl/models")
+                    .header("Authorization", "Bearer $key")
+                    .get()
+                    .build()
+            }
+            AiProvider.FIREBASE_AI_LOGIC -> throw IllegalStateException("Invalid provider")
+        }
+
+        val callClient = okHttpClient.newBuilder()
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .build()
+
+        callClient.newCall(request).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                val errMsg = runCatching {
+                    val root = JSONObject(raw)
+                    root.optJSONObject("error")?.optString("message")
+                        ?: root.optString("message")
+                        ?: raw.take(180)
+                }.getOrDefault(raw.take(180))
+                throw IllegalStateException("${cfg.provider.shortLabel} HTTP ${resp.code}: ${errMsg.ifBlank { resp.message }}")
+            }
+
+            val root = JSONObject(raw)
+            when (cfg.provider) {
+                AiProvider.GEMINI_API -> {
+                    val arr = root.optJSONArray("models") ?: JSONArray()
+                    val list = mutableListOf<String>()
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val methods = obj.optJSONArray("supportedGenerationMethods")
+                        var supportsGen = methods == null
+                        if (methods != null) {
+                            for (m in 0 until methods.length()) {
+                                if (methods.optString(m) == "generateContent") {
+                                    supportsGen = true
+                                    break
+                                }
+                            }
+                        }
+                        val name = obj.optString("name").removePrefix("models/").trim()
+                        if (supportsGen && name.startsWith("gemini", ignoreCase = true) && !name.contains("embedding", ignoreCase = true)) {
+                            list.add(name)
+                        }
+                    }
+                    list.distinct().sortedWith(
+                        compareByDescending<String> { it.contains("3.") || it.contains("4") }
+                            .thenByDescending { it.contains("2.5") }
+                            .thenBy { it }
+                    ).take(20)
+                }
+                AiProvider.CLAUDE_API -> {
+                    val arr = root.optJSONArray("data") ?: JSONArray()
+                    (0 until arr.length())
+                        .mapNotNull { arr.optJSONObject(it)?.optString("id")?.trim()?.takeIf(String::isNotBlank) }
+                        .distinct()
+                        .take(20)
+                }
+                AiProvider.DEEPSEEK_API, AiProvider.OPENAI_COMPATIBLE -> {
+                    val arr = root.optJSONArray("data") ?: JSONArray()
+                    val allIds = (0 until arr.length())
+                        .mapNotNull { arr.optJSONObject(it)?.optString("id")?.trim()?.takeIf(String::isNotBlank) }
+                        .distinct()
+                    val chatFiltered = allIds.filterNot { id ->
+                        val low = id.lowercase()
+                        low.contains("embedding") || low.contains("whisper") || low.contains("tts") ||
+                            low.contains("dall-e") || low.contains("moderation") || low.contains("transcribe")
+                    }
+                    (chatFiltered.ifEmpty { allIds }).sorted().take(25)
+                }
+                AiProvider.FIREBASE_AI_LOGIC -> cfg.provider.availableModels
+            }
+        }
+    }
+
+    private fun mergeModels(primary: List<String>, active: String, defaults: List<String>): List<String> {
+        val out = LinkedHashSet<String>()
+        if (active.isNotBlank()) out.add(active)
+        primary.forEach { if (it.isNotBlank()) out.add(it) }
+        defaults.forEach { if (it.isNotBlank()) out.add(it) }
+        return out.toList()
     }
 
     override suspend fun analyzeTradeSignal(
@@ -186,6 +526,61 @@ class FirebaseAiMarketRepository @Inject constructor(
         )
     }
 
+    override suspend fun analyzeChartStructure(
+        symbol: String,
+        timeframeLabel: String,
+        instrument: Instrument?,
+        recentCandles: List<Candle>,
+        structureSummary: String
+    ): Result<AiSignalSecondOpinion> {
+        val candleLines = recentCandles.takeLast(14).joinToString("\n") { c ->
+            "O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f".format(c.open, c.high, c.low, c.close, c.volume)
+        }.ifBlank { "Candles warming up." }
+
+        val prompt = buildString {
+            appendLine("Analyze this live TradingView chart technical structure for paper trading:")
+            appendLine("Symbol: $symbol | Timeframe: $timeframeLabel | IST: ${MarketClock.formatCurrentIstClock()}")
+            if (instrument != null) {
+                appendLine("Segment: ${instrument.segment.label} | LTP: ${RiskMath.formatPrice(instrument.ltp, instrument.segment)} | Day Range: ${instrument.dayLow} - ${instrument.dayHigh} (${instrument.changePercent}%)")
+            }
+            appendLine("Detected Indicators & Structure:\n$structureSummary")
+            appendLine("Recent OHLCV Candles:\n$candleLines")
+            appendLine("Provide directional bias, key invalidation price, optimal SL/Target placement guidance, and a 3-point execution checklist.")
+        }
+        return runStructuredAnalysis(
+            prompt = prompt,
+            referenceId = "chart_${symbol}_$timeframeLabel",
+            symbol = symbol
+        )
+    }
+
+    override suspend fun auditOpenPositions(
+        account: AccountState,
+        positions: List<Position>,
+        instruments: List<Instrument>
+    ): Result<AiSignalSecondOpinion> {
+        val ltpMap = instruments.associate { it.symbol to it.ltp }
+        val posLines = positions.joinToString("\n") { p ->
+            val ltp = ltpMap[p.symbol] ?: p.averageEntryPrice
+            val pnl = RiskMath.calculateUnrealisedPnl(p.averageEntryPrice, ltp, p.quantity, p.side == OrderSide.BUY)
+            "- ${p.symbol} (${p.segment.label}) ${p.side.name} Qty=${p.quantity} [${p.productType.shortCode}] Avg=${RiskMath.formatPrice(p.averageEntryPrice, p.segment)} LTP=${RiskMath.formatPrice(ltp, p.segment)} PnL=${RiskMath.formatSignedCurrency(pnl, p.segment)} SL=${p.activeSlPrice?.let { RiskMath.formatPrice(it, p.segment) } ?: "MISSING"} Target=${p.activeTargetPrice?.let { RiskMath.formatPrice(it, p.segment) } ?: "MISSING"} TSL=${p.isTslEnabled}"
+        }.ifBlank { "No open positions." }
+
+        val prompt = buildString {
+            appendLine("Audit all currently open paper-trading positions for risk exposure & missing SL/Target:")
+            appendLine("IST Clock: ${MarketClock.formatCurrentIstClock()}")
+            appendLine("India Wallet: Capital=${RiskMath.formatPortfolioInr(account.virtualCapital)}, Free=${RiskMath.formatPortfolioInr(account.availableMargin)}, Realised=${RiskMath.formatPortfolioInr(account.realisedPnl, signed = true)}")
+            appendLine("Crypto Wallet: Capital=${RiskMath.formatPortfolioUsd(account.cryptoVirtualCapital)}, Free=${RiskMath.formatPortfolioUsd(account.cryptoAvailableMargin)}, Realised=${RiskMath.formatPortfolioUsd(account.cryptoRealisedPnl, signed = true)}")
+            appendLine("Open Positions:\n$posLines")
+            appendLine("Highlight any unprotected positions missing SL or Target, suggest concrete SL/Target/TSL protection, and warn about upcoming intraday square-off.")
+        }
+        return runStructuredAnalysis(
+            prompt = prompt,
+            referenceId = "positions_audit_${positions.size}",
+            symbol = "PORTFOLIO"
+        )
+    }
+
     override fun streamPortfolioCoach(
         question: String,
         account: AccountState,
@@ -207,9 +602,11 @@ class FirebaseAiMarketRepository @Inject constructor(
 
         if (cfg.provider != AiProvider.FIREBASE_AI_LOGIC) {
             try {
+                val startMs = System.currentTimeMillis()
                 val text = withTimeout(TIMEOUT_MS) {
                     callExternalProvider(cfg, prompt, expectJson = false)
                 }
+                markConnected(cfg, System.currentTimeMillis() - startMs)
                 emit(AiUiState.Success(text))
             } catch (e: TimeoutCancellationException) {
                 emit(AiUiState.Error("${cfg.provider.shortLabel} request timed out after 60s."))
@@ -226,9 +623,10 @@ class FirebaseAiMarketRepository @Inject constructor(
             return@flow
         }
         val acc = StringBuilder()
+        val startMs = System.currentTimeMillis()
         try {
             withTimeout(TIMEOUT_MS) {
-                coachModel.generateContentStream(prompt).collect { chunk ->
+                getCoachModel(cfg.effectiveModel).generateContentStream(prompt).collect { chunk ->
                     val piece = chunk.text.orEmpty()
                     if (piece.isNotEmpty()) {
                         acc.append(piece)
@@ -237,6 +635,7 @@ class FirebaseAiMarketRepository @Inject constructor(
                 }
             }
             if (acc.isNotBlank()) {
+                markConnected(cfg, System.currentTimeMillis() - startMs)
                 emit(AiUiState.Success(acc.toString()))
             } else {
                 emit(AiUiState.Error("Gemini returned an empty response."))
@@ -258,6 +657,7 @@ class FirebaseAiMarketRepository @Inject constructor(
         symbol: String
     ): Result<AiSignalSecondOpinion> {
         val cfg = aiConfigStore.getCurrent()
+        val startMs = System.currentTimeMillis()
         if (cfg.provider != AiProvider.FIREBASE_AI_LOGIC) {
             return try {
                 val rawText = withTimeout(TIMEOUT_MS) {
@@ -268,6 +668,7 @@ class FirebaseAiMarketRepository @Inject constructor(
                     referenceId = referenceId,
                     symbol = symbol
                 )
+                markConnected(cfg, System.currentTimeMillis() - startMs)
                 Result.success(parsed)
             } catch (e: TimeoutCancellationException) {
                 Result.failure(IllegalStateException("${cfg.provider.shortLabel} analysis timed out after 60s."))
@@ -284,7 +685,7 @@ class FirebaseAiMarketRepository @Inject constructor(
         }
         return try {
             val response = withTimeout(TIMEOUT_MS) {
-                structuredModel.generateContent(prompt)
+                getStructuredModel(cfg.effectiveModel).generateContent(prompt)
             }
             val rawJson = response.text
                 ?: return Result.failure(IllegalStateException("Gemini returned an empty response."))
@@ -293,6 +694,7 @@ class FirebaseAiMarketRepository @Inject constructor(
                 referenceId = referenceId,
                 symbol = symbol
             )
+            markConnected(cfg, System.currentTimeMillis() - startMs)
             Result.success(parsed)
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Signal analysis timed out", e)
@@ -303,6 +705,22 @@ class FirebaseAiMarketRepository @Inject constructor(
             Log.e(TAG, "Firebase AI analysis failed", e)
             Result.failure(IllegalStateException(friendlyAiError(e)))
         }
+    }
+
+    private fun markConnected(cfg: AiProviderConfig, latencyMs: Long) {
+        val prev = _connectionStatus.value
+        _connectionStatus.value = prev.copy(
+            state = AiConnectionState.CONNECTED,
+            provider = cfg.provider,
+            activeModel = cfg.effectiveModel,
+            availableModels = mergeModels(
+                discoveredModelCache[cfg.provider] ?: prev.availableModels,
+                cfg.effectiveModel,
+                cfg.provider.availableModels
+            ),
+            latencyMs = latencyMs.coerceAtLeast(1L),
+            message = "Connected to ${cfg.provider.shortLabel} (${cfg.effectiveModel}) • ${latencyMs.coerceAtLeast(1L)}ms"
+        )
     }
 
     private suspend fun callExternalProvider(
@@ -360,11 +778,16 @@ class FirebaseAiMarketRepository @Inject constructor(
                 val messages = JSONArray()
                     .put(JSONObject().put("role", "system").put("content", systemPrompt))
                     .put(JSONObject().put("role", "user").put("content", prompt))
+                val isReasoningModel = model.contains("reasoner", ignoreCase = true) ||
+                    model.startsWith("o1", ignoreCase = true) ||
+                    model.startsWith("o3", ignoreCase = true)
                 val body = JSONObject().apply {
                     put("model", model)
-                    put("temperature", if (expectJson) 0.25 else 0.4)
+                    if (!isReasoningModel) {
+                        put("temperature", if (expectJson) 0.25 else 0.4)
+                    }
                     put("messages", messages)
-                    if (expectJson) {
+                    if (expectJson && !isReasoningModel) {
                         put("response_format", JSONObject().put("type", "json_object"))
                     }
                 }
@@ -378,7 +801,7 @@ class FirebaseAiMarketRepository @Inject constructor(
         }
 
         val callClient = okHttpClient.newBuilder()
-            .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(45, TimeUnit.SECONDS)
             .build()
 
         callClient.newCall(request).execute().use { resp ->
@@ -419,11 +842,12 @@ class FirebaseAiMarketRepository @Inject constructor(
         val raw = e.localizedMessage.orEmpty()
         return if (raw.contains("App check", ignoreCase = true) ||
             raw.contains("AppCheck", ignoreCase = true) ||
-            raw.contains("token is invalid", ignoreCase = true)
+            raw.contains("token is invalid", ignoreCase = true) ||
+            raw.contains("403", ignoreCase = true)
         ) {
-            "Firebase App Check token is invalid on this APK build. Open Settings → AI Provider Configuration to select Google Gemini API, Claude, DeepSeek, or OpenAI with your own API key."
+            "Firebase App Check attestation rejected on this build. Tap Configure AI API below to auto-connect Google Gemini API, Claude, DeepSeek, or OpenAI with your key."
         } else {
-            raw.ifBlank { "AI request failed. Check Settings → AI Provider Configuration." }
+            raw.ifBlank { "AI request failed. Open AI Provider Settings to test or switch models." }
         }
     }
 
@@ -531,10 +955,10 @@ class FirebaseAiMarketRepository @Inject constructor(
 
     companion object {
         private const val TAG = "FirebaseAiMarketRepo"
-        const val MODEL_NAME = "gemini-2.5-flash"
+        const val MODEL_NAME = "gemini-3.8-flash"
         private const val TIMEOUT_MS = 60_000L
         private const val FIREBASE_NOT_INITIALIZED_MSG =
-            "Firebase is not configured in this APK build. Open Settings → AI Provider Configuration to use Gemini API, Claude, DeepSeek, or OpenAI directly."
+            "Firebase is not configured in this APK build. Tap Configure AI API to auto-connect Gemini API, Claude, DeepSeek, or OpenAI."
 
         internal fun parseSecondOpinionJson(
             rawJson: String,
