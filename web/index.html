@@ -93,6 +93,7 @@
       <button class="nav-tab" data-tab="positions" role="tab">Positions <span class="tab-pill" id="positionsBadge">0</span></button>
       <button class="nav-tab" data-tab="orders" role="tab">Orders <span class="tab-pill" id="ordersBadge">0</span></button>
       <button class="nav-tab" data-tab="journal" role="tab">Journal &amp; Ledger</button>
+      <button class="nav-tab" data-tab="strategy" role="tab">Strategy</button>
     </nav>
 
     <!-- Main Workspace -->
@@ -352,6 +353,236 @@
               <tbody id="capitalLedgerBody"></tbody>
             </table>
           </div>
+        </div>
+      </section>
+      <!-- STRATEGY WORKBENCH VIEW -->
+      <section class="tab-panel" id="panel-strategy">
+        <div class="signals-header-row">
+          <div class="subtab-bar" id="strategySubTabs">
+            <button class="subtab-btn active" data-ssub="scanner">Setup Scanner <span class="tab-pill" id="scannerCount">0</span></button>
+            <button class="subtab-btn" data-ssub="simulator">Outcome Simulator</button>
+            <button class="subtab-btn" data-ssub="taxlots">Tax Lots</button>
+            <button class="subtab-btn" data-ssub="rebalance">Rebalancer</button>
+            <button class="subtab-btn" data-ssub="screener">Screener <span class="tab-pill" id="screenerCount">0</span></button>
+          </div>
+        </div>
+
+        <!-- ============================ SETUP SCANNER ============================ -->
+        <div id="strategyScannerPane">
+          <div class="panel-toolbar">
+            <div class="segment-pills" id="scannerSegFilter">
+              <button class="pill active" data-sseg="ALL">All</button>
+              <button class="pill" data-sseg="NSE">NSE</button>
+              <button class="pill" data-sseg="BSE">BSE</button>
+              <button class="pill" data-sseg="MCX">MCX</button>
+              <button class="pill" data-sseg="CRYPTO">Crypto</button>
+            </div>
+            <div class="strategy-fields">
+              <label>Opening range (bars)<input type="number" id="scannerOrBars" min="1" max="30" step="1" value="3" /></label>
+              <label>Min volume &times;<input type="number" id="scannerVolX" min="0" max="10" step="0.1" value="1.5" /></label>
+              <label class="toggle-chip"><input type="checkbox" id="scannerOnlySetups" checked /> Only rows with a setup</label>
+              <button class="btn btn-primary btn-sm" id="scannerRunBtn">&#8635; Rescan</button>
+            </div>
+          </div>
+          <div class="strategy-hint" id="scannerHint"></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th class="num">LTP</th>
+                  <th class="num">RSI 14</th>
+                  <th class="num">vs 20D High</th>
+                  <th class="num">vs MA20</th>
+                  <th>Daily setups</th>
+                  <th>Opening-range breakout</th>
+                  <th class="num">Trade</th>
+                </tr>
+              </thead>
+              <tbody id="scannerBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ========================= OUTCOME SIMULATOR ========================= -->
+        <div id="strategySimulatorPane" style="display:none;">
+          <div class="strategy-card">
+            <div class="strategy-card-head">
+              <h3>Replay this trade against past sessions</h3>
+              <p>Monte Carlo resamples each bar slot from the session pool; the history replay runs the
+                opening-range rule over every session as it actually happened. When one simulated bar spans
+                both the stop and the target the <strong>stop</strong> is taken &mdash; without tick data the
+                order is unknowable, and assuming the win would inflate every win rate.</p>
+            </div>
+            <div class="strategy-grid">
+              <label>Symbol<select id="simSymbol"></select></label>
+              <label>Direction<select id="simDirection"><option value="long">Long</option><option value="short">Short</option></select></label>
+              <label>Entry<input type="number" id="simEntry" step="0.05" /></label>
+              <label>Stop<input type="number" id="simStop" step="0.05" /></label>
+              <label>Target<input type="number" id="simTarget" step="0.05" /></label>
+              <label>Bars per session<input type="number" id="simSessionBars" min="10" max="400" step="1" value="75" /></label>
+              <label>Opening range (bars)<input type="number" id="simOrBars" min="1" max="60" step="1" value="3" /></label>
+              <label>Entered on bar<input type="number" id="simFromBar" min="1" step="1" value="6" /></label>
+              <label>Replays<input type="number" id="simReplays" min="100" max="100000" step="100" value="10000" /></label>
+              <label>Seed<input type="number" id="simSeed" step="1" value="19" /></label>
+              <label>Stop rule (replay)<select id="simStopRule">
+                <option value="or_low">Opening-range low</option>
+                <option value="or_mid">Opening-range mid</option>
+                <option value="pct">Percent of entry</option>
+                <option value="price">Fixed price</option>
+              </select></label>
+              <label>Stop rule value<input type="number" id="simStopRuleValue" step="0.05" value="1" /></label>
+            </div>
+            <div class="strategy-actions">
+              <button class="btn btn-primary btn-sm" id="simRunBtn">Run simulation</button>
+              <button class="btn btn-ghost btn-sm" id="simFromLtpBtn">Fill from LTP &amp; ATR</button>
+              <button class="btn btn-ghost btn-sm" id="simRegenBtn">Regenerate session history</button>
+              <span class="strategy-hint" id="simSourceNote"></span>
+            </div>
+          </div>
+          <div id="simResults"></div>
+        </div>
+
+        <!-- ============================== TAX LOTS ============================== -->
+        <div id="strategyTaxLotsPane" style="display:none;">
+          <div class="strategy-card">
+            <div class="strategy-card-head">
+              <h3>Lot book</h3>
+              <p>Indian listed equity: a holding turns long-term only after <strong>more than 12 months</strong>,
+                so a sale on the anniversary itself is still short-term. There is no wash-sale rule to model.
+                FIFO is what the depositories actually apply &mdash; highest-cost and specific-lot are planning
+                views for &ldquo;what would this sale cost me?&rdquo;, not filing methods.</p>
+            </div>
+            <div class="strategy-actions">
+              <label>Symbol<select id="lotSymbol"></select></label>
+              <button class="btn btn-ghost btn-sm" id="lotImportBtn">Import open delivery positions</button>
+              <button class="btn btn-ghost btn-sm" id="lotClearBtn">Clear this symbol</button>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Lot</th>
+                    <th>Acquired</th>
+                    <th class="num">Shares</th>
+                    <th class="num">Cost / share</th>
+                    <th class="num">Cost</th>
+                    <th class="num">Market value</th>
+                    <th class="num">Unrealised</th>
+                    <th>Term today</th>
+                    <th class="num"></th>
+                  </tr>
+                </thead>
+                <tbody id="lotBody"></tbody>
+              </table>
+            </div>
+            <div class="strategy-grid strategy-grid-add">
+              <label>Acquired<input type="date" id="lotAddDate" /></label>
+              <label>Shares<input type="number" id="lotAddShares" min="1" step="1" value="100" /></label>
+              <label>Cost / share<input type="number" id="lotAddCost" min="0" step="0.05" /></label>
+              <button class="btn btn-primary btn-sm" id="lotAddBtn">+ Add lot</button>
+            </div>
+          </div>
+
+          <div class="strategy-card">
+            <div class="strategy-card-head"><h3>What would this sale realise?</h3></div>
+            <div class="strategy-grid">
+              <label>Shares to sell<input type="number" id="saleShares" min="1" step="1" value="50" /></label>
+              <label>Price<input type="number" id="salePrice" min="0" step="0.05" /></label>
+              <label>Sale date<input type="date" id="saleDate" /></label>
+              <label>Method<select id="saleMethod">
+                <option value="FIFO">FIFO (what the depository does)</option>
+                <option value="HIGHEST_COST">Highest cost first (planning)</option>
+                <option value="SPECIFIC">Specific lots (planning)</option>
+              </select></label>
+              <label id="saleLotIdsWrap" style="display:none;">Lot ids, in order<input type="text" id="saleLotIds" placeholder="L2, L1" /></label>
+              <label>Harvest threshold (loss &ge;)<input type="number" id="harvestMinLoss" min="0" step="100" value="1000" /></label>
+            </div>
+            <div class="strategy-actions">
+              <button class="btn btn-primary btn-sm" id="saleRunBtn">Simulate sale</button>
+            </div>
+            <div id="saleResults"></div>
+          </div>
+
+          <div class="strategy-card">
+            <div class="strategy-card-head">
+              <h3>Loss-harvest candidates</h3>
+              <p>Lots across every symbol sitting on a loss of at least the threshold above, worst first.</p>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th><th>Lot</th><th>Acquired</th>
+                    <th class="num">Shares</th><th class="num">Cost</th>
+                    <th class="num">Market value</th><th class="num">Unrealised loss</th><th>Term</th>
+                  </tr>
+                </thead>
+                <tbody id="harvestBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- ============================= REBALANCER ============================= -->
+        <div id="strategyRebalancePane" style="display:none;">
+          <div class="strategy-card">
+            <div class="strategy-card-head">
+              <h3>Pull the outliers back to target</h3>
+              <p>Only holdings outside the drift band are traded: churning the ones already on target costs
+                brokerage and STT for no change in exposure. Sells are planned before buys so the cash they
+                release funds the buys in the same pass, and quantities are whole shares.</p>
+            </div>
+            <div class="strategy-grid">
+              <label>Cash available<input type="number" id="rebCash" min="0" step="100" /></label>
+              <label>Drift band (points)<input type="number" id="rebBand" min="0" max="50" step="0.5" value="5" /></label>
+              <label class="toggle-chip"><input type="checkbox" id="rebSellUntracked" /> Sell holdings with no target</label>
+            </div>
+            <div class="strategy-actions">
+              <button class="btn btn-ghost btn-sm" id="rebEqualBtn">Equal-weight what I hold</button>
+              <button class="btn btn-ghost btn-sm" id="rebAddRowBtn">+ Add a target</button>
+              <button class="btn btn-primary btn-sm" id="rebRunBtn">Build plan</button>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>Symbol</th><th class="num">Target weight</th><th class="num"></th></tr></thead>
+                <tbody id="rebTargetBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div id="rebResults"></div>
+        </div>
+
+        <!-- ============================== SCREENER ============================== -->
+        <div id="strategyScreenerPane" style="display:none;">
+          <div class="strategy-card">
+            <div class="strategy-card-head">
+              <h3>Screen against your own rules</h3>
+              <p>Every row says which rule it passed or failed and by how much &mdash; a screen that returns
+                only a list of symbols cannot be argued with. Metrics are computed from this app&rsquo;s own
+                price data, so they are technical, not fundamental.</p>
+            </div>
+            <div class="strategy-grid">
+              <label>Missing metric<select id="screenMissing">
+                <option value="FAIL">counts as a failure</option>
+                <option value="SKIP">is skipped</option>
+              </select></label>
+              <label>Rank by<select id="screenRankBy"></select></label>
+              <label class="toggle-chip"><input type="checkbox" id="screenOnlyPassing" /> Only passing rows</label>
+            </div>
+            <div class="strategy-actions">
+              <button class="btn btn-ghost btn-sm" id="screenAddRuleBtn">+ Add a rule</button>
+              <button class="btn btn-ghost btn-sm" id="screenResetBtn">Reset to defaults</button>
+              <button class="btn btn-primary btn-sm" id="screenRunBtn">Run screen</button>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>Metric</th><th>Test</th><th>Value</th><th class="num"></th></tr></thead>
+                <tbody id="screenRuleBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div id="screenResults"></div>
         </div>
       </section>
     </main>

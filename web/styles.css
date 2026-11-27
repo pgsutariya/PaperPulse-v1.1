@@ -535,6 +535,7 @@ body {
 
 .text-pos { color: var(--buy-text); }
 .text-neg { color: var(--sell-text); }
+.text-muted { color: var(--text-muted); }
 .text-warn { color: var(--warn-text); }
 
 .status-badge {
@@ -1128,4 +1129,253 @@ body {
   color: var(--warn-text);
   background: var(--warn-soft);
   border-left-color: var(--warn);
+}
+
+/* =========================================================================
+   STRATEGY WORKBENCH (setup scanner, outcome simulator, tax lots,
+   rebalancer, screener). Colours come from the theme tokens only, so both
+   schemes follow the toggle without a second set of rules.
+   ========================================================================= */
+.strategy-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.strategy-card-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.strategy-card-head p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-width: 78ch;
+}
+
+.strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px 12px;
+  margin: 14px 0 0;
+}
+
+.strategy-grid-add {
+  align-items: end;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
+}
+
+.strategy-grid label,
+.strategy-fields label,
+.strategy-actions > label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.strategy-grid label.toggle-chip,
+.strategy-fields label.toggle-chip {
+  flex-direction: row;
+  align-items: center;
+  text-transform: none;
+  letter-spacing: 0;
+  align-self: end;
+}
+
+.strategy-grid input,
+.strategy-grid select,
+.strategy-fields input,
+.strategy-fields select,
+.strategy-actions select,
+.strategy-row input,
+.strategy-row select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  width: 100%;
+  min-width: 0;
+}
+
+.strategy-grid input:focus,
+.strategy-grid select:focus,
+.strategy-fields input:focus,
+.strategy-row input:focus,
+.strategy-row select:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: -1px;
+}
+
+.strategy-fields {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.strategy-fields input { width: 96px; }
+
+.strategy-actions {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 14px 0 0;
+}
+
+.strategy-actions select { width: auto; min-width: 150px; }
+
+.strategy-hint {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.strategy-hint:empty { margin: 0; }
+
+.strategy-row input,
+.strategy-row select { width: auto; min-width: 110px; }
+
+/* Stat strip shared by the simulator, the sale preview and the rebalance plan. */
+.strategy-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.strategy-stat {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+
+.strategy-stat-label {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.strategy-stat-value {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.strategy-stat-sub {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+/* Probability bars in the simulator. */
+.prob-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin-top: 5px;
+}
+
+.prob-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+}
+
+.prob-bar.is-target > span { background: var(--buy); }
+.prob-bar.is-stop > span { background: var(--sell); }
+
+.setup-chip {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--info-soft);
+  color: var(--info-text);
+  margin: 1px 3px 1px 0;
+  white-space: nowrap;
+}
+
+.setup-chip.is-bull { background: var(--buy-soft); color: var(--buy-text); }
+.setup-chip.is-bear { background: var(--sell-soft); color: var(--sell-text); }
+.setup-chip.is-warn { background: var(--warn-soft); color: var(--warn-text); }
+
+.strategy-notes {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.strategy-notes li {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--warn-text);
+  background: var(--warn-soft);
+  border-left: 2px solid var(--warn);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.strategy-empty {
+  text-align: center;
+  padding: 28px 16px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.rule-reason {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 1px 0;
+}
+
+.rule-reason.is-pass { color: var(--buy-text); }
+.rule-reason.is-fail { color: var(--sell-text); }
+.rule-reason.is-skip { color: var(--text-muted); }
+
+.icon-btn-x {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  line-height: 1;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.icon-btn-x:hover {
+  color: var(--sell-text);
+  border-color: var(--sell);
 }
