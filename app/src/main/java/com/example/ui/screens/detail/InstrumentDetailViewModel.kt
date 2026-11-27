@@ -190,7 +190,11 @@ class InstrumentDetailViewModel @Inject constructor(
                     orderType = defaultOrderType,
                     productType = preProduct,
                     validityType = preValidity,
-                    quantityText = qtyDefault,
+                    quantityText = route.prefillQuantity
+                        ?.toIntOrNull()
+                        ?.takeIf { qty -> qty > 0 }
+                        ?.toString()
+                        ?: qtyDefault,
                     limitPriceText = preLimit,
                     triggerPriceText = preTrigger,
                     slEnabled = preSl != null || it.slEnabled,

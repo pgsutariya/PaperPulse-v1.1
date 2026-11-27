@@ -9,10 +9,12 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.domain.model.FeedSourceType
 import com.example.domain.model.TradingConfig
+import com.example.domain.strategy.WorkbenchState
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.Json
 import java.math.BigDecimal
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -36,7 +38,12 @@ class TradingPreferencesRepository @Inject constructor(
         val USE_FREE_PUBLIC_FEED = booleanPreferencesKey("use_free_public_feed")
         val CHART_ENGINE = stringPreferencesKey("chart_engine")
         val DARK_THEME = booleanPreferencesKey("dark_theme")
+        val STRATEGY_WORKBENCH = stringPreferencesKey("strategy_workbench")
     }
+
+    // Lenient on decode so a blob written by an older build - or a half-written one -
+    // degrades to an empty workbench instead of taking the screen down.
+    private val workbenchJson = Json { ignoreUnknownKeys = true }
 
     // Feed token kept strictly in memory only so sensitive credentials are never persisted
     @Volatile
@@ -75,6 +82,22 @@ class TradingPreferencesRepository @Inject constructor(
 
     suspend fun updateDarkTheme(enabled: Boolean) {
         context.dataStore.edit { it[Keys.DARK_THEME] = enabled }
+    }
+
+    /** Hand-built strategy workbench state: tax lots, rebalance targets, screen rules. */
+    val workbenchFlow: Flow<WorkbenchState> = context.dataStore.data.map { prefs ->
+        prefs[Keys.STRATEGY_WORKBENCH]
+            ?.let { raw ->
+                runCatching {
+                    workbenchJson.decodeFromString(WorkbenchState.serializer(), raw)
+                }.getOrNull()
+            }
+            ?: WorkbenchState()
+    }
+
+    suspend fun updateWorkbench(state: WorkbenchState) {
+        val encoded = workbenchJson.encodeToString(WorkbenchState.serializer(), state)
+        context.dataStore.edit { it[Keys.STRATEGY_WORKBENCH] = encoded }
     }
 
     suspend fun getConfig(): TradingConfig = configFlow.first()

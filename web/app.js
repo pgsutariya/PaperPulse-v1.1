@@ -26,6 +26,26 @@
     flatBy: "15:15",
   };
 
+  // Screener metrics, computed from this app's own price data (so: technical,
+  // not fundamental). `numeric` drives which ones can be ranked by and whether
+  // the rule's value field is a number box or free text.
+  const SCREEN_METRICS = [
+    { key: "ltp", label: "Last price", numeric: true },
+    { key: "changePct", label: "Day change %", numeric: true },
+    { key: "rsi14", label: "RSI 14 (daily)", numeric: true },
+    { key: "vsHigh20Pct", label: "% vs 20-day high", numeric: true },
+    { key: "vsMa20Pct", label: "% vs 20-day average", numeric: true },
+    { key: "range5Pct", label: "5-day range %", numeric: true },
+    { key: "runPct", label: "10-day run %", numeric: true },
+    { key: "segment", label: "Segment", numeric: false },
+  ];
+
+  const DEFAULT_SCREEN_RULES = [
+    { metric: "rsi14", op: "between", value: [40, 70] },
+    { metric: "vsMa20Pct", op: ">", value: 0 },
+    { metric: "changePct", op: ">", value: 0 },
+  ];
+
   // =========================================================================
   // 1. INSTRUMENT CATALOG (NSE, BSE, MCX, F&O, CRYPTO, CRYPTO F&O)
   // =========================================================================
@@ -108,6 +128,8 @@
   let currentSignalDir = "ALL";
   let currentOrderFilter = "ALL";
   let currentJournalSubTab = "trades";
+  let currentStrategySubTab = "scanner";
+  let currentScannerSegment = "ALL";
 
   // Chart viewport (TradingView zoom/pan/measure/expand)
   let chartZoomCount = 72; // visible bars
@@ -154,6 +176,11 @@
           broker: parsed.broker || { provider: "PUBLIC_FREE", apiKey: "", accessToken: "", connectedAt: null },
           theme: parsed.theme || "dark",
           traderRules: Object.assign({}, DEFAULT_TRADER_RULES, parsed.traderRules || {}),
+          taxLots: Array.isArray(parsed.taxLots) ? parsed.taxLots : [],
+          rebalanceTargets: parsed.rebalanceTargets && typeof parsed.rebalanceTargets === "object"
+            ? parsed.rebalanceTargets : {},
+          screenRules: Array.isArray(parsed.screenRules) && parsed.screenRules.length
+            ? parsed.screenRules : DEFAULT_SCREEN_RULES.map(cloneScreenRule),
         };
       }
     } catch (_) { /* ignore corrupt storage */ }
@@ -172,7 +199,16 @@
       broker: { provider: "PUBLIC_FREE", apiKey: "", accessToken: "", connectedAt: null },
       theme: "dark",
       traderRules: Object.assign({}, DEFAULT_TRADER_RULES),
+      taxLots: [],
+      rebalanceTargets: {},
+      screenRules: DEFAULT_SCREEN_RULES.map(cloneScreenRule),
     };
+  }
+
+  // A rule's `value` is a number, a two-element range or a list, so a shallow
+  // copy of the defaults would share the arrays between state and the defaults.
+  function cloneScreenRule(r) {
+    return Object.assign({}, r, { value: Array.isArray(r.value) ? r.value.slice() : r.value });
   }
 
   function saveState() {
@@ -2223,7 +2259,7 @@
     prodSelect.value = preset && preset.product ? preset.product : "INTRADAY";
 
     document.getElementById("orderType").value = "MARKET";
-    document.getElementById("orderLots").value = "1";
+    document.getElementById("orderLots").value = preset && preset.lots ? String(preset.lots) : "1";
     document.getElementById("orderLimitPrice").value = inst.ltp.toFixed(2);
     document.getElementById("orderTriggerPrice").value = inst.ltp.toFixed(2);
     document.getElementById("orderStopLoss").value = preset && preset.sl ? preset.sl.toFixed(2) : "";
@@ -2552,8 +2588,11 @@
           loadRealCandlesForChart(currentChartSymbol, currentTf);
           setTimeout(drawChart, 30);
         }
+        if (currentTab === "strategy") renderStrategy();
       });
     });
+
+    bindStrategyWorkbench();
 
     // Topbar buttons
     document.getElementById("refreshLiveBtn").addEventListener("click", () => {
@@ -3005,7 +3044,1042 @@
   }
 
   // =========================================================================
-  // 13. BOOTSTRAP & TIMERS
+  // 13. STRATEGY WORKBENCH
+  //     UI for the five engines in strategy.js that the order ticket does not
+  //     already use: the setup scanner, the outcome simulator, the tax-lot
+  //     tracker, the rebalancer and the metric screener.
+  // =========================================================================
+
+  // The engine's bar shape is {o,h,l,c,v}; this app's candles are
+  // {open,high,low,close,volume}. Adapt at the boundary rather than teaching
+  // the engines a second shape.
+  function engineBars(candles) {
+    return candles.map((c) => ({ o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume }));
+  }
+
+  function dailyCloses(symbol) {
+    return getCandles(symbol, "1D").map((c) => c.close);
+  }
+
+  function screenableInstruments(segment) {
+    return Array.from(market.values()).filter((inst) => {
+      if (inst.type === "INDEX") return false;
+      if (segment && segment !== "ALL" && inst.segment !== segment) return false;
+      return true;
+    });
+  }
+
+  // What the topbar calls "Avail Margin": capital is not debited by a
+  // position's notional here, so cash on its own overstates what is free.
+  function freeMargin() {
+    return state.capital + getTotalUnrealisedPnl() - getUsedMargin();
+  }
+
+  function deliveryHoldings() {
+    const held = {};
+    state.positions
+      .filter((p) => p.product === "CARRY_FORWARD" && p.side === "BUY" && p.qty > 0)
+      .forEach((p) => { held[p.symbol] = (held[p.symbol] || 0) + p.qty; });
+    return held;
+  }
+
+  // getIstParts().date is shifted so the *local* getters read as IST wall clock;
+  // note its .day field is the day of the WEEK, so it is no use here.
+  function isoFromTs(ts) {
+    const d = getIstParts(new Date(ts)).date;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  function isoToday() {
+    return isoFromTs(Date.now());
+  }
+
+  function renderStrategy() {
+    if (!window.PaperPulseStrategy) return;
+    if (currentStrategySubTab === "scanner") renderScanner();
+    else if (currentStrategySubTab === "simulator") renderSimulatorInputs();
+    else if (currentStrategySubTab === "taxlots") renderTaxLots();
+    else if (currentStrategySubTab === "rebalance") renderRebalanceTargets();
+    else if (currentStrategySubTab === "screener") renderScreenerRules();
+  }
+
+  // ----------------------------------------------------------- setup scanner
+
+  function renderScanner() {
+    const Strategy = window.PaperPulseStrategy;
+    const body = document.getElementById("scannerBody");
+    const orBars = Math.max(1, Number(document.getElementById("scannerOrBars").value) || 3);
+    const volXRaw = Number(document.getElementById("scannerVolX").value);
+    const volX = volXRaw > 0 ? volXRaw : null;
+    const onlySetups = document.getElementById("scannerOnlySetups").checked;
+
+    const rows = [];
+    let shortHistory = 0;
+
+    screenableInstruments(currentScannerSegment).forEach((inst) => {
+      const closes = dailyCloses(inst.symbol);
+      const daily = Strategy.findDailySetups(closes);
+      if (!daily) { shortHistory++; return; }
+
+      const intraday = engineBars(getCandles(inst.symbol, "5m"));
+      let orb = null;
+      try {
+        orb = Strategy.openingRangeBreakout(intraday, orBars, volX);
+      } catch (_) { orb = null; }
+
+      rows.push({ inst, daily, orb, could: Strategy.couldBreakOut(closes, orBars) });
+    });
+
+    const shown = onlySetups ? rows.filter((r) => r.daily.hasSetup || r.orb) : rows;
+    shown.sort((a, b) => {
+      const w = (r) => (r.daily.hasSetup ? 2 : 0) + (r.orb ? 1 : 0);
+      return w(b) - w(a) || a.inst.symbol.localeCompare(b.inst.symbol);
+    });
+
+    document.getElementById("scannerCount").textContent = String(
+      rows.filter((r) => r.daily.hasSetup || r.orb).length
+    );
+
+    const hintParts = [
+      `Daily setups need at least ${Strategy.MIN_DAILY_CLOSES} completed daily closes.`,
+      `Opening range = first ${orBars} bar${orBars === 1 ? "" : "s"} of the 5-minute series; a breakout must <strong>close</strong> above that high${volX ? ` on at least ${volX}× the range's average volume` : ""}.`,
+    ];
+    if (shortHistory > 0) {
+      hintParts.push(`${shortHistory} instrument${shortHistory === 1 ? "" : "s"} skipped for want of daily history.`);
+    }
+    document.getElementById("scannerHint").innerHTML = hintParts.join(" ");
+
+    if (shown.length === 0) {
+      body.innerHTML = `<tr><td colspan="8" class="strategy-empty">No instrument matches. ${
+        onlySetups ? "Untick &ldquo;only rows with a setup&rdquo; to see every instrument the scanner looked at." : "The scanner found no daily history to work with."
+      }</td></tr>`;
+      return;
+    }
+
+    body.innerHTML = shown.map((r) => {
+      const inst = r.inst;
+      const d = r.daily;
+      const vsHigh = (inst.ltp / d.high20 - 1) * 100;
+      const vsMa = (inst.ltp / d.ma20 - 1) * 100;
+      const chips = d.setups.length
+        ? d.setups.map((s) => {
+            const cls = s === "oversold" ? "is-warn" : "is-bull";
+            return `<span class="setup-chip ${cls}">${esc(Strategy.DAILY_SETUPS[s] || s)}</span>`;
+          }).join("")
+        : `<span class="text-muted">&mdash;</span>`;
+      const orbCell = r.orb
+        ? `<span class="setup-chip is-bull">bar ${r.orb.barIndex} @ ${fmtPrice(r.orb.price, inst.currency)}</span>` +
+          `<span class="strategy-stat-sub">${r.orb.pctOver.toFixed(2)}% over the ${fmtPrice(r.orb.openingRangeHigh, inst.currency)} range high` +
+          `${r.orb.volumeMultiple != null ? ` &middot; ${r.orb.volumeMultiple.toFixed(2)}× volume` : ""}</span>`
+        : `<span class="text-muted">no close above the range high</span>`;
+
+      return `<tr>
+        <td><strong>${esc(inst.symbol)}</strong><span class="strategy-stat-sub">${esc(inst.name)}</span></td>
+        <td class="num mono">${fmtPrice(inst.ltp, inst.currency)}</td>
+        <td class="num mono ${d.rsi == null ? "" : d.rsi < 30 ? "text-pos" : d.rsi > 70 ? "text-neg" : ""}">${d.rsi == null ? "&mdash;" : d.rsi.toFixed(1)}</td>
+        <td class="num mono ${vsHigh >= 0 ? "text-pos" : ""}">${vsHigh >= 0 ? "+" : ""}${vsHigh.toFixed(2)}%</td>
+        <td class="num mono ${vsMa >= 0 ? "text-pos" : "text-neg"}">${vsMa >= 0 ? "+" : ""}${vsMa.toFixed(2)}%</td>
+        <td>${chips}</td>
+        <td>${orbCell}</td>
+        <td class="num"><button class="btn btn-ghost btn-sm" data-scan-trade="${esc(inst.symbol)}">Ticket</button></td>
+      </tr>`;
+    }).join("");
+  }
+
+  // ------------------------------------------------------- outcome simulator
+
+  // Cached so repeated renders replay the same history; "Regenerate" clears it.
+  const simSeriesCache = new Map();
+
+  function simSeries(symbol, sessionBars, regen) {
+    const key = `${symbol}_${sessionBars}`;
+    if (!regen && simSeriesCache.has(key)) return simSeriesCache.get(key);
+    const inst = market.get(symbol);
+    const live = getCandles(symbol, "5m");
+    const wantBars = sessionBars * 20;
+    let out;
+    if (liveHistoryFetched.has(`${symbol}_5m`) && live.length >= sessionBars * 3) {
+      out = { bars: live, source: `live 5-minute history (${live.length} bars)` };
+    } else {
+      out = {
+        bars: generateSeededCandles(inst, 300, wantBars),
+        source: `simulated session history (${wantBars} bars) &mdash; this instrument has no live intraday history loaded`,
+      };
+    }
+    simSeriesCache.set(key, out);
+    return out;
+  }
+
+  function simSessions(symbol, sessionBars, regen) {
+    const series = simSeries(symbol, sessionBars, regen);
+    const bars = engineBars(series.bars);
+    const sessions = [];
+    for (let i = 0; i + sessionBars <= bars.length; i += sessionBars) {
+      sessions.push(bars.slice(i, i + sessionBars));
+    }
+    return { sessions, source: series.source };
+  }
+
+  function renderSimulatorInputs() {
+    const sel = document.getElementById("simSymbol");
+    if (sel.options.length === 0) {
+      sel.innerHTML = screenableInstruments("ALL")
+        .map((i) => `<option value="${esc(i.symbol)}">${esc(i.symbol)} — ${esc(i.name)}</option>`)
+        .join("");
+      sel.value = "RELIANCE";
+      if (!sel.value) sel.selectedIndex = 0;
+      fillSimulatorFromMarket();
+    }
+    updateSimSourceNote();
+  }
+
+  function updateSimSourceNote() {
+    const symbol = document.getElementById("simSymbol").value;
+    const sessionBars = Math.max(10, Number(document.getElementById("simSessionBars").value) || 75);
+    const info = simSessions(symbol, sessionBars, false);
+    document.getElementById("simSourceNote").innerHTML =
+      `${info.sessions.length} session${info.sessions.length === 1 ? "" : "s"} of ${sessionBars} bars from ${info.source}.`;
+  }
+
+  function fillSimulatorFromMarket() {
+    const symbol = document.getElementById("simSymbol").value;
+    const inst = market.get(symbol);
+    if (!inst) return;
+    const atr = calcAtr(getCandles(symbol, "5m"), 14);
+    const isLong = document.getElementById("simDirection").value !== "short";
+    const entry = inst.ltp;
+    const stop = isLong ? entry - 1.5 * atr : entry + 1.5 * atr;
+    const target = isLong ? entry + 3 * atr : entry - 3 * atr;
+    document.getElementById("simEntry").value = roundTick(entry, inst.tickSize).toFixed(2);
+    document.getElementById("simStop").value = roundTick(stop, inst.tickSize).toFixed(2);
+    document.getElementById("simTarget").value = roundTick(target, inst.tickSize).toFixed(2);
+    document.getElementById("simStopRuleValue").value = ((1.5 * atr) / entry * 100).toFixed(2);
+  }
+
+  function runSimulation() {
+    const Strategy = window.PaperPulseStrategy;
+    const host = document.getElementById("simResults");
+    const symbol = document.getElementById("simSymbol").value;
+    const inst = market.get(symbol);
+    const isLong = document.getElementById("simDirection").value !== "short";
+    const entry = Number(document.getElementById("simEntry").value);
+    const stop = Number(document.getElementById("simStop").value);
+    const target = Number(document.getElementById("simTarget").value);
+    const sessionBars = Math.max(10, Number(document.getElementById("simSessionBars").value) || 75);
+    const orBars = Math.max(1, Number(document.getElementById("simOrBars").value) || 3);
+    const fromBar = Math.max(1, Number(document.getElementById("simFromBar").value) || 6);
+    const replays = Math.max(100, Number(document.getElementById("simReplays").value) || 10000);
+    const seed = Number(document.getElementById("simSeed").value) || 19;
+    const stopRuleKind = document.getElementById("simStopRule").value;
+    const stopRuleValue = Number(document.getElementById("simStopRuleValue").value);
+
+    const risk = isLong ? entry - stop : stop - entry;
+    if (!(risk > 0)) {
+      host.innerHTML = `<div class="strategy-card"><div class="strategy-empty">A ${isLong ? "long" : "short"} needs its stop ${isLong ? "below" : "above"} the entry. Entry ${entry}, stop ${stop}.</div></div>`;
+      return;
+    }
+
+    const info = simSessions(symbol, sessionBars, false);
+    if (info.sessions.length === 0) {
+      host.innerHTML = `<div class="strategy-card"><div class="strategy-empty">No complete session of ${sessionBars} bars is available for ${esc(symbol)}.</div></div>`;
+      return;
+    }
+
+    const pool = Strategy.buildPool(info.sessions, sessionBars);
+    const mc = Strategy.monteCarlo({
+      pool, fromBar, toBar: sessionBars - 1, isLong, entry, stop, target, replays, seed,
+    });
+    const replay = Strategy.historyReplay({
+      sessions: info.sessions, rangeBars: orBars, targetR: (isLong ? target - entry : entry - target) / risk,
+      isLong, toBar: sessionBars - 1,
+      stopRule: { kind: stopRuleKind, value: stopRuleValue },
+    });
+
+    const cur = inst ? inst.currency : "₹";
+    const pct = (v) => `${(v * 100).toFixed(1)}%`;
+
+    let mcHtml;
+    if (!mc) {
+      mcHtml = `<div class="strategy-empty">The session pool is empty, so there is nothing to resample. Try more sessions or fewer bars per session.</div>`;
+    } else {
+      mcHtml = `
+        <div class="strategy-stats">
+          <div class="strategy-stat">
+            <span class="strategy-stat-label">Hits target</span>
+            <span class="strategy-stat-value text-pos">${pct(mc.probabilityTarget)}</span>
+            <div class="prob-bar is-target"><span style="width:${(mc.probabilityTarget * 100).toFixed(1)}%"></span></div>
+          </div>
+          <div class="strategy-stat">
+            <span class="strategy-stat-label">Hits stop</span>
+            <span class="strategy-stat-value text-neg">${pct(mc.probabilityStop)}</span>
+            <div class="prob-bar is-stop"><span style="width:${(mc.probabilityStop * 100).toFixed(1)}%"></span></div>
+          </div>
+          <div class="strategy-stat">
+            <span class="strategy-stat-label">Neither</span>
+            <span class="strategy-stat-value">${pct(mc.probabilityNeither)}</span>
+            <span class="strategy-stat-sub">still open at the close</span>
+          </div>
+          <div class="strategy-stat">
+            <span class="strategy-stat-label">Green at the close</span>
+            <span class="strategy-stat-value ${mc.probabilityGreen >= 0.5 ? "text-pos" : "text-neg"}">${pct(mc.probabilityGreen)}</span>
+          </div>
+          <div class="strategy-stat">
+            <span class="strategy-stat-label">Average R</span>
+            <span class="strategy-stat-value ${mc.averageR >= 0 ? "text-pos" : "text-neg"}">${mc.averageR >= 0 ? "+" : ""}${mc.averageR.toFixed(2)}R</span>
+            <span class="strategy-stat-sub">target is ${mc.rAtTarget.toFixed(2)}R</span>
+          </div>
+          <div class="strategy-stat">
+            <span class="strategy-stat-label">Close, median</span>
+            <span class="strategy-stat-value mono">${fmtPrice(mc.medianClose, cur)}</span>
+            <span class="strategy-stat-sub">5th ${fmtPrice(mc.p5Close, cur)} &middot; 95th ${fmtPrice(mc.p95Close, cur)}</span>
+          </div>
+        </div>
+        <div class="strategy-hint" style="margin-top:12px;">
+          ${mc.replays.toLocaleString("en-IN")} replays of the ${mc.barsLeft} bars left in the session, seeded at ${seed}
+          &mdash; the same seed always replays the same session. Risk per unit ${fmtPrice(risk, cur)}.
+        </div>`;
+    }
+
+    const replayRows = replay.trades.slice(-12).reverse().map((t) => `
+      <tr>
+        <td class="mono">#${t.sessionIndex + 1}</td>
+        <td class="num mono">${t.entryBar}</td>
+        <td class="num mono">${fmtPrice(t.entry, cur)}</td>
+        <td class="num mono">${fmtPrice(t.stop, cur)}</td>
+        <td class="num mono">${fmtPrice(t.target, cur)}</td>
+        <td><span class="setup-chip ${t.outcome === "TARGET" ? "is-bull" : t.outcome === "STOP" ? "is-bear" : "is-warn"}">${t.outcome}</span></td>
+        <td class="num mono ${t.r >= 0 ? "text-pos" : "text-neg"}">${t.r >= 0 ? "+" : ""}${t.r.toFixed(2)}R</td>
+      </tr>`).join("");
+
+    host.innerHTML = `
+      <div class="strategy-card">
+        <div class="strategy-card-head">
+          <h3>Monte Carlo &mdash; ${esc(symbol)} ${isLong ? "long" : "short"} from ${fmtPrice(entry, cur)}</h3>
+          <p>Stop ${fmtPrice(stop, cur)} &middot; target ${fmtPrice(target, cur)} &middot; entered on bar ${fromBar} of ${sessionBars}.</p>
+        </div>
+        ${mcHtml}
+      </div>
+      <div class="strategy-card">
+        <div class="strategy-card-head">
+          <h3>History replay &mdash; the opening-range rule, session by session</h3>
+          <p>Enter on the first close ${isLong ? "above the opening-range high" : "below the opening-range low"}
+            (first ${orBars} bar${orBars === 1 ? "" : "s"}), stop at the ${esc(document.getElementById("simStopRule").selectedOptions[0].textContent.toLowerCase())}, exit at ${((isLong ? target - entry : entry - target) / risk).toFixed(2)}R.</p>
+        </div>
+        <div class="strategy-stats">
+          <div class="strategy-stat"><span class="strategy-stat-label">Sessions</span><span class="strategy-stat-value">${replay.sessions}</span><span class="strategy-stat-sub">${replay.triggered} triggered the rule</span></div>
+          <div class="strategy-stat"><span class="strategy-stat-label">Target</span><span class="strategy-stat-value text-pos">${replay.target}</span></div>
+          <div class="strategy-stat"><span class="strategy-stat-label">Stop</span><span class="strategy-stat-value text-neg">${replay.stop}</span></div>
+          <div class="strategy-stat"><span class="strategy-stat-label">Neither</span><span class="strategy-stat-value">${replay.neither}</span></div>
+          <div class="strategy-stat"><span class="strategy-stat-label">Win rate</span><span class="strategy-stat-value">${replay.winRate == null ? "&mdash;" : pct(replay.winRate)}</span></div>
+          <div class="strategy-stat"><span class="strategy-stat-label">Average R</span><span class="strategy-stat-value ${(replay.averageR || 0) >= 0 ? "text-pos" : "text-neg"}">${replay.averageR == null ? "&mdash;" : (replay.averageR >= 0 ? "+" : "") + replay.averageR.toFixed(2) + "R"}</span></div>
+        </div>
+        ${replay.triggered === 0
+          ? `<div class="strategy-empty">The rule never triggered in these ${replay.sessions} session${replay.sessions === 1 ? "" : "s"}. ${stopRuleKind === "price" ? "A fixed-price stop rarely sits correctly across sessions — try the opening-range low or a percent." : ""}</div>`
+          : `<div class="table-wrap"><table class="data-table">
+              <thead><tr><th>Session</th><th class="num">Entry bar</th><th class="num">Entry</th><th class="num">Stop</th><th class="num">Target</th><th>Outcome</th><th class="num">R</th></tr></thead>
+              <tbody>${replayRows}</tbody>
+            </table></div>
+            ${replay.triggered > 12 ? `<div class="strategy-hint" style="margin-top:8px;">Showing the last 12 of ${replay.triggered} triggered sessions.</div>` : ""}`}
+      </div>`;
+  }
+
+  // -------------------------------------------------------------- tax lots
+
+  function lotSymbols() {
+    const fromLots = state.taxLots.map((l) => l.symbol);
+    const fromHeld = Object.keys(deliveryHoldings());
+    const all = Array.from(new Set(fromLots.concat(fromHeld)));
+    if (all.length === 0) {
+      return Array.from(market.values())
+        .filter((i) => i.type === "EQUITY")
+        .map((i) => i.symbol);
+    }
+    return all.sort();
+  }
+
+  function renderTaxLots() {
+    const Strategy = window.PaperPulseStrategy;
+    const sel = document.getElementById("lotSymbol");
+    const symbols = lotSymbols();
+    const keep = sel.value;
+    sel.innerHTML = symbols.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+    sel.value = symbols.indexOf(keep) >= 0 ? keep : symbols[0];
+
+    const symbol = sel.value;
+    const inst = market.get(symbol);
+    const price = inst ? inst.ltp : 0;
+    const today = isoToday();
+
+    if (!document.getElementById("lotAddDate").value) document.getElementById("lotAddDate").value = today;
+    if (!document.getElementById("saleDate").value) document.getElementById("saleDate").value = today;
+    if (!document.getElementById("salePrice").value && price) {
+      document.getElementById("salePrice").value = price.toFixed(2);
+    }
+    if (!document.getElementById("lotAddCost").value && price) {
+      document.getElementById("lotAddCost").value = price.toFixed(2);
+    }
+
+    const lots = state.taxLots.filter((l) => l.symbol === symbol);
+    const body = document.getElementById("lotBody");
+
+    if (lots.length === 0) {
+      body.innerHTML = `<tr><td colspan="9" class="strategy-empty">
+        No lots recorded for ${esc(symbol)}. Add one below, or import your open delivery positions.
+      </td></tr>`;
+    } else {
+      const marked = Strategy.unrealisedLots(lots.map(toEngineLot), price, today);
+      body.innerHTML = marked.map((u) => {
+        const cost = u.lot.costPerShare * u.lot.shares;
+        return `<tr>
+          <td class="mono">${esc(u.lot.id)}</td>
+          <td class="mono">${esc(u.lot.acquired)}</td>
+          <td class="num mono">${u.lot.shares}</td>
+          <td class="num mono">${fmtInr(u.lot.costPerShare)}</td>
+          <td class="num mono">${fmtInr(cost)}</td>
+          <td class="num mono">${fmtInr(u.marketValue)}</td>
+          <td class="num mono ${u.gain >= 0 ? "text-pos" : "text-neg"}">${fmtInr(u.gain, true)}</td>
+          <td><span class="setup-chip ${u.term === "LONG" ? "is-bull" : "is-warn"}">${u.term === "LONG" ? "Long term" : "Short term"}</span></td>
+          <td class="num"><button class="icon-btn-x" data-lot-remove="${esc(u.lot.id)}" title="Remove this lot">&times;</button></td>
+        </tr>`;
+      }).join("");
+    }
+
+    document.getElementById("saleLotIdsWrap").style.display =
+      document.getElementById("saleMethod").value === "SPECIFIC" ? "flex" : "none";
+
+    renderHarvestCandidates();
+  }
+
+  function toEngineLot(l) {
+    return { id: l.id, acquired: l.acquired, shares: l.shares, costPerShare: l.costPerShare };
+  }
+
+  function runSaleSimulation() {
+    const Strategy = window.PaperPulseStrategy;
+    const host = document.getElementById("saleResults");
+    const symbol = document.getElementById("lotSymbol").value;
+    const inst = market.get(symbol);
+    const lots = state.taxLots.filter((l) => l.symbol === symbol).map(toEngineLot);
+    const shares = Math.floor(Number(document.getElementById("saleShares").value) || 0);
+    const price = Number(document.getElementById("salePrice").value) || 0;
+    const soldOn = document.getElementById("saleDate").value || isoToday();
+    const method = document.getElementById("saleMethod").value;
+    const lotIds = document.getElementById("saleLotIds").value
+      .split(",").map((s) => s.trim()).filter(Boolean);
+
+    let res;
+    try {
+      res = Strategy.simulateSale({ lots, shares, price, soldOn, method, lotIds });
+    } catch (e) {
+      host.innerHTML = `<ul class="risk-reasons"><li>${esc(e.message || String(e))}</li></ul>`;
+      return;
+    }
+
+    const rows = res.consumed.map((c) => `
+      <tr>
+        <td class="mono">${esc(c.lotId)}</td>
+        <td class="mono">${esc(c.acquired)}</td>
+        <td class="num mono">${c.shares}</td>
+        <td class="num mono">${fmtInr(c.basis)}</td>
+        <td class="num mono">${fmtInr(c.proceeds)}</td>
+        <td class="num mono ${c.gain >= 0 ? "text-pos" : "text-neg"}">${fmtInr(c.gain, true)}</td>
+        <td><span class="setup-chip ${c.term === "LONG" ? "is-bull" : "is-warn"}">${c.term === "LONG" ? "Long term" : "Short term"}</span></td>
+      </tr>`).join("");
+
+    host.innerHTML = `
+      <div class="strategy-stats">
+        <div class="strategy-stat"><span class="strategy-stat-label">Shares</span><span class="strategy-stat-value mono">${res.shares}</span><span class="strategy-stat-sub">${esc(symbol)} @ ${fmtPrice(price, inst ? inst.currency : "₹")}</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Proceeds</span><span class="strategy-stat-value mono">${fmtInr(res.proceeds)}</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Cost basis</span><span class="strategy-stat-value mono">${fmtInr(res.basis)}</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Total gain</span><span class="strategy-stat-value mono ${res.gain >= 0 ? "text-pos" : "text-neg"}">${fmtInr(res.gain, true)}</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Short term</span><span class="strategy-stat-value mono ${res.shortTermGain >= 0 ? "text-pos" : "text-neg"}">${fmtInr(res.shortTermGain, true)}</span><span class="strategy-stat-sub">held 12 months or less</span></div>
+        <div class="strategy-stat"><span class="strategy-stat-label">Long term</span><span class="strategy-stat-value mono ${res.longTermGain >= 0 ? "text-pos" : "text-neg"}">${fmtInr(res.longTermGain, true)}</span><span class="strategy-stat-sub">held over 12 months</span></div>
+      </div>
+      <div class="strategy-hint" style="margin-top:12px;">
+        The split by holding period is what does not change; the rates do, with every budget, so no rate is
+        applied here. ${method === "FIFO" ? "FIFO is what your depository will actually apply." : "This is a planning view — the depository applies FIFO regardless."}
+      </div>
+      <div class="table-wrap" style="margin-top:4px;">
+        <table class="data-table">
+          <thead><tr><th>Lot</th><th>Acquired</th><th class="num">Shares</th><th class="num">Basis</th><th class="num">Proceeds</th><th class="num">Gain</th><th>Term</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  function renderHarvestCandidates() {
+    const Strategy = window.PaperPulseStrategy;
+    const body = document.getElementById("harvestBody");
+    const minLoss = Number(document.getElementById("harvestMinLoss").value) || 0;
+    const today = isoToday();
+
+    const bySymbol = {};
+    state.taxLots.forEach((l) => {
+      (bySymbol[l.symbol] = bySymbol[l.symbol] || []).push(l);
+    });
+
+    const rows = [];
+    Object.keys(bySymbol).sort().forEach((symbol) => {
+      const inst = market.get(symbol);
+      if (!inst) return;
+      Strategy.harvestCandidates(bySymbol[symbol].map(toEngineLot), inst.ltp, today, minLoss)
+        .forEach((u) => rows.push({ symbol, u }));
+    });
+
+    rows.sort((a, b) => a.u.gain - b.u.gain);
+
+    if (rows.length === 0) {
+      body.innerHTML = `<tr><td colspan="8" class="strategy-empty">
+        No lot is sitting on a loss of ${fmtInr(minLoss)} or more.
+      </td></tr>`;
+      return;
+    }
+
+    body.innerHTML = rows.map(({ symbol, u }) => `
+      <tr>
+        <td><strong>${esc(symbol)}</strong></td>
+        <td class="mono">${esc(u.lot.id)}</td>
+        <td class="mono">${esc(u.lot.acquired)}</td>
+        <td class="num mono">${u.lot.shares}</td>
+        <td class="num mono">${fmtInr(u.lot.costPerShare * u.lot.shares)}</td>
+        <td class="num mono">${fmtInr(u.marketValue)}</td>
+        <td class="num mono text-neg">${fmtInr(u.gain, true)}</td>
+        <td><span class="setup-chip ${u.term === "LONG" ? "is-bull" : "is-warn"}">${u.term === "LONG" ? "Long term" : "Short term"}</span></td>
+      </tr>`).join("");
+  }
+
+  function importDeliveryLots() {
+    const held = state.positions.filter((p) => p.product === "CARRY_FORWARD" && p.side === "BUY" && p.qty > 0);
+    if (held.length === 0) {
+      showToast("No open delivery positions to import.", "warn");
+      return;
+    }
+    let added = 0;
+    held.forEach((p) => {
+      const lotId = String(p.id);
+      if (state.taxLots.some((l) => l.id === lotId)) return;
+      const chargesPerShare = p.entryCharges && p.entryCharges.total ? p.entryCharges.total / p.qty : 0;
+      state.taxLots.push({
+        id: lotId,
+        symbol: p.symbol,
+        acquired: isoFromTs(p.openedAt),
+        shares: p.qty,
+        costPerShare: Number((p.avgEntry + chargesPerShare).toFixed(4)),
+      });
+      added++;
+    });
+    saveState();
+    showToast(added > 0 ? `Imported ${added} lot${added === 1 ? "" : "s"} from open delivery positions.` : "Those positions are already in the lot book.", added > 0 ? "success" : "info");
+    renderTaxLots();
+  }
+
+  // ------------------------------------------------------------- rebalancer
+
+  function renderRebalanceTargets() {
+    const body = document.getElementById("rebTargetBody");
+    const cashField = document.getElementById("rebCash");
+    if (!cashField.value) cashField.value = Math.max(0, freeMargin()).toFixed(0);
+
+    const targets = state.rebalanceTargets;
+    const keys = Object.keys(targets).sort();
+    const options = Array.from(market.values())
+      .filter((i) => i.type === "EQUITY")
+      .map((i) => i.symbol);
+
+    if (keys.length === 0) {
+      body.innerHTML = `<tr><td colspan="3" class="strategy-empty">
+        No target weights yet. &ldquo;Equal-weight what I hold&rdquo; fills them from your open delivery
+        positions, or add them one at a time.
+      </td></tr>`;
+      return;
+    }
+
+    body.innerHTML = keys.map((sym) => `
+      <tr class="strategy-row">
+        <td>
+          <select data-reb-symbol="${esc(sym)}">
+            ${options.map((o) => `<option value="${esc(o)}"${o === sym ? " selected" : ""}>${esc(o)}</option>`).join("")}
+          </select>
+        </td>
+        <td class="num"><input type="number" min="0" step="0.5" value="${targets[sym]}" data-reb-weight="${esc(sym)}" /></td>
+        <td class="num"><button class="icon-btn-x" data-reb-remove="${esc(sym)}" title="Remove this target">&times;</button></td>
+      </tr>`).join("");
+  }
+
+  function runRebalance() {
+    const Strategy = window.PaperPulseStrategy;
+    const host = document.getElementById("rebResults");
+    const cash = Number(document.getElementById("rebCash").value) || 0;
+    const bandPct = Number(document.getElementById("rebBand").value);
+    const sellUntracked = document.getElementById("rebSellUntracked").checked;
+
+    const held = deliveryHoldings();
+    const holdings = Object.keys(held).map((s) => ({ symbol: s, shares: held[s] }));
+    const targetWeights = Object.assign({}, state.rebalanceTargets);
+
+    if (holdings.length === 0 && Object.keys(targetWeights).length === 0) {
+      host.innerHTML = `<div class="strategy-card"><div class="strategy-empty">
+        Nothing to rebalance: no open delivery positions and no target weights.
+      </div></div>`;
+      return;
+    }
+
+    const prices = {};
+    Array.from(new Set(Object.keys(held).concat(Object.keys(targetWeights)))).forEach((s) => {
+      const inst = market.get(s);
+      if (inst) prices[s] = inst.ltp;
+    });
+
+    let plan;
+    try {
+      plan = Strategy.rebalance({
+        holdings, prices, targetWeights,
+        rules: Object.assign({}, state.traderRules, { budget: state.capital }),
+        cash, bandPct: isNaN(bandPct) ? 5 : bandPct, sellUntracked,
+      });
+    } catch (e) {
+      host.innerHTML = `<div class="strategy-card"><ul class="risk-reasons"><li>${esc(e.message || String(e))}</li></ul></div>`;
+      return;
+    }
+
+    const driftRows = plan.rows.map((r) => `
+      <tr>
+        <td><strong>${esc(r.symbol)}</strong>${r.tracked ? "" : `<span class="strategy-stat-sub">no target</span>`}</td>
+        <td class="num mono">${r.shares}</td>
+        <td class="num mono">${fmtInr(r.price)}</td>
+        <td class="num mono">${fmtInr(r.value)}</td>
+        <td class="num mono">${r.currentPct.toFixed(2)}%</td>
+        <td class="num mono">${r.targetPct.toFixed(2)}%</td>
+        <td class="num mono ${Math.abs(r.drift) > (isNaN(bandPct) ? 5 : bandPct) ? (r.drift > 0 ? "text-neg" : "text-pos") : ""}">${r.drift >= 0 ? "+" : ""}${r.drift.toFixed(2)}</td>
+        <td><span class="setup-chip ${r.action === "hold" ? "" : r.action.indexOf("sell") === 0 ? "is-bear" : "is-bull"}">${esc(r.action)}</span></td>
+      </tr>`).join("");
+
+    const tradeRows = plan.trades.map((t) => `
+      <tr>
+        <td><strong>${esc(t.symbol)}</strong></td>
+        <td><span class="setup-chip ${t.isBuy ? "is-bull" : "is-bear"}">${t.isBuy ? "BUY" : "SELL"}</span></td>
+        <td class="num mono">${t.quantity}</td>
+        <td class="num mono">${fmtInr(t.price)}</td>
+        <td class="num mono">${fmtInr(t.value)}</td>
+        <td>${esc(t.why)}</td>
+        <td class="num"><button class="btn btn-ghost btn-sm" data-reb-ticket="${esc(t.symbol)}" data-reb-side="${t.isBuy ? "BUY" : "SELL"}" data-reb-qty="${t.quantity}">Ticket</button></td>
+      </tr>`).join("");
+
+    host.innerHTML = `
+      <div class="strategy-card">
+        <div class="strategy-card-head"><h3>Drift</h3></div>
+        <div class="strategy-stats">
+          <div class="strategy-stat"><span class="strategy-stat-label">Portfolio value</span><span class="strategy-stat-value mono">${fmtInr(plan.totalValue)}</span><span class="strategy-stat-sub">holdings + cash</span></div>
+          <div class="strategy-stat"><span class="strategy-stat-label">Cash</span><span class="strategy-stat-value mono">${fmtInr(plan.cash)}</span></div>
+          <div class="strategy-stat"><span class="strategy-stat-label">Cash buffer held back</span><span class="strategy-stat-value mono">${fmtInr(plan.cashBuffer)}</span><span class="strategy-stat-sub">${state.traderRules.cashBufferPct}% of the book</span></div>
+          <div class="strategy-stat"><span class="strategy-stat-label">Trades proposed</span><span class="strategy-stat-value">${plan.trades.length}</span></div>
+        </div>
+        <div class="table-wrap" style="margin-top:12px;">
+          <table class="data-table">
+            <thead><tr><th>Symbol</th><th class="num">Shares</th><th class="num">Price</th><th class="num">Value</th><th class="num">Now</th><th class="num">Target</th><th class="num">Drift</th><th>Action</th></tr></thead>
+            <tbody>${driftRows}</tbody>
+          </table>
+        </div>
+        ${plan.notes.length ? `<ul class="strategy-notes">${plan.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+      </div>
+      <div class="strategy-card">
+        <div class="strategy-card-head">
+          <h3>Proposed trades</h3>
+          <p>Sells are listed first because their proceeds fund the buys in the same pass.</p>
+        </div>
+        ${plan.trades.length === 0
+          ? `<div class="strategy-empty">Every holding is inside the ${isNaN(bandPct) ? 5 : bandPct}-point band. Nothing worth the brokerage.</div>`
+          : `<div class="table-wrap"><table class="data-table">
+              <thead><tr><th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th>Why</th><th class="num">Place</th></tr></thead>
+              <tbody>${tradeRows}</tbody>
+            </table></div>`}
+      </div>`;
+  }
+
+  // --------------------------------------------------------------- screener
+
+  function screenerCompanies() {
+    const Strategy = window.PaperPulseStrategy;
+    return screenableInstruments("ALL").map((inst) => {
+      const closes = dailyCloses(inst.symbol);
+      const daily = Strategy.findDailySetups(closes);
+      const metrics = {
+        ltp: Number(inst.ltp.toFixed(2)),
+        changePct: inst.prevClose > 0 ? Number(((inst.ltp / inst.prevClose - 1) * 100).toFixed(2)) : null,
+        segment: inst.segment,
+      };
+      if (daily) {
+        metrics.rsi14 = daily.rsi == null ? null : Number(daily.rsi.toFixed(2));
+        metrics.vsHigh20Pct = Number(((inst.ltp / daily.high20 - 1) * 100).toFixed(2));
+        metrics.vsMa20Pct = Number(((inst.ltp / daily.ma20 - 1) * 100).toFixed(2));
+        metrics.range5Pct = Number(daily.range5Pct.toFixed(2));
+        metrics.runPct = Number(daily.runPct.toFixed(2));
+      }
+      return { ticker: inst.symbol, name: inst.name, metrics };
+    });
+  }
+
+  function renderScreenerRules() {
+    const body = document.getElementById("screenRuleBody");
+    const rankSel = document.getElementById("screenRankBy");
+    if (rankSel.options.length === 0) {
+      rankSel.innerHTML = `<option value="">nothing (keep rule order)</option>` +
+        SCREEN_METRICS.filter((m) => m.numeric)
+          .map((m) => `<option value="${esc(m.key)}">${esc(m.label)}</option>`).join("");
+    }
+
+    if (state.screenRules.length === 0) {
+      body.innerHTML = `<tr><td colspan="4" class="strategy-empty">No rules. Every instrument passes a screen with no rules — add one.</td></tr>`;
+      return;
+    }
+
+    body.innerHTML = state.screenRules.map((rule, i) => {
+      const metric = SCREEN_METRICS.find((m) => m.key === rule.metric);
+      const valueCell = rule.op === "between"
+        ? `<input type="number" step="0.01" value="${Array.isArray(rule.value) ? rule.value[0] : 0}" data-screen-lo="${i}" style="width:84px" />
+           <span class="text-muted">to</span>
+           <input type="number" step="0.01" value="${Array.isArray(rule.value) ? rule.value[1] : 0}" data-screen-hi="${i}" style="width:84px" />`
+        : rule.op === "in" || rule.op === "not in"
+          ? `<input type="text" value="${esc(Array.isArray(rule.value) ? rule.value.join(", ") : String(rule.value))}" data-screen-list="${i}" placeholder="NSE, BSE" />`
+          : `<input type="${metric && !metric.numeric ? "text" : "number"}" step="0.01" value="${esc(String(rule.value))}" data-screen-val="${i}" />`;
+
+      return `<tr class="strategy-row">
+        <td><select data-screen-metric="${i}">
+          ${SCREEN_METRICS.map((m) => `<option value="${esc(m.key)}"${m.key === rule.metric ? " selected" : ""}>${esc(m.label)}</option>`).join("")}
+        </select></td>
+        <td><select data-screen-op="${i}">
+          ${window.PaperPulseStrategy.SCREEN_OPS.map((o) => `<option value="${esc(o)}"${o === rule.op ? " selected" : ""}>${esc(o)}</option>`).join("")}
+        </select></td>
+        <td>${valueCell}</td>
+        <td class="num"><button class="icon-btn-x" data-screen-remove="${i}" title="Remove this rule">&times;</button></td>
+      </tr>`;
+    }).join("");
+  }
+
+  function runScreen() {
+    const Strategy = window.PaperPulseStrategy;
+    const host = document.getElementById("screenResults");
+    const missing = document.getElementById("screenMissing").value;
+    const rankBy = document.getElementById("screenRankBy").value;
+    const onlyPassing = document.getElementById("screenOnlyPassing").checked;
+
+    const companies = screenerCompanies();
+    const results = Strategy.screen(companies, state.screenRules, missing, rankBy ? [rankBy] : []);
+    const shown = onlyPassing ? results.filter((r) => r.passed) : results;
+
+    document.getElementById("screenerCount").textContent = String(results.filter((r) => r.passed).length);
+
+    if (shown.length === 0) {
+      host.innerHTML = `<div class="strategy-card"><div class="strategy-empty">
+        Nothing passed all ${state.screenRules.length} rule${state.screenRules.length === 1 ? "" : "s"}.
+        Untick &ldquo;only passing rows&rdquo; to see why each one failed.
+      </div></div>`;
+      return;
+    }
+
+    const rows = shown.map((r) => {
+      const inst = market.get(r.ticker);
+      return `<tr>
+        <td><strong>${esc(r.ticker)}</strong><span class="strategy-stat-sub">${esc(r.name || "")}</span></td>
+        <td class="num mono">${inst ? fmtPrice(inst.ltp, inst.currency) : "&mdash;"}</td>
+        <td><span class="setup-chip ${r.passed ? "is-bull" : "is-bear"}">${r.passed ? "PASS" : "FAIL"}</span></td>
+        <td class="num mono">${r.score == null ? "&mdash;" : r.score.toFixed(2)}</td>
+        <td>${r.checks.map((c) => `<div class="rule-reason ${c.passed === true ? "is-pass" : c.passed === false ? "is-fail" : "is-skip"}">${c.passed === true ? "✓" : c.passed === false ? "✗" : "–"} ${esc(c.reason)}</div>`).join("")}</td>
+      </tr>`;
+    }).join("");
+
+    host.innerHTML = `
+      <div class="strategy-card">
+        <div class="strategy-card-head">
+          <h3>${results.filter((r) => r.passed).length} of ${results.length} instruments pass</h3>
+          <p>Passing rows come first, then by ${rankBy ? esc(rankBy) : "fewest failures"}, then alphabetically, so the order is stable between runs.</p>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Symbol</th><th class="num">LTP</th><th>Verdict</th><th class="num">Score</th><th>Every rule, and by how much</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // ------------------------------------------------- workbench state changes
+
+  function addTaxLot() {
+    const symbol = document.getElementById("lotSymbol").value;
+    const acquired = document.getElementById("lotAddDate").value;
+    const shares = Math.floor(Number(document.getElementById("lotAddShares").value) || 0);
+    const costPerShare = Number(document.getElementById("lotAddCost").value);
+
+    if (!symbol) { showToast("Pick a symbol first.", "warn"); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(acquired)) { showToast("Give the lot an acquisition date.", "warn"); return; }
+    if (!(shares > 0)) { showToast("A lot needs a positive number of shares.", "warn"); return; }
+    if (!(costPerShare > 0)) { showToast("A lot needs a positive cost per share.", "warn"); return; }
+
+    const n = state.taxLots.filter((l) => l.symbol === symbol).length + 1;
+    let id = `L${n}`;
+    while (state.taxLots.some((l) => l.symbol === symbol && l.id === id)) id = `L${id.slice(1)}b`;
+
+    state.taxLots.push({ id, symbol, acquired, shares, costPerShare });
+    saveState();
+    renderTaxLots();
+    showToast(`Lot ${id}: ${shares} ${symbol} at ${fmtInr(costPerShare)} a share.`, "success");
+  }
+
+  function equalWeightHeld() {
+    const held = deliveryHoldings();
+    const symbols = Object.keys(held);
+    if (symbols.length === 0) {
+      showToast("No open delivery positions to weight.", "warn");
+      return;
+    }
+    const w = Number((100 / symbols.length).toFixed(2));
+    state.rebalanceTargets = {};
+    symbols.forEach((s) => { state.rebalanceTargets[s] = w; });
+    saveState();
+    renderRebalanceTargets();
+  }
+
+  function addRebalanceTarget() {
+    const taken = Object.keys(state.rebalanceTargets);
+    const candidate = Array.from(market.values())
+      .filter((i) => i.type === "EQUITY" && taken.indexOf(i.symbol) < 0)[0];
+    if (!candidate) { showToast("Every equity already has a target.", "warn"); return; }
+    state.rebalanceTargets[candidate.symbol] = 10;
+    saveState();
+    renderRebalanceTargets();
+  }
+
+  function addScreenRule() {
+    state.screenRules.push({ metric: "ltp", op: ">", value: 0 });
+    saveState();
+    renderScreenerRules();
+  }
+
+  function resetScreenRules() {
+    state.screenRules = DEFAULT_SCREEN_RULES.map((r) => Object.assign({}, r, {
+      value: Array.isArray(r.value) ? r.value.slice() : r.value,
+    }));
+    saveState();
+    renderScreenerRules();
+    document.getElementById("screenResults").innerHTML = "";
+  }
+
+  // The value field's type depends on the operator, so switching operator has
+  // to recast the stored value rather than leave a number where a list belongs.
+  function setScreenRuleOp(index, op) {
+    const rule = state.screenRules[index];
+    if (!rule) return;
+    const wasList = rule.op === "in" || rule.op === "not in";
+    const wasRange = rule.op === "between";
+    const isList = op === "in" || op === "not in";
+    const isRange = op === "between";
+    if (isRange && !wasRange) {
+      const n = Number(wasList ? 0 : rule.value) || 0;
+      rule.value = [n, n + 10];
+    } else if (isList && !wasList) {
+      rule.value = [String(wasRange ? "" : rule.value)].filter(Boolean);
+    } else if (!isList && !isRange && (wasList || wasRange)) {
+      rule.value = 0;
+    }
+    rule.op = op;
+    saveState();
+    renderScreenerRules();
+  }
+
+  function bindStrategyWorkbench() {
+    // --- subtabs
+    const panes = [
+      ["scanner", "strategyScannerPane"],
+      ["simulator", "strategySimulatorPane"],
+      ["taxlots", "strategyTaxLotsPane"],
+      ["rebalance", "strategyRebalancePane"],
+      ["screener", "strategyScreenerPane"],
+    ];
+    document.querySelectorAll("#strategySubTabs .subtab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        currentStrategySubTab = btn.dataset.ssub;
+        document.querySelectorAll("#strategySubTabs .subtab-btn")
+          .forEach((b) => b.classList.toggle("active", b === btn));
+        panes.forEach(([key, id]) => {
+          document.getElementById(id).style.display = currentStrategySubTab === key ? "block" : "none";
+        });
+        renderStrategy();
+      });
+    });
+
+    // --- scanner
+    document.querySelectorAll("#scannerSegFilter .pill").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        currentScannerSegment = btn.dataset.sseg;
+        document.querySelectorAll("#scannerSegFilter .pill")
+          .forEach((b) => b.classList.toggle("active", b === btn));
+        renderScanner();
+      });
+    });
+    ["scannerRunBtn"].forEach((id) =>
+      document.getElementById(id).addEventListener("click", renderScanner));
+    ["scannerOnlySetups", "scannerOrBars", "scannerVolX"].forEach((id) =>
+      document.getElementById(id).addEventListener("change", renderScanner));
+    document.getElementById("scannerBody").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-scan-trade]");
+      if (btn) openOrderModal(btn.dataset.scanTrade, "BUY");
+    });
+
+    // --- simulator
+    document.getElementById("simRunBtn").addEventListener("click", runSimulation);
+    document.getElementById("simFromLtpBtn").addEventListener("click", fillSimulatorFromMarket);
+    document.getElementById("simRegenBtn").addEventListener("click", () => {
+      const symbol = document.getElementById("simSymbol").value;
+      const sessionBars = Math.max(10, Number(document.getElementById("simSessionBars").value) || 75);
+      simSeries(symbol, sessionBars, true);
+      updateSimSourceNote();
+      showToast("Session history regenerated — rerun the simulation to use it.", "info");
+    });
+    document.getElementById("simSymbol").addEventListener("change", () => {
+      fillSimulatorFromMarket();
+      updateSimSourceNote();
+    });
+    document.getElementById("simDirection").addEventListener("change", fillSimulatorFromMarket);
+    document.getElementById("simSessionBars").addEventListener("change", updateSimSourceNote);
+
+    // --- tax lots
+    document.getElementById("lotSymbol").addEventListener("change", () => {
+      document.getElementById("salePrice").value = "";
+      document.getElementById("lotAddCost").value = "";
+      document.getElementById("saleResults").innerHTML = "";
+      renderTaxLots();
+    });
+    document.getElementById("lotImportBtn").addEventListener("click", importDeliveryLots);
+    document.getElementById("lotClearBtn").addEventListener("click", () => {
+      const symbol = document.getElementById("lotSymbol").value;
+      const before = state.taxLots.length;
+      state.taxLots = state.taxLots.filter((l) => l.symbol !== symbol);
+      saveState();
+      document.getElementById("saleResults").innerHTML = "";
+      renderTaxLots();
+      showToast(`Removed ${before - state.taxLots.length} lot(s) for ${symbol}.`, "info");
+    });
+    document.getElementById("lotAddBtn").addEventListener("click", addTaxLot);
+    document.getElementById("lotBody").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-lot-remove]");
+      if (!btn) return;
+      const symbol = document.getElementById("lotSymbol").value;
+      state.taxLots = state.taxLots.filter(
+        (l) => !(l.symbol === symbol && l.id === btn.dataset.lotRemove)
+      );
+      saveState();
+      document.getElementById("saleResults").innerHTML = "";
+      renderTaxLots();
+    });
+    document.getElementById("saleMethod").addEventListener("change", () => {
+      document.getElementById("saleLotIdsWrap").style.display =
+        document.getElementById("saleMethod").value === "SPECIFIC" ? "flex" : "none";
+    });
+    document.getElementById("saleRunBtn").addEventListener("click", runSaleSimulation);
+    document.getElementById("harvestMinLoss").addEventListener("change", renderHarvestCandidates);
+
+    // --- rebalancer
+    document.getElementById("rebEqualBtn").addEventListener("click", equalWeightHeld);
+    document.getElementById("rebAddRowBtn").addEventListener("click", addRebalanceTarget);
+    document.getElementById("rebRunBtn").addEventListener("click", runRebalance);
+    document.getElementById("rebTargetBody").addEventListener("change", (e) => {
+      const weight = e.target.closest("[data-reb-weight]");
+      if (weight) {
+        const v = Number(weight.value);
+        state.rebalanceTargets[weight.dataset.rebWeight] = v > 0 ? v : 0;
+        saveState();
+        return;
+      }
+      const swap = e.target.closest("[data-reb-symbol]");
+      if (swap) {
+        const from = swap.dataset.rebSymbol;
+        const to = swap.value;
+        if (to === from) return;
+        if (state.rebalanceTargets[to] != null) {
+          showToast(`${to} already has a target.`, "warn");
+          renderRebalanceTargets();
+          return;
+        }
+        state.rebalanceTargets[to] = state.rebalanceTargets[from];
+        delete state.rebalanceTargets[from];
+        saveState();
+        renderRebalanceTargets();
+      }
+    });
+    document.getElementById("rebTargetBody").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-reb-remove]");
+      if (!btn) return;
+      delete state.rebalanceTargets[btn.dataset.rebRemove];
+      saveState();
+      renderRebalanceTargets();
+    });
+    document.getElementById("rebResults").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-reb-ticket]");
+      if (!btn) return;
+      const inst = market.get(btn.dataset.rebTicket);
+      if (!inst) return;
+      openOrderModal(btn.dataset.rebTicket, btn.dataset.rebSide, {
+        product: "CARRY_FORWARD",
+        lots: Math.max(1, Math.round(Number(btn.dataset.rebQty) / inst.lotSize)),
+      });
+    });
+
+    // --- screener
+    document.getElementById("screenAddRuleBtn").addEventListener("click", addScreenRule);
+    document.getElementById("screenResetBtn").addEventListener("click", resetScreenRules);
+    document.getElementById("screenRunBtn").addEventListener("click", runScreen);
+    document.getElementById("screenRuleBody").addEventListener("change", (e) => {
+      const t = e.target;
+      const metric = t.closest("[data-screen-metric]");
+      if (metric) {
+        state.screenRules[+metric.dataset.screenMetric].metric = metric.value;
+        saveState();
+        renderScreenerRules();
+        return;
+      }
+      const op = t.closest("[data-screen-op]");
+      if (op) { setScreenRuleOp(+op.dataset.screenOp, op.value); return; }
+
+      const val = t.closest("[data-screen-val]");
+      if (val) {
+        const rule = state.screenRules[+val.dataset.screenVal];
+        rule.value = val.type === "number" ? Number(val.value) : val.value;
+        saveState();
+        return;
+      }
+      const lo = t.closest("[data-screen-lo]");
+      if (lo) {
+        const rule = state.screenRules[+lo.dataset.screenLo];
+        rule.value = [Number(lo.value), Array.isArray(rule.value) ? rule.value[1] : 0];
+        saveState();
+        return;
+      }
+      const hi = t.closest("[data-screen-hi]");
+      if (hi) {
+        const rule = state.screenRules[+hi.dataset.screenHi];
+        rule.value = [Array.isArray(rule.value) ? rule.value[0] : 0, Number(hi.value)];
+        saveState();
+        return;
+      }
+      const list = t.closest("[data-screen-list]");
+      if (list) {
+        state.screenRules[+list.dataset.screenList].value =
+          list.value.split(",").map((s) => s.trim()).filter(Boolean);
+        saveState();
+      }
+    });
+    document.getElementById("screenRuleBody").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-screen-remove]");
+      if (!btn) return;
+      state.screenRules.splice(+btn.dataset.screenRemove, 1);
+      saveState();
+      renderScreenerRules();
+    });
+  }
+
+  // =========================================================================
+  // 14. BOOTSTRAP & TIMERS
   // =========================================================================
   function updateClockAndSession() {
     const p = getIstParts(new Date());

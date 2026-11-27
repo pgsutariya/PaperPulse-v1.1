@@ -36,6 +36,7 @@ import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -116,9 +117,11 @@ import com.example.ui.navigation.OrdersRoute
 import com.example.ui.navigation.PositionsRoute
 import com.example.ui.navigation.SignalsRoute
 import com.example.ui.navigation.StrategyCoachesRoute
+import com.example.ui.navigation.StrategyWorkbenchRoute
 import com.example.ui.navigation.WatchlistRoute
 import com.example.ui.screens.chart.ChartScreen
 import com.example.ui.screens.coach.AiStrategyCoachesScreen
+import com.example.ui.screens.strategy.StrategyWorkbenchScreen
 import com.example.ui.screens.detail.InstrumentDetailScreen
 import com.example.ui.screens.heatmaps.HeatmapsScreen
 import com.example.ui.screens.journal.JournalScreen
@@ -660,6 +663,15 @@ fun PaperPulseApp(
                                     )
                                 }
                                 IconButton(
+                                    onClick = { navController.navigate(StrategyWorkbenchRoute) },
+                                    modifier = Modifier.testTag("topbar_strategy_workbench_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Science,
+                                        contentDescription = "Strategy Workbench: scanner, simulator, tax lots, rebalancer, screener"
+                                    )
+                                }
+                                IconButton(
                                     onClick = { navController.navigate(MarketPulseRoute(initialTab = 0)) },
                                     modifier = Modifier.testTag("topbar_market_pulse_button")
                                 ) {
@@ -827,6 +839,24 @@ fun PaperPulseApp(
                             onOpenChart = { symbol ->
                                 shellViewModel.setActiveSymbol(symbol)
                                 navController.navigate(ChartRoute(symbol))
+                            }
+                        )
+                    }
+                    composable<StrategyWorkbenchRoute> {
+                        StrategyWorkbenchScreen(
+                            onBack = { navController.popBackStack() },
+                            onOpenTicket = { symbol, side, quantity ->
+                                shellViewModel.setActiveSymbol(symbol)
+                                navController.navigate(
+                                    InstrumentDetailRoute(
+                                        symbol = symbol,
+                                        prefillSide = side,
+                                        // The rebalancer deals in delivery stock; the scanner
+                                        // sends no quantity and leaves the product alone.
+                                        prefillProduct = if (quantity > 0) "CARRY_FORWARD" else null,
+                                        prefillQuantity = quantity.takeIf { it > 0 }?.toString()
+                                    )
+                                )
                             }
                         )
                     }
