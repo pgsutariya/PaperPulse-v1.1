@@ -7,6 +7,25 @@
   const TROY_OZ_TO_10G = 10 / 31.1034768;
   const TROY_OZ_TO_1KG = 1000 / 31.1034768;
 
+  // Rule-book for the engines ported from the trader skill packs (see strategy.js).
+  // Budget tracks the paper capital so the limits mean something out of the box.
+  const DEFAULT_TRADER_RULES = {
+    budget: DEFAULT_CAPITAL,
+    cashBufferPct: 10,
+    maxPositionPct: 75,
+    maxOrderInr: 500000,
+    minOrderInr: 500,
+    maxLossPerTradeInr: 5000,
+    maxDailyLossInr: 15000,
+    maxTradesPerDay: 10,
+    maxOrdersPerDay: 30,
+    minRewardRisk: 1.0,
+    requireStop: false,
+    noEntriesBefore: "09:15",
+    noEntriesAfter: "15:10",
+    flatBy: "15:15",
+  };
+
   // =========================================================================
   // 1. INSTRUMENT CATALOG (NSE, BSE, MCX, F&O, CRYPTO, CRYPTO F&O)
   // =========================================================================
@@ -134,6 +153,7 @@
           signalNotificationsEnabled: parsed.signalNotificationsEnabled !== false,
           broker: parsed.broker || { provider: "PUBLIC_FREE", apiKey: "", accessToken: "", connectedAt: null },
           theme: parsed.theme || "dark",
+          traderRules: Object.assign({}, DEFAULT_TRADER_RULES, parsed.traderRules || {}),
         };
       }
     } catch (_) { /* ignore corrupt storage */ }
@@ -151,6 +171,7 @@
       signalNotificationsEnabled: true,
       broker: { provider: "PUBLIC_FREE", apiKey: "", accessToken: "", connectedAt: null },
       theme: "dark",
+      traderRules: Object.assign({}, DEFAULT_TRADER_RULES),
     };
   }
 
@@ -367,6 +388,23 @@
 
     const total = brokerage + stt + exchangeTxn + sebi + stampDuty + gst;
     return { brokerage, stt, exchangeTxn, sebi, stampDuty, gst, total };
+  }
+
+  // Splits one executed order's charges across two legs (used when a single order both
+  // closes a position and opens the opposite one). Pro-rata by quantity keeps the combined
+  // total exactly equal to what that one order actually cost - recomputing each leg from
+  // scratch would charge two brokerage minimums for a single fill.
+  function scaleCharges(c, factor) {
+    const x = c || { brokerage: 0, stt: 0, exchangeTxn: 0, sebi: 0, stampDuty: 0, gst: 0, total: 0 };
+    return {
+      brokerage: x.brokerage * factor,
+      stt: x.stt * factor,
+      exchangeTxn: x.exchangeTxn * factor,
+      sebi: x.sebi * factor,
+      stampDuty: x.stampDuty * factor,
+      gst: x.gst * factor,
+      total: x.total * factor,
+    };
   }
 
   function sumCharges(a, b) {
@@ -1115,8 +1153,21 @@
     const qty = cleanLots * inst.lotSize;
     const refPrice = orderType === "MARKET" ? inst.ltp : (Number(limitPrice) || Number(triggerPrice) || inst.ltp);
 
-    const neededMargin = calculateMarginRequired(inst, qty, refPrice, product);
-    const availMargin = state.capital + getTotalUnrealisedPnl() - getUsedMargin();
+    // Only the exposure this order ADDS needs margin. Quantity that offsets an existing
+    // opposite position releases margin instead of consuming it, so a pure exit (or a
+    // reversal) must never be rejected for want of margin.
+    const offsetPos = state.positions.find(
+      (p) => p.symbol === symbol && p.product === product && p.side !== side
+    );
+    const offsetQty = offsetPos ? Math.min(offsetPos.qty, qty) : 0;
+    const newExposureQty = qty - offsetQty;
+    const neededMargin = newExposureQty > 0
+      ? calculateMarginRequired(inst, newExposureQty, refPrice, product)
+      : 0;
+    const releasedMargin = offsetQty > 0
+      ? calculateMarginRequired(inst, offsetQty, offsetPos.avgEntry, product)
+      : 0;
+    const availMargin = state.capital + getTotalUnrealisedPnl() - getUsedMargin() + releasedMargin;
     if (neededMargin > availMargin) {
       return { ok: false, error: `Insufficient margin. Need ${fmtInr(neededMargin)}, available ${fmtInr(availMargin)}.` };
     }
@@ -1163,15 +1214,13 @@
     order.filledAt = Date.now();
     order.charges = charges;
 
-    // Deduct entry charges from capital immediately
-    state.capital -= charges.total;
-
     // Check if an existing position exists for same symbol & product
     const existingIdx = state.positions.findIndex((p) => p.symbol === order.symbol && p.product === order.product);
     if (existingIdx >= 0) {
       const pos = state.positions[existingIdx];
       if (pos.side === order.side) {
         // Scale-in / Average automatically
+        state.capital -= charges.total;
         const totalQty = pos.qty + order.qty;
         pos.avgEntry = roundTick(((pos.avgEntry * pos.qty) + (price * order.qty)) / totalQty, inst.tickSize);
         pos.qty = totalQty;
@@ -1180,10 +1229,43 @@
         if (order.stopLoss) pos.stopLoss = order.stopLoss;
         if (order.target) pos.target = order.target;
       } else {
-        // Opposite side closes or reduces position
-        closePositionInternal(pos, Math.min(pos.qty, order.qty), price, "Order Fill", charges);
+        // Opposite side: close (or reduce) the position, and if the order is LARGER than
+        // the position, flip into a new position with the surplus. Previously the surplus
+        // was silently discarded - the order reported FILLED for the full quantity and was
+        // charged for it, but the trader was left flat instead of reversed.
+        const closeQty = Math.min(pos.qty, order.qty);
+        const surplusQty = order.qty - closeQty;
+        // closePositionInternal books the exit leg against capital, so these charges must
+        // NOT be deducted here too.
+        const closeCharges = surplusQty > 0 ? scaleCharges(charges, closeQty / order.qty) : charges;
+        closePositionInternal(
+          pos,
+          closeQty,
+          price,
+          surplusQty > 0 ? "Order Fill (Reversal)" : "Order Fill",
+          closeCharges
+        );
+        if (surplusQty > 0) {
+          const openCharges = scaleCharges(charges, surplusQty / order.qty);
+          state.capital -= openCharges.total;
+          state.positions.unshift({
+            id: genId("pos"),
+            symbol: order.symbol,
+            side: order.side,
+            product: order.product,
+            qty: surplusQty,
+            lotSize: inst.lotSize,
+            lots: Math.max(1, Math.round(surplusQty / inst.lotSize)),
+            avgEntry: price,
+            stopLoss: order.stopLoss,
+            target: order.target,
+            entryCharges: openCharges,
+            openedAt: Date.now(),
+          });
+        }
       }
     } else {
+      state.capital -= charges.total;
       state.positions.unshift({
         id: genId("pos"),
         symbol: order.symbol,
@@ -1364,6 +1446,10 @@
     } else {
       pos.qty -= closeQty;
       pos.lots = Math.max(1, Math.round(pos.qty / pos.lotSize));
+      // The closed slice's share of the entry charges has just been booked into the
+      // journal. Leave only the remainder on the position, otherwise the next exit
+      // books the original entry charges a second time.
+      pos.entryCharges = scaleCharges(pos.entryCharges, 1 - ratio);
     }
 
     saveState();
@@ -2180,7 +2266,100 @@
       <div class="preview-row"><span>STT / CTT + Exchange + SEBI + Stamp</span><span class="mono">${fmtInr(ch.stt + ch.exchangeTxn + ch.sebi + ch.stampDuty)}</span></div>
       <div class="preview-row"><span>GST (18%)</span><span class="mono">${fmtInr(ch.gst)}</span></div>
       <div class="preview-row"><strong>Total Est. Order Charges &amp; Taxes</strong><strong class="mono text-warn">${fmtInr(ch.total)}</strong></div>
+      ${renderRiskCheck(inst, qty, price, product)}
     `;
+  }
+
+  /**
+   * Pre-trade risk check, from the engines ported out of the trader skill packs.
+   * Advisory only: it reports which of your rules an order would break, it does not
+   * stop you placing it. Returns the HTML block appended to the order preview.
+   */
+  function renderRiskCheck(inst, qty, price, product) {
+    const Strategy = window.PaperPulseStrategy;
+    if (!Strategy) return "";
+
+    const slRaw = Number(document.getElementById("orderStopLoss").value);
+    const tgtRaw = Number(document.getElementById("orderTarget").value);
+    const stop = slRaw > 0 ? slRaw : null;
+    const target = tgtRaw > 0 ? tgtRaw : null;
+
+    const rules = Object.assign({}, state.traderRules, {
+      budget: state.capital > 0 ? state.capital : DEFAULT_CAPITAL,
+    });
+    const held = state.positions
+      .filter((p) => p.symbol === inst.symbol && p.side === "BUY")
+      .reduce((a, p) => a + p.qty, 0);
+    const heldValue = state.positions
+      .filter((p) => p.symbol === inst.symbol)
+      .reduce((a, p) => a + p.qty * (market.get(p.symbol)?.ltp || p.avgEntry) * getInrMultiplier(inst), 0);
+
+    let res;
+    try {
+      res = Strategy.checkRisk({
+        order: {
+          symbol: inst.symbol, isBuy: orderModalSide === "BUY", quantity: qty,
+          entry: price, stop: stop, target: target, isEntry: true,
+        },
+        rules: rules,
+        account: {
+          cash: state.capital,
+          equity: state.capital + getTotalUnrealisedPnl(),
+          holdings: { [inst.symbol]: held },
+          holdingValue: { [inst.symbol]: heldValue },
+        },
+        day: { ordersPlaced: ordersPlacedToday(), entriesPlaced: entriesPlacedToday(), committedLoss: committedLossToday() },
+        nowHHMM: istHhMm(),
+      });
+    } catch (e) {
+      return "";
+    }
+
+    const rr = res.rewardRisk != null ? `<div class="preview-row"><span>Reward : Risk</span><strong class="mono ${res.rewardRisk >= (rules.minRewardRisk || 1) ? "text-pos" : "text-warn"}">${res.rewardRisk.toFixed(2)} : 1</strong></div>` : "";
+    const loss = res.lossAtStop != null ? `<div class="preview-row"><span>Loss at Stop</span><strong class="mono text-neg">${fmtInr(res.lossAtStop)}</strong></div>` : "";
+    const head = res.passed
+      ? `<div class="preview-row"><strong>Risk Check</strong><strong class="mono text-pos">PASS</strong></div>`
+      : `<div class="preview-row"><strong>Risk Check</strong><strong class="mono text-neg">${res.reasons.length} ISSUE${res.reasons.length === 1 ? "" : "S"}</strong></div>`;
+    const list = res.reasons.length
+      ? `<ul class="risk-reasons">${res.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`
+      : "";
+    const warn = res.warnings.length
+      ? `<ul class="risk-reasons warn">${res.warnings.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`
+      : "";
+    const hint = (!stop && rules.requireStop === false)
+      ? `<div class="hint-text">Add a stop-loss to get the loss-at-stop and reward:risk checks.</div>`
+      : "";
+
+    return `<div class="preview-divider"></div>${head}${loss}${rr}${list}${warn}${hint}`;
+  }
+
+  function istHhMm() {
+    const p = getIstParts();
+    return String(p.hour).padStart(2, "0") + ":" + String(p.minute).padStart(2, "0");
+  }
+
+  function startOfIstToday() {
+    const p = getIstParts();
+    const d = new Date();
+    return d.getTime() - ((p.hour * 3600 + p.minute * 60 + p.second) * 1000);
+  }
+
+  function ordersPlacedToday() {
+    const from = startOfIstToday();
+    return state.orders.filter((o) => (o.createdAt || 0) >= from).length;
+  }
+
+  function entriesPlacedToday() {
+    const from = startOfIstToday();
+    return state.orders.filter((o) => (o.createdAt || 0) >= from && o.status === "FILLED" && o.orderType !== "AVERAGE").length;
+  }
+
+  function committedLossToday() {
+    return state.positions.reduce((a, p) => {
+      if (!p.stopLoss) return a;
+      const risk = p.side === "BUY" ? p.avgEntry - p.stopLoss : p.stopLoss - p.avgEntry;
+      return a + Math.max(0, risk) * p.qty;
+    }, 0);
   }
 
   function openModifyOrderModal(orderId) {
@@ -2388,8 +2567,7 @@
 
     document.getElementById("toggleThemeBtn").addEventListener("click", () => {
       state.theme = state.theme === "dark" ? "light" : "dark";
-      document.documentElement.setAttribute("data-theme", state.theme);
-      document.getElementById("toggleThemeBtn").textContent = state.theme === "dark" ? "☀️" : "🌙";
+      applyTheme(state.theme);
       saveState();
       if (currentTab === "chart") drawChart();
     });
@@ -2714,7 +2892,9 @@
     document.getElementById("cancelOrderModalBtn").addEventListener("click", closeOrderModal);
     document.getElementById("sideBuyBtn").addEventListener("click", () => { orderModalSide = "BUY"; syncOrderModalUi(); });
     document.getElementById("sideSellBtn").addEventListener("click", () => { orderModalSide = "SELL"; syncOrderModalUi(); });
-    ["orderProduct", "orderType", "orderLots", "orderLimitPrice", "orderTriggerPrice"].forEach((id) => {
+    // orderStopLoss / orderTarget feed the risk check, so the preview follows them too
+    ["orderProduct", "orderType", "orderLots", "orderLimitPrice", "orderTriggerPrice",
+     "orderStopLoss", "orderTarget"].forEach((id) => {
       document.getElementById(id).addEventListener("input", syncOrderModalUi);
       document.getElementById(id).addEventListener("change", syncOrderModalUi);
     });
@@ -2845,9 +3025,17 @@
     document.getElementById("sessionStatusLabel").textContent = label;
   }
 
+  function applyTheme(theme) {
+    const resolved = theme === "light" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", resolved);
+    const btn = document.getElementById("toggleThemeBtn");
+    if (btn) btn.textContent = resolved === "dark" ? "\u2600\ufe0f" : "\ud83c\udf19";
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", resolved === "light" ? "#f1f5f9" : "#0b1120");
+  }
+
   function init() {
-    document.documentElement.setAttribute("data-theme", state.theme || "dark");
-    document.getElementById("toggleThemeBtn").textContent = state.theme === "dark" ? "☀️" : "🌙";
+    applyTheme(state.theme);
 
     checkOAuthCallbackParams();
     bindEvents();

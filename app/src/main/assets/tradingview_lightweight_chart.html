@@ -269,6 +269,83 @@
         paneRatioInitialized = false;
       }
 
+      // ---------------------------------------------------------------------
+      // Theme tokens. The host app owns light/dark; the page mirrors whichever
+      // scheme the payload reports so the chart never stays a dark rectangle
+      // inside the light theme.
+      // ---------------------------------------------------------------------
+      var currentThemeIsDark = null;
+
+      function tvTheme(isDark) {
+        return isDark ? {
+          bg: "#131722",
+          text: "#D1D4DC",
+          separator: "#2A2E39",
+          separatorHover: "#2962FF",
+          grid: "rgba(42, 46, 57, 0.45)",
+          crosshair: "#787B86",
+          crosshairLabelBg: "#2A2E39",
+          border: "#2A2E39",
+          hudBg: "rgba(19, 23, 34, 0.72)",
+          hudTitle: "#E2E8F0",
+          hudPane: "#94A3B8",
+          badge: "rgba(209, 212, 220, 0.45)"
+        } : {
+          bg: "#FFFFFF",
+          text: "#334155",
+          separator: "#E2E8F0",
+          separatorHover: "#1D4ED8",
+          grid: "rgba(100, 116, 139, 0.18)",
+          crosshair: "#64748B",
+          crosshairLabelBg: "#475569",
+          border: "#CBD5E1",
+          hudBg: "rgba(255, 255, 255, 0.86)",
+          hudTitle: "#0F172A",
+          hudPane: "#475569",
+          badge: "rgba(51, 65, 85, 0.55)"
+        };
+      }
+
+      function applyThemeCss(isDark) {
+        var T = tvTheme(isDark);
+        document.documentElement.style.backgroundColor = T.bg;
+        document.body.style.backgroundColor = T.bg;
+        document.body.style.color = T.text;
+        var hud = document.getElementById("hud");
+        if (hud) hud.style.background = T.hudBg;
+        var hudTitleEl = document.getElementById("hud-title");
+        if (hudTitleEl) hudTitleEl.style.color = T.hudTitle;
+        var hudPaneEl = document.getElementById("hud-pane");
+        if (hudPaneEl) hudPaneEl.style.color = T.hudPane;
+        var badge = document.getElementById("tv-badge");
+        if (badge) badge.style.color = T.badge;
+      }
+
+      function applyChartTheme(isDark) {
+        var T = tvTheme(isDark);
+        applyThemeCss(isDark);
+        if (!chart) return;
+        try {
+          chart.applyOptions({
+            layout: {
+              background: { type: window.LightweightCharts && window.LightweightCharts.ColorType ? window.LightweightCharts.ColorType.Solid : "solid", color: T.bg },
+              textColor: T.text,
+              panes: { separatorColor: T.separator, separatorHoverColor: T.separatorHover }
+            },
+            grid: {
+              vertLines: { color: T.grid },
+              horzLines: { color: T.grid }
+            },
+            crosshair: {
+              vertLine: { color: T.crosshair, labelBackgroundColor: T.crosshairLabelBg },
+              horzLine: { color: T.crosshair, labelBackgroundColor: T.crosshairLabelBg }
+            },
+            rightPriceScale: { borderColor: T.border },
+            timeScale: { borderColor: T.border }
+          });
+        } catch (e) {}
+      }
+
       function createChartInstance(payload) {
         destroyChart();
         const LWC = window.LightweightCharts;
@@ -280,6 +357,11 @@
           ? (LWC.PriceScaleMode ? LWC.PriceScaleMode.Logarithmic : 1)
           : (LWC.PriceScaleMode ? LWC.PriceScaleMode.Normal : 0);
 
+        const isDark = payload.isDarkTheme !== false;
+        const TH = tvTheme(isDark);
+        currentThemeIsDark = isDark;
+        applyThemeCss(isDark);
+
         const w = Math.max(200, container.clientWidth || window.innerWidth || 360);
         const h = Math.max(240, container.clientHeight || window.innerHeight || 480);
         lastContainerW = w;
@@ -289,41 +371,41 @@
           width: w,
           height: h,
           layout: {
-            background: { type: LWC.ColorType ? LWC.ColorType.Solid : "solid", color: "#131722" },
-            textColor: "#D1D4DC",
+            background: { type: LWC.ColorType ? LWC.ColorType.Solid : "solid", color: TH.bg },
+            textColor: TH.text,
             fontSize: 11,
             panes: {
-              separatorColor: "#2A2E39",
-              separatorHoverColor: "#2962FF",
+              separatorColor: TH.separator,
+              separatorHoverColor: TH.separatorHover,
               enableResize: false
             }
           },
           grid: {
-            vertLines: { color: "rgba(42, 46, 57, 0.45)" },
-            horzLines: { color: "rgba(42, 46, 57, 0.45)" }
+            vertLines: { color: TH.grid },
+            horzLines: { color: TH.grid }
           },
           crosshair: {
             mode: crosshairMode,
             vertLine: {
-              color: "#787B86",
+              color: TH.crosshair,
               width: 1,
               style: LWC.LineStyle ? LWC.LineStyle.Dashed : 2,
-              labelBackgroundColor: "#2A2E39"
+              labelBackgroundColor: TH.crosshairLabelBg
             },
             horzLine: {
-              color: "#787B86",
+              color: TH.crosshair,
               width: 1,
               style: LWC.LineStyle ? LWC.LineStyle.Dashed : 2,
-              labelBackgroundColor: "#2A2E39"
+              labelBackgroundColor: TH.crosshairLabelBg
             }
           },
           rightPriceScale: {
-            borderColor: "#2A2E39",
+            borderColor: TH.border,
             mode: priceScaleMode,
             scaleMargins: { top: 0.12, bottom: 0.06 }
           },
           timeScale: {
-            borderColor: "#2A2E39",
+            borderColor: TH.border,
             timeVisible: !!payload.isIntraday,
             secondsVisible: false,
             rightOffset: 4,
@@ -428,6 +510,13 @@
         const styleKey = payload.chartStyle;
         const paneKey = (payload.lowerPane && payload.lowerPane.paneKey) || "VOLUME";
         const needsFullRebuild = !chart || contextKey !== lastContextKey || styleKey !== lastStyleKey || paneKey !== lastLowerPaneKey;
+
+        // Theme can flip without any of the rebuild keys changing - repaint in place.
+        const payloadIsDark = payload.isDarkTheme !== false;
+        if (!needsFullRebuild && payloadIsDark !== currentThemeIsDark) {
+          currentThemeIsDark = payloadIsDark;
+          applyChartTheme(payloadIsDark);
+        }
 
         let savedRange = null;
         if (!needsFullRebuild && chart) {

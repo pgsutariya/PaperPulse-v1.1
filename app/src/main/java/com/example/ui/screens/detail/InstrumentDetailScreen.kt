@@ -37,6 +37,8 @@ import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import com.example.domain.strategy.PreTradeRiskGate
+import com.example.domain.model.MarketSegment
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -800,6 +802,7 @@ fun InstrumentDetailScreen(
                         Text("Simulated Slippage", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("${state.config.slippageBps} bps", style = MonoPriceSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    state.riskCheck?.let { RiskCheckPanel(it, inst.segment) }
                     state.orderFeedbackMessage?.let { feedbackMsg ->
                         Surface(
                             shape = RoundedCornerShape(10.dp),
@@ -1100,6 +1103,116 @@ private fun OrderSideButton(
                 color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.Bold
             )
+        }
+    }
+}
+
+/**
+ * Advisory pre-trade risk panel, driven by [com.example.domain.strategy.PreTradeRiskGate]
+ * (ported from the trader skill packs).
+ *
+ * It reports which of the account's risk rules the ticket would break and never blocks the
+ * order: the trader stays in charge, but they see the breach before they tap Place.
+ */
+@Composable
+private fun RiskCheckPanel(
+    result: PreTradeRiskGate.Result,
+    segment: MarketSegment,
+    modifier: Modifier = Modifier
+) {
+    val tradingColors = LocalTradingColors.current
+    val passed = result.passed
+    val accent = if (passed) tradingColors.bullish else tradingColors.bearish
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (passed) tradingColors.bullishContainer else tradingColors.bearishContainer,
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.45f)),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("order_risk_check_panel")
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Shield,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "Risk Check",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = accent
+                    )
+                }
+                Text(
+                    text = if (passed) {
+                        "PASS"
+                    } else {
+                        "${result.reasons.size} ISSUE${if (result.reasons.size == 1) "" else "S"}"
+                    },
+                    style = MonoPriceSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = accent
+                )
+            }
+
+            result.lossAtStop?.let { loss ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        "Loss at Stop",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        RiskMath.formatPrice(loss, segment),
+                        style = MonoPriceSmall,
+                        color = tradingColors.bearish
+                    )
+                }
+            }
+            result.rewardRisk?.let { rr ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        "Reward : Risk",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "${rr.stripTrailingZeros().toPlainString()} : 1",
+                        style = MonoPriceSmall,
+                        color = if (rr >= java.math.BigDecimal.ONE) tradingColors.bullish else tradingColors.amber
+                    )
+                }
+            }
+
+            result.reasons.forEach { reason ->
+                Text(
+                    text = "• $reason",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tradingColors.bearish
+                )
+            }
+            result.warnings.forEach { warning ->
+                Text(
+                    text = "• $warning",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tradingColors.amber
+                )
+            }
         }
     }
 }

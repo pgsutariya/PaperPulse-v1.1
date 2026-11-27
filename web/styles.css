@@ -16,6 +16,26 @@
   --info-soft: rgba(59, 130, 246, 0.16);
   --shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   --radius: 12px;
+
+  /* Text-on-surface variants of the semantic colours. The --buy/--sell/--warn
+     values above are tuned as *fills* (buttons, badges, chart marks); used as
+     small text on a surface they fall under 4.5:1, badly so in the light scheme.
+     Everything that renders a colour as TEXT uses these instead. */
+  --buy-text: #4ade80;
+  --sell-text: #f87171;
+  --warn-text: #fbbf24;
+  --info-text: #60a5fa;
+  --seg-nse: #60a5fa;
+  --seg-bse: #c084fc;
+  --seg-mcx: #fbbf24;
+  --seg-crypto: #34d399;
+
+  /* Fills that carry white text - all >= 4.5:1 against #ffffff. */
+  --primary-strong: #2563eb;
+  --buy-strong: #15803d;
+  --sell-strong: #b91c1c;
+
+  color-scheme: dark;
 }
 
 [data-theme="light"] {
@@ -24,7 +44,7 @@
   --surface-2: #f8fafc;
   --border: #e2e8f0;
   --text: #0f172a;
-  --text-muted: #64748b;
+  --text-muted: #5a6b84;
   --primary: #2563eb;
   --primary-hover: #1d4ed8;
   --buy: #15803d;
@@ -35,6 +55,22 @@
   --warn-soft: rgba(217, 119, 6, 0.12);
   --info-soft: rgba(37, 99, 235, 0.12);
   --shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
+
+  /* All >= 4.5:1 against #ffffff, #f8fafc and #f1f5f9 (the three light surfaces). */
+  --buy-text: #166534;
+  --sell-text: #b91c1c;
+  --warn-text: #92400e;
+  --info-text: #1d4ed8;
+  --seg-nse: #1d4ed8;
+  --seg-bse: #7e22ce;
+  --seg-mcx: #92400e;
+  --seg-crypto: #0f766e;
+
+  --primary-strong: #1d4ed8;
+  --buy-strong: #15803d;
+  --sell-strong: #b91c1c;
+
+  color-scheme: light;
 }
 
 * {
@@ -96,7 +132,7 @@ body {
   padding: 2px 6px;
   border-radius: 6px;
   background: var(--info-soft);
-  color: var(--primary);
+  color: var(--info-text);
 }
 
 .brand-sub {
@@ -105,7 +141,7 @@ body {
 }
 
 .brand-sub.live-ok {
-  color: #4ade80;
+  color: var(--buy-text);
 }
 
 .metrics-strip {
@@ -262,7 +298,7 @@ body {
 }
 
 .pill.active {
-  background: var(--primary);
+  background: var(--primary-strong);
   border-color: var(--primary);
   color: #ffffff;
 }
@@ -301,12 +337,12 @@ body {
 }
 
 .subtab-btn.active {
-  background: var(--primary);
+  background: var(--primary-strong);
   color: #ffffff;
 }
 
 .subtab-btn.active .tab-pill {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.3);
   color: #ffffff;
   border-color: transparent;
 }
@@ -356,17 +392,17 @@ body {
 }
 
 .btn-primary {
-  background: var(--primary);
+  background: var(--primary-strong);
   color: #ffffff;
 }
 
 .btn-buy {
-  background: var(--buy);
+  background: var(--buy-strong);
   color: #ffffff;
 }
 
 .btn-sell, .btn-danger {
-  background: var(--sell);
+  background: var(--sell-strong);
   color: #ffffff;
 }
 
@@ -377,7 +413,7 @@ body {
 }
 
 .btn-ghost.active-tool {
-  background: var(--primary);
+  background: var(--primary-strong);
   border-color: var(--primary);
   color: #ffffff;
 }
@@ -456,7 +492,7 @@ body {
   padding: 2px 6px;
   border-radius: 5px;
   background: var(--info-soft);
-  color: var(--primary);
+  color: var(--info-text);
   font-family: 'JetBrains Mono', monospace;
 }
 
@@ -473,12 +509,12 @@ body {
 
 .feed-tag.live {
   background: var(--buy-soft);
-  color: #4ade80;
+  color: var(--buy-text);
 }
 
 .feed-tag.sim {
   background: var(--warn-soft);
-  color: var(--warn);
+  color: var(--warn-text);
 }
 
 .seg-badge {
@@ -492,14 +528,14 @@ body {
   color: var(--text-muted);
 }
 
-.seg-badge.NSE { color: #60a5fa; border-color: rgba(96, 165, 250, 0.35); }
-.seg-badge.BSE { color: #c084fc; border-color: rgba(192, 132, 252, 0.35); }
-.seg-badge.MCX { color: #fbbf24; border-color: rgba(251, 191, 36, 0.35); }
-.seg-badge.CRYPTO { color: #34d399; border-color: rgba(52, 211, 153, 0.35); }
+.seg-badge.NSE { color: var(--seg-nse); border-color: rgba(96, 165, 250, 0.35); }
+.seg-badge.BSE { color: var(--seg-bse); border-color: rgba(192, 132, 252, 0.35); }
+.seg-badge.MCX { color: var(--seg-mcx); border-color: rgba(251, 191, 36, 0.35); }
+.seg-badge.CRYPTO { color: var(--seg-crypto); border-color: rgba(52, 211, 153, 0.35); }
 
-.text-pos { color: #22c55e; }
-.text-neg { color: #ef4444; }
-.text-warn { color: var(--warn); }
+.text-pos { color: var(--buy-text); }
+.text-neg { color: var(--sell-text); }
+.text-warn { color: var(--warn-text); }
 
 .status-badge {
   display: inline-block;
@@ -512,17 +548,17 @@ body {
 
 .status-FILLED, .status-LONG, .status-BUY, .status-HIT_T1, .status-HIT_T2, .status-ADD {
   background: var(--buy-soft);
-  color: #22c55e;
+  color: var(--buy-text);
 }
 
 .status-SELL, .status-SHORT, .status-CANCELLED, .status-REJECTED, .status-HIT_SL, .status-REDUCE {
   background: var(--sell-soft);
-  color: #ef4444;
+  color: var(--sell-text);
 }
 
 .status-PENDING, .status-EXPIRED, .status-RESET {
   background: var(--warn-soft);
-  color: var(--warn);
+  color: var(--warn-text);
 }
 
 .action-cell {
@@ -632,7 +668,7 @@ body {
 }
 
 .tf-btn.active {
-  background: var(--primary);
+  background: var(--primary-strong);
   color: #ffffff;
 }
 
@@ -913,19 +949,19 @@ body {
 }
 
 .side-btn.buy.active {
-  background: var(--buy);
-  border-color: var(--buy);
+  background: var(--buy-strong);
+  border-color: var(--buy-strong);
   color: #ffffff;
 }
 
 .side-btn.sell.active {
-  background: var(--sell);
-  border-color: var(--sell);
+  background: var(--sell-strong);
+  border-color: var(--sell-strong);
   color: #ffffff;
 }
 
 .side-btn.neutral.active {
-  background: var(--primary);
+  background: var(--primary-strong);
   border-color: var(--primary);
   color: #ffffff;
 }
@@ -1066,4 +1102,30 @@ body {
   .workspace { padding: 12px; }
   .chart-canvas-container { height: 360px; }
   .metric-card { min-width: 96px; padding: 5px 8px; }
+}
+
+/* Pre-trade risk check (engines ported from the trader skill packs) */
+.risk-reasons {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.risk-reasons li {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--sell-text);
+  background: var(--sell-soft);
+  border-left: 2px solid var(--sell);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.risk-reasons.warn li {
+  color: var(--warn-text);
+  background: var(--warn-soft);
+  border-left-color: var(--warn);
 }

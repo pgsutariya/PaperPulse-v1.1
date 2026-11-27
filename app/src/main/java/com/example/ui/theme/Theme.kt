@@ -1,6 +1,6 @@
 package com.example.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
+import android.app.Activity
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -9,9 +9,12 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
 
 @Immutable
 data class TradingExtendedColors(
@@ -25,7 +28,10 @@ data class TradingExtendedColors(
     val violetContainer: Color,
     val cryptoCyan: Color,
     val border: Color,
-    val cardElevated: Color
+    val cardElevated: Color,
+    /** True while the dark scheme is active - lets non-Material surfaces (chart canvas,
+     *  WebView chart) pick a matching palette instead of hardcoding the dark one. */
+    val isDark: Boolean
 )
 
 private val DarkExtendedColors = TradingExtendedColors(
@@ -39,7 +45,8 @@ private val DarkExtendedColors = TradingExtendedColors(
     violetContainer = VioletContainer,
     cryptoCyan = CyanCrypto,
     border = HairlineBorder,
-    cardElevated = SlateSurfaceElevated
+    cardElevated = SlateSurfaceElevated,
+    isDark = true
 )
 
 private val LightExtendedColors = TradingExtendedColors(
@@ -53,7 +60,8 @@ private val LightExtendedColors = TradingExtendedColors(
     violetContainer = Color(0xFFEDE9FE),
     cryptoCyan = Color(0xFF0891B2),
     border = LightBorder,
-    cardElevated = SoftSlateSurface
+    cardElevated = SoftSlateSurface,
+    isDark = false
 )
 
 val LocalTradingColors = staticCompositionLocalOf { DarkExtendedColors }
@@ -135,6 +143,21 @@ fun PaperPulseTheme(
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
     val extendedColors = if (darkTheme) DarkExtendedColors else LightExtendedColors
+
+    // The app draws edge-to-edge and picks its own light/dark scheme independently of the
+    // system setting, so the status / navigation bar icons have to be told which scheme is
+    // actually on screen. Without this, enableEdgeToEdge() keeps the icon tint it derived
+    // from the *system* configuration and the bars become unreadable whenever the two
+    // disagree (e.g. system in light mode with the terminal's default dark theme).
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? Activity)?.window ?: return@SideEffect
+            val controller = WindowCompat.getInsetsController(window, view)
+            controller.isAppearanceLightStatusBars = !darkTheme
+            controller.isAppearanceLightNavigationBars = !darkTheme
+        }
+    }
 
     CompositionLocalProvider(LocalTradingColors provides extendedColors) {
         MaterialTheme(

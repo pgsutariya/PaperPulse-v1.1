@@ -23,6 +23,8 @@ import com.example.domain.model.Instrument
 import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderPlacementRequest
 import com.example.domain.model.OrderSide
+import com.example.domain.strategy.PreTradeRiskGate
+import com.example.domain.strategy.TraderRules
 import com.example.domain.model.OrderType
 import com.example.domain.model.ProductType
 import com.example.domain.model.RiskInputMode
@@ -47,6 +49,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.time.LocalTime
 import java.math.BigDecimal
 import java.math.RoundingMode
 import javax.inject.Inject
@@ -94,7 +97,12 @@ data class InstrumentDetailUiState(
     val aiAuditState: AiUiState<AiSignalSecondOpinion> = AiUiState.Idle,
     val aiConnectionStatus: AiConnectionStatus = AiConnectionStatus(),
     val orderFeedbackMessage: String? = null,
-    val orderFeedbackIsError: Boolean = false
+    val orderFeedbackIsError: Boolean = false,
+    /**
+     * Advisory pre-trade check from [com.example.domain.strategy.PreTradeRiskGate]
+     * (ported from the trader skill packs). Null until there is enough of a ticket to judge.
+     */
+    val riskCheck: PreTradeRiskGate.Result? = null
 )
 
 sealed interface DetailEvent {
@@ -216,6 +224,11 @@ class InstrumentDetailViewModel @Inject constructor(
         val segStatus = inst?.let { health.first[it.segment] }
         val segBadge = segStatus?.badge ?: SegmentBadgeMode.SIMULATED
         val statusMsg = segStatus?.detail?.takeIf { segBadge == SegmentBadgeMode.SUSPENDED } ?: health.third
+        val riskCheck = if (inst != null && account != null) {
+            buildRiskCheck(inst, draft, account)
+        } else {
+            null
+        }
         InstrumentDetailUiState(
             instrument = inst,
             accountState = account,
@@ -231,7 +244,8 @@ class InstrumentDetailViewModel @Inject constructor(
             aiAuditState = aiPair.first,
             aiConnectionStatus = aiPair.second,
             orderFeedbackMessage = feedback?.first,
-            orderFeedbackIsError = feedback?.second ?: false
+            orderFeedbackIsError = feedback?.second ?: false,
+            riskCheck = riskCheck
         )
     }.stateIn(
         scope = viewModelScope,
@@ -243,29 +257,99 @@ class InstrumentDetailViewModel @Inject constructor(
         aiMarketRepository.switchActiveModel(modelName)
     }
 
+    /**
+     * Run the ported pre-trade gate over the ticket as it currently stands.
+     *
+     * Advisory only - it reports which of the trader's own rules the order would break,
+     * it does not stop the order. The engine's budget-based limits are scaled to the paper
+     * account so they mean something without the trader configuring anything first.
+     */
+    private fun buildRiskCheck(
+        inst: Instrument,
+        d: OrderTicketDraft,
+        account: AccountState
+    ): PreTradeRiskGate.Result? {
+        val quantity = d.quantityText.toIntOrNull() ?: return null
+        if (quantity <= 0) return null
+        val entry = resolveEntry(inst, d)
+        if (entry <= BigDecimal.ZERO) return null
+
+        val isCrypto = inst.segment == MarketSegment.CRYPTO
+        val capital = if (isCrypto) account.cryptoVirtualCapital else account.virtualCapital
+        val cash = if (isCrypto) account.cryptoAvailableMargin else account.availableMargin
+        if (capital <= BigDecimal.ZERO) return null
+
+        // Percentage limits come from the rule-book; the rupee ones scale off the paper
+        // capital so a Rs 10,00,000 account is not judged against a Rs 1,00,000 default.
+        val rules = TraderRules(
+            budget = capital,
+            maxOrderInr = capital.multiply(BigDecimal("0.5")),
+            minOrderInr = BigDecimal.ZERO,
+            maxLossPerTradeInr = capital.multiply(BigDecimal("0.01")),
+            maxDailyLossInr = capital.multiply(BigDecimal("0.03")),
+            maxTradesPerDay = Int.MAX_VALUE,
+            maxOrdersPerDay = Int.MAX_VALUE,
+            requireStop = false,
+            allowShort = true,
+            noEntriesBefore = LocalTime.MIDNIGHT,
+            noEntriesAfter = LocalTime.of(23, 59)
+        )
+
+        return PreTradeRiskGate.check(
+            order = PreTradeRiskGate.ProposedOrder(
+                symbol = inst.symbol,
+                isBuy = d.side == OrderSide.BUY,
+                quantity = quantity,
+                entry = entry,
+                stop = resolveStopPrice(entry, d),
+                target = resolveTargetPrice(entry, d),
+                isEntry = true
+            ),
+            rules = rules,
+            account = PreTradeRiskGate.AccountSnapshot(cash = cash, equity = capital),
+            livePrice = inst.ltp
+        )
+    }
+
+    /** The ticket's entry price: the typed limit when there is one, else the live price. */
+    private fun resolveEntry(inst: Instrument, d: OrderTicketDraft): BigDecimal =
+        d.limitPriceText.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO } ?: inst.ltp
+
+    /** The ticket's stop in absolute price terms, or null when no stop is attached. */
+    private fun resolveStopPrice(entry: BigDecimal, d: OrderTicketDraft): BigDecimal? {
+        if (!d.slEnabled) return null
+        val raw = d.slValueText.toBigDecimalOrNull() ?: return null
+        if (raw <= BigDecimal.ZERO) return null
+        if (d.slMode == RiskInputMode.PRICE) return raw
+        val factor = raw.divide(BigDecimal("100"), 6, RoundingMode.HALF_UP)
+        return if (d.side == OrderSide.BUY) {
+            entry.multiply(BigDecimal.ONE.subtract(factor))
+        } else {
+            entry.multiply(BigDecimal.ONE.add(factor))
+        }
+    }
+
+    /** The ticket's target in absolute price terms, or null when no target is attached. */
+    private fun resolveTargetPrice(entry: BigDecimal, d: OrderTicketDraft): BigDecimal? {
+        if (!d.targetEnabled) return null
+        val raw = d.targetValueText.toBigDecimalOrNull() ?: return null
+        if (raw <= BigDecimal.ZERO) return null
+        if (d.targetMode == RiskInputMode.PRICE) return raw
+        val factor = raw.divide(BigDecimal("100"), 6, RoundingMode.HALF_UP)
+        return if (d.side == OrderSide.BUY) {
+            entry.multiply(BigDecimal.ONE.add(factor))
+        } else {
+            entry.multiply(BigDecimal.ONE.subtract(factor))
+        }
+    }
+
     fun runAiSetupAudit() {
         val current = uiState.value
         val inst = current.instrument ?: return
         val d = current.draft
-        val entry = d.limitPriceText.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO } ?: inst.ltp
-        val sl = if (d.slEnabled) {
-            val raw = d.slValueText.toBigDecimalOrNull()
-            when {
-                raw == null || raw <= BigDecimal.ZERO -> null
-                d.slMode == RiskInputMode.PRICE -> raw
-                d.side == OrderSide.BUY -> entry.multiply(BigDecimal.ONE.subtract(raw.divide(BigDecimal("100"), 6, RoundingMode.HALF_UP)))
-                else -> entry.multiply(BigDecimal.ONE.add(raw.divide(BigDecimal("100"), 6, RoundingMode.HALF_UP)))
-            }
-        } else null
-        val target = if (d.targetEnabled) {
-            val raw = d.targetValueText.toBigDecimalOrNull()
-            when {
-                raw == null || raw <= BigDecimal.ZERO -> null
-                d.targetMode == RiskInputMode.PRICE -> raw
-                d.side == OrderSide.BUY -> entry.multiply(BigDecimal.ONE.add(raw.divide(BigDecimal("100"), 6, RoundingMode.HALF_UP)))
-                else -> entry.multiply(BigDecimal.ONE.subtract(raw.divide(BigDecimal("100"), 6, RoundingMode.HALF_UP)))
-            }
-        } else null
+        val entry = resolveEntry(inst, d)
+        val sl = resolveStopPrice(entry, d)
+        val target = resolveTargetPrice(entry, d)
 
         viewModelScope.launch {
             _aiAuditState.value = AiUiState.Loading

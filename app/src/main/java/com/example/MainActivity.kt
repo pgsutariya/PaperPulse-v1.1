@@ -285,6 +285,9 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var aiMarketRepository: com.example.data.ai.AiMarketRepository
 
+    @Inject
+    lateinit var preferencesRepository: com.example.data.repository.TradingPreferencesRepository
+
     private var brokerCallbackMessage by mutableStateOf<String?>(null)
     private val _hotkeyEvents = MutableSharedFlow<TradingHotkey>(extraBufferCapacity = 8)
     private val hotkeyGuard = GlobalHotkeyGuard()
@@ -303,12 +306,17 @@ class MainActivity : ComponentActivity() {
         handleBrokerDeepLink(intent)
         enableEdgeToEdge()
         setContent {
-            var isDarkTheme by rememberSaveable { mutableStateOf(true) }
+            // Persisted so the chosen scheme survives process death and app restarts;
+            // rememberSaveable only kept it for the lifetime of a single launch.
+            val isDarkTheme by preferencesRepository.darkThemeFlow
+                .collectAsStateWithLifecycle(initialValue = true)
             PaperPulseTheme(darkTheme = isDarkTheme) {
                 CompositionLocalProvider(LocalGlobalHotkeyGuard provides hotkeyGuard) {
                     PaperPulseApp(
                         isDarkTheme = isDarkTheme,
-                        onToggleTheme = { isDarkTheme = !isDarkTheme },
+                        onToggleTheme = {
+                            lifecycleScope.launch { preferencesRepository.updateDarkTheme(!isDarkTheme) }
+                        },
                         brokerCallbackMessage = brokerCallbackMessage,
                         onConsumeBrokerMessage = { brokerCallbackMessage = null },
                         hotkeyEvents = _hotkeyEvents.asSharedFlow(),

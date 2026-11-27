@@ -8,7 +8,26 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <meta name="theme-color" content="#0b1120" />
   <link rel="stylesheet" href="./styles.css" />
+  <script>
+    // Apply the saved scheme before the first paint. app.js only reaches init()
+    // after the whole bundle has parsed, so a user on the light theme used to see
+    // a full dark page flash on every load. Also keeps the address-bar colour in sync.
+    (function () {
+      var theme = "dark";
+      try {
+        var raw = localStorage.getItem("paperpulse_web_state_v2");
+        if (raw) {
+          var parsed = JSON.parse(raw);
+          if (parsed && parsed.theme === "light") theme = "light";
+        }
+      } catch (e) { /* unreadable or corrupt storage - keep the dark default */ }
+      document.documentElement.setAttribute("data-theme", theme);
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute("content", theme === "light" ? "#f1f5f9" : "#0b1120");
+    })();
+  </script>
 </head>
 <body>
   <div class="app-shell">
@@ -605,6 +624,7 @@
   <!-- Toast Container -->
   <div class="toast-container" id="toastContainer"></div>
 
+  <script src="./strategy.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

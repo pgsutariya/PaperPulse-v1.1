@@ -94,7 +94,9 @@ data class TvChartPayload(
     val overlayLines: List<TvLineSeriesPayload>,
     val priceLines: List<TvPriceLinePayload>,
     val markers: List<TvMarkerPayload>,
-    val lowerPane: TvLowerPanePayload
+    val lowerPane: TvLowerPanePayload,
+    /** Lets the WebView host page pick a matching light/dark chart palette. */
+    val isDarkTheme: Boolean = true
 )
 
 /**
@@ -125,7 +127,8 @@ object TradingViewChartPayloadBuilder {
         focusSetup: EmaCrossSetup?,
         chartStyle: TvChartStyle,
         logScale: Boolean,
-        magnetCrosshair: Boolean
+        magnetCrosshair: Boolean,
+        isDarkTheme: Boolean = true
     ): TvChartPayload {
         // TradingView Lightweight Charts strictly requires ascending, unique epoch-second timestamps.
         // Deduplicate by timestamp (keeping the latest bar for any collision) and map original index -> epochSec.
@@ -537,7 +540,8 @@ object TradingViewChartPayloadBuilder {
             overlayLines = overlayLines.filter { it.data.isNotEmpty() },
             priceLines = priceLines,
             markers = sortedMarkers,
-            lowerPane = lowerPanePayload
+            lowerPane = lowerPanePayload,
+            isDarkTheme = isDarkTheme
         )
     }
 

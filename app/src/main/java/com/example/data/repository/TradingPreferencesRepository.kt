@@ -35,6 +35,7 @@ class TradingPreferencesRepository @Inject constructor(
         val SIGNAL_NOTIFICATIONS_ENABLED = booleanPreferencesKey("signal_notifications_enabled")
         val USE_FREE_PUBLIC_FEED = booleanPreferencesKey("use_free_public_feed")
         val CHART_ENGINE = stringPreferencesKey("chart_engine")
+        val DARK_THEME = booleanPreferencesKey("dark_theme")
     }
 
     // Feed token kept strictly in memory only so sensitive credentials are never persisted
@@ -65,6 +66,15 @@ class TradingPreferencesRepository @Inject constructor(
 
     suspend fun updateChartEngine(engineName: String) {
         context.dataStore.edit { it[Keys.CHART_ENGINE] = engineName }
+    }
+
+    /** Dark is the terminal default; the shell toggle persists the user's choice here. */
+    val darkThemeFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.DARK_THEME] ?: true
+    }
+
+    suspend fun updateDarkTheme(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.DARK_THEME] = enabled }
     }
 
     suspend fun getConfig(): TradingConfig = configFlow.first()

@@ -99,20 +99,38 @@ fun ChartScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = LocalTradingColors.current
-    // TradingView-inspired high-contrast chart palette
-    val palette = ChartPalette(
-        bull = Color(0xFF26A69A),
-        bear = Color(0xFFEF5350),
-        amber = colors.amber,
-        violet = colors.violet,
-        cyan = Color(0xFF29B6F6),
-        grid = Color(0xFF2A2E39),
-        text = Color(0xFFD1D4DC),
-        muted = Color(0xFF787B86),
-        primary = Color(0xFF2962FF),
-        canvasBg = Color(0xFF131722),
-        axisDivider = Color(0xFF2A2E39)
-    )
+    // TradingView-inspired high-contrast chart palette. The canvas is a raw drawing
+    // surface, so it has to resolve its own light/dark variant - previously it was
+    // pinned to the dark values and stayed a black rectangle inside the light theme.
+    val palette = if (colors.isDark) {
+        ChartPalette(
+            bull = Color(0xFF26A69A),
+            bear = Color(0xFFEF5350),
+            amber = colors.amber,
+            violet = colors.violet,
+            cyan = Color(0xFF29B6F6),
+            grid = Color(0xFF2A2E39),
+            text = Color(0xFFD1D4DC),
+            muted = Color(0xFF787B86),
+            primary = Color(0xFF2962FF),
+            canvasBg = Color(0xFF131722),
+            axisDivider = Color(0xFF2A2E39)
+        )
+    } else {
+        ChartPalette(
+            bull = Color(0xFF0F9D82),
+            bear = Color(0xFFE02F3F),
+            amber = colors.amber,
+            violet = colors.violet,
+            cyan = Color(0xFF0284C7),
+            grid = Color(0xFFE2E8F0),
+            text = Color(0xFF334155),
+            muted = Color(0xFF64748B),
+            primary = Color(0xFF1D4ED8),
+            canvasBg = Color(0xFFFFFFFF),
+            axisDivider = Color(0xFFCBD5E1)
+        )
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
