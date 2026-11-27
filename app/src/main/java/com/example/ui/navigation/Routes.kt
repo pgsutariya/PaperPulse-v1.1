@@ -19,7 +19,9 @@ data class InstrumentDetailRoute(
     val prefillSl: String? = null,
     val prefillTarget: String? = null,
     val prefillProduct: String? = null,
-    val prefillValidity: String? = null
+    val prefillValidity: String? = null,
+    /** Whole units, not lots. The rebalancer sends the share count it worked out. */
+    val prefillQuantity: String? = null
 )
 
 @Serializable
@@ -56,3 +58,7 @@ data class MarketPulseRoute(
 
 @Serializable
 data object StrategyCoachesRoute
+
+/** Setup scanner, outcome simulator, tax lots, rebalancer and screener. */
+@Serializable
+data object StrategyWorkbenchRoute
