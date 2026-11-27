@@ -1,5 +1,6 @@
 package com.example.ui.screens.strategy
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -68,6 +70,7 @@ import com.example.ui.theme.LocalTradingColors
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
+import java.time.ZoneId
 
 /**
  * The strategy workbench: one pane per engine ported from the trader skill packs that the
@@ -82,6 +85,7 @@ import java.time.LocalDate
 fun StrategyWorkbenchScreen(
     onBack: () -> Unit,
     onOpenTicket: (symbol: String, side: String, quantity: Int) -> Unit,
+    onSendPlannedOrder: (symbol: String, entry: String, stop: String, target: String, quantity: Int) -> Unit = { _, _, _, _, _ -> },
     viewModel: StrategyWorkbenchViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -131,6 +135,7 @@ fun StrategyWorkbenchScreen(
 
             when (state.tab) {
                 WorkbenchTab.SCANNER -> ScannerPane(state, viewModel, onOpenTicket)
+                WorkbenchTab.PLAN_AND_SIZE -> PlanAndSizePane(state, viewModel, onSendPlannedOrder)
                 WorkbenchTab.SIMULATOR -> SimulatorPane(state, viewModel)
                 WorkbenchTab.TAX_LOTS -> TaxLotPane(state, viewModel)
                 WorkbenchTab.REBALANCE -> RebalancePane(state, viewModel, onOpenTicket)
@@ -191,6 +196,24 @@ private fun StatRow(label: String, value: String, valueColor: Color = Color.Unsp
         )
     }
 }
+
+@Composable
+internal fun WorkbenchNumberField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) = NumberField(label, value, onValueChange, modifier)
+
+@Composable
+internal fun <T> WorkbenchPickerButton(
+    label: String,
+    selected: T?,
+    options: List<T>,
+    optionLabel: (T) -> String,
+    onPick: (T) -> Unit,
+    modifier: Modifier = Modifier
+) = PickerButton(label, selected, options, optionLabel, onPick, modifier)
 
 @Composable
 private fun NumberField(
@@ -305,7 +328,12 @@ private fun ScannerPane(
                     Text("Only rows with a setup", style = MaterialTheme.typography.bodySmall)
                 }
                 Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
                     FilterChip(
                         selected = state.scannerSegment == null,
                         onClick = { viewModel.setScannerSegment(null) },
@@ -601,7 +629,8 @@ private fun TaxLotPane(
     viewModel: StrategyWorkbenchViewModel
 ) {
     val colors = LocalTradingColors.current
-    var addDate by remember { mutableStateOf(LocalDate.now().toString()) }
+    val istZone = remember { ZoneId.of("Asia/Kolkata") }
+    var addDate by remember { mutableStateOf(LocalDate.now(istZone).toString()) }
     var addShares by remember { mutableStateOf("100") }
     var addCost by remember { mutableStateOf("") }
 
@@ -653,7 +682,9 @@ private fun TaxLotPane(
                     .multiply(BigDecimal(lot.shares))
                 val value = price.multiply(BigDecimal(lot.shares))
                 val gain = value.subtract(cost)
-                val term = TaxLotTracker.termFor(LocalDate.parse(lot.acquired), LocalDate.now())
+                val todayIst = LocalDate.now(istZone)
+                val acquiredDate = runCatching { LocalDate.parse(lot.acquired) }.getOrElse { todayIst }
+                val term = TaxLotTracker.termFor(acquiredDate, todayIst)
 
                 PaneCard(title = "Lot ${lot.id}", subtitle = "acquired ${lot.acquired}") {
                     StatRow("Shares", lot.shares.toString())
@@ -697,10 +728,13 @@ private fun TaxLotPane(
                 Spacer(Modifier.height(10.dp))
                 Button(
                     onClick = {
-                        val parsed = runCatching { LocalDate.parse(addDate) }.getOrNull()
+                        val parsed = runCatching { LocalDate.parse(addDate.trim()) }.getOrNull()
                         val shares = addShares.toIntOrNull() ?: 0
                         val cost = addCost.toBigDecimalOrNull() ?: BigDecimal.ZERO
-                        if (parsed == null) return@Button
+                        if (parsed == null) {
+                            viewModel.showMessage("Use yyyy-MM-dd date format (e.g. 2025-04-15).")
+                            return@Button
+                        }
                         viewModel.addTaxLot(parsed, shares, cost)
                         addCost = ""
                     },
@@ -741,6 +775,18 @@ private fun TaxLotPane(
                     },
                     onPick = viewModel::setSaleMethod
                 )
+                if (state.saleMethod == TaxLotTracker.Method.SPECIFIC) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = state.saleLotIds,
+                        onValueChange = viewModel::setSaleLotIds,
+                        label = { Text("Lot IDs, comma separated (e.g. L2, L1)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("workbench_sale_lot_ids_input")
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 Button(
                     onClick = viewModel::runSaleSimulation,
@@ -869,10 +915,27 @@ private fun RebalancePane(
 
         item {
             PaneCard(title = "Target weights") {
+                val existingSymbols = remember(state.workbench.rebalanceTargets) {
+                    state.workbench.rebalanceTargets.map { it.symbol }.toSet()
+                }
+                val addableSymbols = remember(state.instruments, existingSymbols) {
+                    state.instruments.map { it.symbol }.filterNot { it in existingSymbols }
+                }
+                if (addableSymbols.isNotEmpty()) {
+                    PickerButton(
+                        label = "+ Add target",
+                        selected = null,
+                        options = addableSymbols,
+                        optionLabel = { it },
+                        onPick = viewModel::addRebalanceTarget,
+                        modifier = Modifier.testTag("workbench_rebalance_add_target")
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
                 if (state.workbench.rebalanceTargets.isEmpty()) {
                     EmptyNote(
-                        "No targets yet. \"Equal-weight held\" fills them from your open " +
-                            "carry-forward positions."
+                        "No targets yet. Pick a symbol above, or tap \"Equal-weight held\" to fill " +
+                            "from your open carry-forward positions."
                     )
                 } else {
                     state.workbench.rebalanceTargets.forEach { target ->

@@ -857,6 +857,20 @@ fun PaperPulseApp(
                                         prefillQuantity = quantity.takeIf { it > 0 }?.toString()
                                     )
                                 )
+                            },
+                            onSendPlannedOrder = { symbol, entry, stop, target, quantity ->
+                                shellViewModel.setActiveSymbol(symbol)
+                                navController.navigate(
+                                    InstrumentDetailRoute(
+                                        symbol = symbol,
+                                        prefillSide = OrderSide.BUY.name,
+                                        prefillEntry = entry,
+                                        prefillSl = stop,
+                                        prefillTarget = target,
+                                        prefillProduct = "INTRADAY",
+                                        prefillQuantity = quantity.takeIf { it > 0 }?.toString()
+                                    )
+                                )
                             }
                         )
                     }

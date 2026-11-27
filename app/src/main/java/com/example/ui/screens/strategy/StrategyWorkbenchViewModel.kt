@@ -16,6 +16,7 @@ import com.example.domain.signal.Timeframe
 import com.example.domain.strategy.ExitPlanner
 import com.example.domain.strategy.MetricScreener
 import com.example.domain.strategy.PortfolioRebalancer
+import com.example.domain.strategy.PositionSizer
 import com.example.domain.strategy.SavedScreenRule
 import com.example.domain.strategy.SavedTarget
 import com.example.domain.strategy.SavedTaxLot
@@ -43,6 +44,7 @@ import javax.inject.Inject
 /** Which pane of the workbench is showing. */
 enum class WorkbenchTab(val label: String) {
     SCANNER("Scanner"),
+    PLAN_AND_SIZE("Plan & Size"),
     SIMULATOR("Simulator"),
     TAX_LOTS("Tax lots"),
     REBALANCE("Rebalance"),
@@ -84,6 +86,21 @@ data class StrategyWorkbenchUiState(
     val scannerSkippedForHistory: Int = 0,
     val scannerHasRun: Boolean = false,
 
+    // --- plan & size
+    val planSymbol: String = "",
+    val planEntry: String = "",
+    val planMaxLossPct: String = "1.0",
+    val planStopRule: PlanStopRuleKind = PlanStopRuleKind.PERCENT,
+    val planStopValue: String = "1.5",
+    val planAtr: String = "",
+    val planOrHigh: String = "",
+    val planOrLow: String = "",
+    val planTargetRule: PlanTargetRuleKind = PlanTargetRuleKind.R_MULTIPLE,
+    val planTargetValue: String = "2.0",
+    val planResult: ExitPlanner.Plan? = null,
+    val sizingResult: PositionSizer.Sizing? = null,
+    val planError: String? = null,
+
     // --- simulator
     val simSymbol: String = "",
     val simIsLong: Boolean = true,
@@ -105,6 +122,7 @@ data class StrategyWorkbenchUiState(
     val saleShares: String = "",
     val salePrice: String = "",
     val saleMethod: TaxLotTracker.Method = TaxLotTracker.Method.FIFO,
+    val saleLotIds: String = "",
     val saleResult: TaxLotTracker.SaleResult? = null,
     val saleError: String? = null,
     val harvestMinLoss: String = "1000",
@@ -151,6 +169,7 @@ class StrategyWorkbenchViewModel @Inject constructor(
 
     /** Daily closes are reread per scan but cached within one, so a scan walks each symbol once. */
     private val dailyCloseCache = mutableMapOf<String, List<Double>>()
+    private var scannerAutoRunTriggered = false
 
     init {
         viewModelScope.launch {
@@ -158,9 +177,14 @@ class StrategyWorkbenchViewModel @Inject constructor(
                 _state.update { s ->
                     s.copy(
                         instruments = list,
+                        planSymbol = s.planSymbol.ifBlank { list.firstOrNull()?.symbol.orEmpty() },
                         simSymbol = s.simSymbol.ifBlank { list.firstOrNull()?.symbol.orEmpty() },
                         lotSymbol = s.lotSymbol.ifBlank { list.firstOrNull()?.symbol.orEmpty() }
                     )
+                }
+                if (list.isNotEmpty() && !scannerAutoRunTriggered && !_state.value.scannerHasRun) {
+                    scannerAutoRunTriggered = true
+                    runScanner()
                 }
             }
         }
@@ -185,6 +209,8 @@ class StrategyWorkbenchViewModel @Inject constructor(
     }
 
     fun dismissMessage() = _state.update { it.copy(message = null) }
+
+    fun showMessage(msg: String) = _state.update { it.copy(message = msg) }
 
     // =====================================================================
     // Setup scanner
@@ -263,6 +289,208 @@ class StrategyWorkbenchViewModel @Inject constructor(
         dailyCloseCache.getOrPut(symbol) {
             signalRepository.getRecentCandles(symbol, Timeframe.D1).map { it.close }
         }
+
+    // =====================================================================
+    // Exit Planner & Position Sizer
+    // =====================================================================
+
+    fun setPlanSymbol(symbol: String) = _state.update {
+        it.copy(planSymbol = symbol, planResult = null, sizingResult = null, planError = null)
+    }
+
+    fun setPlanEntry(v: String) = _state.update { it.copy(planEntry = v) }
+    fun setPlanMaxLossPct(v: String) = _state.update { it.copy(planMaxLossPct = v) }
+
+    fun setPlanStopRule(kind: PlanStopRuleKind) = _state.update { s ->
+        val nextValue = when (kind) {
+            PlanStopRuleKind.PERCENT -> if (s.planStopRule == PlanStopRuleKind.PERCENT) s.planStopValue else "1.5"
+            PlanStopRuleKind.ATR -> if (s.planStopRule == PlanStopRuleKind.ATR) s.planStopValue else "1.5"
+            PlanStopRuleKind.PRICE -> if (s.planStopRule == PlanStopRuleKind.PRICE) {
+                s.planStopValue
+            } else {
+                val entry = s.planEntry.toDoubleOrNull()
+                if (entry != null && entry > 0.0) fmt2(entry * 0.985) else ""
+            }
+            PlanStopRuleKind.OR_MID, PlanStopRuleKind.OR_LOW -> s.planStopValue
+        }
+        s.copy(planStopRule = kind, planStopValue = nextValue, planError = null)
+    }
+
+    fun setPlanStopValue(v: String) = _state.update { it.copy(planStopValue = v) }
+    fun setPlanAtr(v: String) = _state.update { it.copy(planAtr = v) }
+    fun setPlanOrHigh(v: String) = _state.update { it.copy(planOrHigh = v) }
+    fun setPlanOrLow(v: String) = _state.update { it.copy(planOrLow = v) }
+
+    fun setPlanTargetRule(kind: PlanTargetRuleKind) = _state.update { s ->
+        val nextValue = when (kind) {
+            PlanTargetRuleKind.R_MULTIPLE -> if (s.planTargetRule == PlanTargetRuleKind.R_MULTIPLE) s.planTargetValue else "2.0"
+            PlanTargetRuleKind.PRICE -> if (s.planTargetRule == PlanTargetRuleKind.PRICE) {
+                s.planTargetValue
+            } else {
+                val entry = s.planEntry.toDoubleOrNull()
+                if (entry != null && entry > 0.0) fmt2(entry * 1.03) else ""
+            }
+        }
+        s.copy(planTargetRule = kind, planTargetValue = nextValue, planError = null)
+    }
+
+    fun setPlanTargetValue(v: String) = _state.update { it.copy(planTargetValue = v) }
+
+    fun fillPlannerFromMarket() {
+        val s = _state.value
+        val inst = s.instruments.firstOrNull { it.symbol == s.planSymbol } ?: run {
+            _state.update { it.copy(message = "Pick a symbol first.") }
+            return
+        }
+        viewModelScope.launch {
+            val bars = signalRepository.getRecentCandles(s.planSymbol, Timeframe.M5)
+            val atr = averageTrueRange(bars, 14)
+            val openingBars = bars.take(3)
+            val orHigh = openingBars.maxOfOrNull { it.high }
+            val orLow = openingBars.minOfOrNull { it.low }
+            val entry = inst.ltp.toDouble()
+            _state.update { cur ->
+                cur.copy(
+                    planEntry = fmt2(entry),
+                    planAtr = if (atr > 0.0) fmt2(atr) else cur.planAtr,
+                    planOrHigh = orHigh?.let { fmt2(it) } ?: cur.planOrHigh,
+                    planOrLow = orLow?.let { fmt2(it) } ?: cur.planOrLow,
+                    planStopValue = if (cur.planStopRule == PlanStopRuleKind.PRICE && atr > 0.0) {
+                        fmt2((entry - 1.5 * atr).coerceAtLeast(0.05))
+                    } else {
+                        cur.planStopValue
+                    },
+                    planError = null
+                )
+            }
+        }
+    }
+
+    fun runPlanAndSize() {
+        val s = _state.value
+        val inst = s.instruments.firstOrNull { it.symbol == s.planSymbol }
+        if (inst == null) {
+            _state.update { it.copy(planError = "Pick a symbol first.", planResult = null, sizingResult = null) }
+            return
+        }
+        val entry = s.planEntry.toBigDecimalOrNull() ?: inst.ltp
+        if (entry <= BigDecimal.ZERO) {
+            _state.update { it.copy(planError = "Entry price must be positive.", planResult = null, sizingResult = null) }
+            return
+        }
+
+        val stopRule = when (s.planStopRule) {
+            PlanStopRuleKind.PERCENT -> {
+                val v = s.planStopValue.toBigDecimalOrNull()
+                if (v == null) {
+                    _state.update { it.copy(planError = "Enter a valid stop percentage.", planResult = null, sizingResult = null) }
+                    return
+                }
+                ExitPlanner.StopRule.Percent(v)
+            }
+            PlanStopRuleKind.ATR -> {
+                val v = s.planStopValue.toBigDecimalOrNull()
+                if (v == null) {
+                    _state.update { it.copy(planError = "Enter a valid ATR multiple.", planResult = null, sizingResult = null) }
+                    return
+                }
+                ExitPlanner.StopRule.AtrMultiple(v)
+            }
+            PlanStopRuleKind.OR_MID -> ExitPlanner.StopRule.OpeningRangeMid
+            PlanStopRuleKind.OR_LOW -> ExitPlanner.StopRule.OpeningRangeLow
+            PlanStopRuleKind.PRICE -> {
+                val v = s.planStopValue.toBigDecimalOrNull()
+                if (v == null) {
+                    _state.update { it.copy(planError = "Enter a valid stop price.", planResult = null, sizingResult = null) }
+                    return
+                }
+                ExitPlanner.StopRule.Price(v)
+            }
+        }
+
+        val targetRule = when (s.planTargetRule) {
+            PlanTargetRuleKind.R_MULTIPLE -> {
+                val v = s.planTargetValue.toBigDecimalOrNull()
+                if (v == null) {
+                    _state.update { it.copy(planError = "Enter a valid target R multiple.", planResult = null, sizingResult = null) }
+                    return
+                }
+                ExitPlanner.TargetRule.RMultiple(v)
+            }
+            PlanTargetRuleKind.PRICE -> {
+                val v = s.planTargetValue.toBigDecimalOrNull()
+                if (v == null) {
+                    _state.update { it.copy(planError = "Enter a valid target price.", planResult = null, sizingResult = null) }
+                    return
+                }
+                ExitPlanner.TargetRule.Price(v)
+            }
+        }
+
+        val planAttempt = runCatching {
+            ExitPlanner.plan(
+                entry = entry,
+                stopRule = stopRule,
+                targetRule = targetRule,
+                openingRangeHigh = s.planOrHigh.toBigDecimalOrNull(),
+                openingRangeLow = s.planOrLow.toBigDecimalOrNull(),
+                atr = s.planAtr.toBigDecimalOrNull(),
+                tickSize = inst.tickSize
+            )
+        }
+        val plan = planAttempt.getOrElse { err ->
+            _state.update { it.copy(planError = err.message ?: "Exit plan refused.", planResult = null, sizingResult = null) }
+            return
+        }
+
+        val isCrypto = inst.segment == MarketSegment.CRYPTO
+        val capital = if (isCrypto) {
+            s.account?.cryptoVirtualCapital ?: BigDecimal("10000")
+        } else {
+            s.account?.virtualCapital ?: BigDecimal("100000")
+        }
+        val cash = if (isCrypto) {
+            s.account?.cryptoAvailableMargin ?: capital
+        } else {
+            s.freeCash
+        }
+        val riskPct = s.planMaxLossPct.toBigDecimalOrNull()
+            ?.takeIf { it > BigDecimal.ZERO && it <= BigDecimal("25") }
+            ?: BigDecimal("1.0")
+        val baseRules = workbenchRules(capital)
+        val sizingRules = baseRules.copy(
+            maxLossPerTradeInr = baseRules.budget.multiply(riskPct)
+                .divide(TraderRules.HUNDRED, 2, RoundingMode.HALF_UP)
+        )
+
+        val sizingAttempt = runCatching {
+            PositionSizer.size(
+                symbol = inst.symbol,
+                plan = plan,
+                rules = sizingRules,
+                livePrice = inst.ltp,
+                cashOnHand = cash
+            )
+        }
+        sizingAttempt.onSuccess { sizing ->
+            _state.update {
+                it.copy(
+                    planEntry = fmt2(entry.toDouble()),
+                    planResult = plan,
+                    sizingResult = sizing,
+                    planError = null
+                )
+            }
+        }.onFailure { err ->
+            _state.update {
+                it.copy(
+                    planResult = plan,
+                    sizingResult = null,
+                    planError = err.message ?: "Position sizing failed."
+                )
+            }
+        }
+    }
 
     // =====================================================================
     // Outcome simulator
@@ -401,6 +629,7 @@ class StrategyWorkbenchViewModel @Inject constructor(
     fun setSaleShares(v: String) = _state.update { it.copy(saleShares = v) }
     fun setSalePrice(v: String) = _state.update { it.copy(salePrice = v) }
     fun setSaleMethod(m: TaxLotTracker.Method) = _state.update { it.copy(saleMethod = m) }
+    fun setSaleLotIds(v: String) = _state.update { it.copy(saleLotIds = v) }
 
     fun setHarvestMinLoss(v: String) {
         _state.update { it.copy(harvestMinLoss = v) }
@@ -492,13 +721,18 @@ class StrategyWorkbenchViewModel @Inject constructor(
             return
         }
         val lots = s.lotsForSymbol.map { it.toEngineLot() }
+        val specificIds = s.saleLotIds
+            .split(",")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
         val result = runCatching {
             TaxLotTracker.simulateSale(
                 lots = lots,
                 shares = shares,
                 price = price,
                 soldOn = today(),
-                method = s.saleMethod
+                method = s.saleMethod,
+                lotIds = if (s.saleMethod == TaxLotTracker.Method.SPECIFIC) specificIds else emptyList()
             )
         }
         _state.update {
@@ -531,6 +765,12 @@ class StrategyWorkbenchViewModel @Inject constructor(
 
     fun setRebalanceBandPct(v: String) = _state.update { it.copy(rebalanceBandPct = v) }
     fun setRebalanceSellUntracked(v: Boolean) = _state.update { it.copy(rebalanceSellUntracked = v) }
+
+    fun addRebalanceTarget(symbol: String) {
+        val s = _state.value
+        if (symbol.isBlank() || s.workbench.rebalanceTargets.any { it.symbol == symbol }) return
+        persist(s.workbench.copy(rebalanceTargets = s.workbench.rebalanceTargets + SavedTarget(symbol, "10")))
+    }
 
     fun setTargetWeight(symbol: String, weight: String) {
         val s = _state.value
@@ -729,7 +969,8 @@ class StrategyWorkbenchViewModel @Inject constructor(
 
 private fun SavedTaxLot.toEngineLot(): TaxLotTracker.Lot = TaxLotTracker.Lot(
     id = id,
-    acquired = LocalDate.parse(acquired),
+    acquired = runCatching { LocalDate.parse(acquired) }
+        .getOrElse { LocalDate.now(ZoneId.of("Asia/Kolkata")) },
     shares = shares,
     costPerShare = costPerShare.toBigDecimalOrNull() ?: BigDecimal.ZERO
 )

@@ -275,6 +275,78 @@ class TraderStrategyPortTest {
         assertTrue(result.reasons.any { it.startsWith("short:") })
     }
 
+    @Test
+    fun `a clean short order passes with positive reward to risk`() {
+        val result = PreTradeRiskGate.check(
+            PreTradeRiskGate.ProposedOrder(
+                symbol = "RELIANCE", isBuy = false, quantity = 100,
+                entry = BigDecimal("100"), stop = BigDecimal("105"), target = BigDecimal("90")
+            ),
+            rules.copy(allowShort = true, maxPositionPct = BigDecimal("100"), cashBufferPct = BigDecimal("0")),
+            account, now = LocalTime.of(10, 0)
+        )
+        assertTrue(result.reasons.joinToString(), result.passed)
+        assertEquals(0, result.lossAtStop!!.compareTo(BigDecimal("500.00")))
+        assertEquals(0, result.rewardRisk!!.compareTo(BigDecimal("2.00")))
+    }
+
+    @Test
+    fun `a short order with stop at or below entry is blocked`() {
+        val result = PreTradeRiskGate.check(
+            PreTradeRiskGate.ProposedOrder(
+                symbol = "RELIANCE", isBuy = false, quantity = 100,
+                entry = BigDecimal("100"), stop = BigDecimal("95"), target = BigDecimal("90")
+            ),
+            rules.copy(allowShort = true, maxPositionPct = BigDecimal("100"), cashBufferPct = BigDecimal("0")),
+            account, now = LocalTime.of(10, 0)
+        )
+        assertFalse(result.passed)
+        assertTrue(result.reasons.any { it.startsWith("stop:") })
+    }
+
+    @Test
+    fun `a short order with target at or above entry is blocked`() {
+        val result = PreTradeRiskGate.check(
+            PreTradeRiskGate.ProposedOrder(
+                symbol = "RELIANCE", isBuy = false, quantity = 100,
+                entry = BigDecimal("100"), stop = BigDecimal("105"), target = BigDecimal("110")
+            ),
+            rules.copy(allowShort = true, maxPositionPct = BigDecimal("100"), cashBufferPct = BigDecimal("0")),
+            account, now = LocalTime.of(10, 0)
+        )
+        assertFalse(result.passed)
+        assertTrue(result.reasons.any { it.startsWith("target:") })
+    }
+
+    @Test
+    fun `a short order widens risk when live price gaps down below entry`() {
+        val result = PreTradeRiskGate.check(
+            PreTradeRiskGate.ProposedOrder(
+                symbol = "RELIANCE", isBuy = false, quantity = 100,
+                entry = BigDecimal("100"), stop = BigDecimal("105"), target = BigDecimal("90")
+            ),
+            rules.copy(allowShort = true, maxPositionPct = BigDecimal("100"), cashBufferPct = BigDecimal("0")),
+            account, now = LocalTime.of(10, 0), livePrice = BigDecimal("98")
+        )
+        // Entry shifted worse to 98 -> risk/share is 7 (700 > 500 cap)
+        assertFalse(result.passed)
+        assertEquals(0, result.lossAtStop!!.compareTo(BigDecimal("700.00")))
+        assertTrue(result.reasons.any { it.startsWith("loss:") })
+    }
+
+    @Test
+    fun `crypto risk gate formats failure messages with dollar currency symbol`() {
+        val result = PreTradeRiskGate.check(
+            PreTradeRiskGate.ProposedOrder(
+                symbol = "BTCUSDT", isBuy = true, quantity = 500,
+                entry = BigDecimal("100"), stop = BigDecimal("95"), target = BigDecimal("110")
+            ),
+            rules, account, now = LocalTime.of(10, 0), currencySymbol = "$"
+        )
+        assertFalse(result.passed)
+        assertTrue(result.reasons.any { it.contains("$2500.00") })
+    }
+
     // ---------------------------------------------------------------- setup scanner
 
     @Test

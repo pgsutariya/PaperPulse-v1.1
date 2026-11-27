@@ -70,7 +70,8 @@ object PreTradeRiskGate {
         account: AccountSnapshot,
         day: DayState = DayState(),
         livePrice: BigDecimal? = null,
-        now: LocalTime? = null
+        now: LocalTime? = null,
+        currencySymbol: String = "Rs"
     ): Result {
         val reasons = mutableListOf<String>()
         val warnings = mutableListOf<String>()
@@ -81,10 +82,11 @@ object PreTradeRiskGate {
         if (order.quantity <= 0) reasons += "format: quantity must be a positive whole number of shares"
 
         val reference = when {
-            order.isEntry && livePrice != null && livePrice > order.entry -> livePrice
+            order.isEntry && livePrice != null && order.isBuy && livePrice > order.entry -> livePrice
+            order.isEntry && livePrice != null && !order.isBuy && livePrice < order.entry -> livePrice
             else -> order.entry
         }.setScale(2, RoundingMode.HALF_UP)
-        if (reference <= BigDecimal.ZERO) reasons += "format: the entry price must be above Rs 0"
+        if (reference <= BigDecimal.ZERO) reasons += "format: the entry price must be above ${money(BigDecimal.ZERO, currencySymbol)}"
 
         val value = reference.multiply(BigDecimal(order.quantity.coerceAtLeast(0)))
             .setScale(2, RoundingMode.HALF_UP)
@@ -103,11 +105,11 @@ object PreTradeRiskGate {
         // ---- order size ---------------------------------------------------------
         if (order.isEntry) {
             if (value < rules.minOrderInr) {
-                reasons += "size: ${money(value)} is under your ${money(rules.minOrderInr)} minimum order"
+                reasons += "size: ${money(value, currencySymbol)} is under your ${money(rules.minOrderInr, currencySymbol)} minimum order"
             }
             rules.maxOrderInr?.let { maxOrder ->
                 if (value > maxOrder) {
-                    reasons += "size: ${money(value)} is over your ${money(maxOrder)} max order"
+                    reasons += "size: ${money(value, currencySymbol)} is over your ${money(maxOrder, currencySymbol)} max order"
                 }
             }
         }
@@ -120,22 +122,32 @@ object PreTradeRiskGate {
             if (stop == null) {
                 if (rules.requireStop) reasons += "stop: a day trade needs a stop; this order has none"
             } else if (order.isBuy && stop >= reference) {
-                reasons += "stop: the stop ${money(stop)} is not below the entry ${money(reference)}"
+                reasons += "stop: the stop ${money(stop, currencySymbol)} is not below the entry ${money(reference, currencySymbol)}"
+            } else if (!order.isBuy && stop <= reference) {
+                reasons += "stop: the stop ${money(stop, currencySymbol)} is not above the entry ${money(reference, currencySymbol)}"
             } else {
                 val risk = reference.subtract(stop).abs()
                 val loss = risk.multiply(BigDecimal(order.quantity)).setScale(2, RoundingMode.HALF_UP)
                 lossAtStop = loss
                 rules.maxLossPerTradeInr?.let { maxLoss ->
                     if (loss > maxLoss) {
-                        reasons += "loss: ${money(loss)} at the stop is over your ${money(maxLoss)} " +
+                        reasons += "loss: ${money(loss, currencySymbol)} at the stop is over your ${money(maxLoss, currencySymbol)} " +
                             "max loss per trade"
                     }
                 }
                 order.target?.let { target ->
                     if (risk > BigDecimal.ZERO) {
-                        val rr = target.subtract(reference).divide(risk, 2, RoundingMode.HALF_UP)
+                        val reward = if (order.isBuy) {
+                            target.subtract(reference)
+                        } else {
+                            reference.subtract(target)
+                        }
+                        val rr = reward.divide(risk, 2, RoundingMode.HALF_UP)
                         rewardRisk = rr
-                        if (rr < rules.minRewardRisk) {
+                        if (reward <= BigDecimal.ZERO) {
+                            val sideDir = if (order.isBuy) "above" else "below"
+                            reasons += "target: ${money(target, currencySymbol)} is not $sideDir entry ${money(reference, currencySymbol)}"
+                        } else if (rr < rules.minRewardRisk) {
                             reasons += "reward:risk ${plain(rr)} is under your minimum ${plain(rules.minRewardRisk)}"
                         }
                     }
@@ -146,13 +158,13 @@ object PreTradeRiskGate {
         // ---- cash and buffer ----------------------------------------------------
         if (order.isBuy && order.isEntry) {
             if (value > account.cash && !rules.allowMargin) {
-                reasons += "cash: needs ${money(value)} but only ${money(account.cash)} cash; " +
+                reasons += "cash: needs ${money(value, currencySymbol)} but only ${money(account.cash, currencySymbol)} cash; " +
                     "that would be margin (borrowed money)"
             } else {
                 val left = account.cash.subtract(value)
                 if (left < rules.cashBuffer) {
-                    reasons += "cash: leaves ${money(left)} cash, under your " +
-                        "${plain(rules.cashBufferPct)}% buffer of ${money(rules.cashBuffer)}"
+                    reasons += "cash: leaves ${money(left, currencySymbol)} cash, under your " +
+                        "${plain(rules.cashBufferPct)}% buffer of ${money(rules.cashBuffer, currencySymbol)}"
                 }
             }
 
@@ -163,8 +175,8 @@ object PreTradeRiskGate {
                 val pct = after.multiply(TraderRules.HUNDRED)
                     .divide(account.equity, 1, RoundingMode.HALF_UP)
                 if (pct > rules.maxPositionPct) {
-                    reasons += "position: $sym would be ${money(after)}, ${plain(pct)}% of the " +
-                        "${money(account.equity)} account, over your ${plain(rules.maxPositionPct)}% cap"
+                    reasons += "position: $sym would be ${money(after, currencySymbol)}, ${plain(pct)}% of the " +
+                        "${money(account.equity, currencySymbol)} account, over your ${plain(rules.maxPositionPct)}% cap"
                 }
             }
         }
@@ -178,8 +190,8 @@ object PreTradeRiskGate {
             rules.maxDailyLossInr?.let { cap ->
                 val wouldBe = day.committedLoss.add(lossAtStop ?: BigDecimal.ZERO)
                 if (wouldBe > cap) {
-                    reasons += "daily: ${money(wouldBe)} at risk today would pass your " +
-                        "${money(cap)} daily loss cap (${money(day.committedLoss)} already committed)"
+                    reasons += "daily: ${money(wouldBe, currencySymbol)} at risk today would pass your " +
+                        "${money(cap, currencySymbol)} daily loss cap (${money(day.committedLoss, currencySymbol)} already committed)"
                 }
             }
         }
@@ -213,7 +225,10 @@ object PreTradeRiskGate {
         )
     }
 
-    private fun money(v: BigDecimal): String = "Rs ${v.setScale(2, RoundingMode.HALF_UP).toPlainString()}"
+    private fun money(v: BigDecimal, currencySymbol: String = "Rs"): String {
+        val formatted = v.setScale(2, RoundingMode.HALF_UP).toPlainString()
+        return if (currencySymbol == "$") "$$formatted" else "$currencySymbol $formatted"
+    }
 
     private fun plain(v: BigDecimal): String = v.stripTrailingZeros().toPlainString()
 }

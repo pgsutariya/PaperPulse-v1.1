@@ -311,13 +311,19 @@ class InstrumentDetailViewModel @Inject constructor(
             ),
             rules = rules,
             account = PreTradeRiskGate.AccountSnapshot(cash = cash, equity = capital),
-            livePrice = inst.ltp
+            livePrice = inst.ltp,
+            currencySymbol = if (isCrypto) "$" else "Rs"
         )
     }
 
-    /** The ticket's entry price: the typed limit when there is one, else the live price. */
-    private fun resolveEntry(inst: Instrument, d: OrderTicketDraft): BigDecimal =
-        d.limitPriceText.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO } ?: inst.ltp
+    /** The ticket's entry price: live LTP for Market, trigger price for SL-M/TGT-M, limit price otherwise. */
+    private fun resolveEntry(inst: Instrument, d: OrderTicketDraft): BigDecimal = when (d.orderType) {
+        OrderType.MARKET -> inst.ltp
+        OrderType.SL_M, OrderType.TGT_M ->
+            d.triggerPriceText.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO } ?: inst.ltp
+        else ->
+            d.limitPriceText.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO } ?: inst.ltp
+    }
 
     /** The ticket's stop in absolute price terms, or null when no stop is attached. */
     private fun resolveStopPrice(entry: BigDecimal, d: OrderTicketDraft): BigDecimal? {
