@@ -8,25 +8,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.example.R
 
+// NOTE: each of these three resources is a single static Regular (weight 400) face -
+// there are no Medium / SemiBold / Bold files in res/font. Declaring the same file under
+// four different FontWeights made Compose find an "exact" match for W600/W700 and skip
+// synthesis, so every bold heading, price and label rendered at regular weight.
+// Declaring only the real weight lets FontSynthesis embolden the heavier styles.
 val SpaceGroteskFontFamily = FontFamily(
-    Font(R.font.space_grotesk, FontWeight.Normal),
-    Font(R.font.space_grotesk, FontWeight.Medium),
-    Font(R.font.space_grotesk, FontWeight.SemiBold),
-    Font(R.font.space_grotesk, FontWeight.Bold)
+    Font(R.font.space_grotesk, FontWeight.Normal)
 )
 
 val PlusJakartaSansFontFamily = FontFamily(
-    Font(R.font.plus_jakarta_sans, FontWeight.Normal),
-    Font(R.font.plus_jakarta_sans, FontWeight.Medium),
-    Font(R.font.plus_jakarta_sans, FontWeight.SemiBold),
-    Font(R.font.plus_jakarta_sans, FontWeight.Bold)
+    Font(R.font.plus_jakarta_sans, FontWeight.Normal)
 )
 
 val JetBrainsMonoFontFamily = FontFamily(
-    Font(R.font.jetbrains_mono, FontWeight.Normal),
-    Font(R.font.jetbrains_mono, FontWeight.Medium),
-    Font(R.font.jetbrains_mono, FontWeight.SemiBold),
-    Font(R.font.jetbrains_mono, FontWeight.Bold)
+    Font(R.font.jetbrains_mono, FontWeight.Normal)
 )
 
 val PaperPulseTypography = Typography(

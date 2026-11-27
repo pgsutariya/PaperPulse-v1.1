@@ -1,5 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar" />
+    <!--
+      The Compose UI defaults to the dark "institutional terminal" scheme regardless of the
+      system setting. Leaving windowBackground at the DeviceDefault value meant a device in
+      light mode flashed a white window for the whole cold start before the first Compose
+      frame landed. Painting the window with the same obsidian background removes that flash.
+      System bars are left transparent so enableEdgeToEdge() can draw behind them; their icon
+      tint is kept in sync with the active scheme from PaperPulseTheme.
+    -->
+    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/obsidian_bg</item>
+        <item name="android:colorBackground">@color/obsidian_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>

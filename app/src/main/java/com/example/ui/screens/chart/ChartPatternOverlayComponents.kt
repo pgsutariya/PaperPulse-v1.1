@@ -91,7 +91,7 @@ fun ChartPatternFloatingStrip(
             val accent = if (pat.isBullish) colors.bullish else colors.bearish
             Surface(
                 shape = RoundedCornerShape(10.dp),
-                color = if (isSelected) accent.copy(alpha = 0.28f) else Color(0xFF1A2030).copy(alpha = 0.90f),
+                color = if (isSelected) accent.copy(alpha = 0.28f) else MaterialTheme.colorScheme.surfaceContainerHigh,
                 border = BorderStroke(
                     width = if (isSelected) 1.5.dp else 1.dp,
                     color = if (isSelected) accent else accent.copy(alpha = 0.55f)
@@ -116,7 +116,7 @@ fun ChartPatternFloatingStrip(
                         text = "${pat.type.shortBadge} ${pat.confidenceScore}%",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFFF1F5F9),
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1
                     )
                     Text(
@@ -158,12 +158,12 @@ fun ChartPatternBreakoutTooltip(
             val statusColor = when (pattern.status) {
                 PatternBreakoutStatus.BREAKOUT_CONFIRMED -> dirColor
                 PatternBreakoutStatus.IMMINENT_BREAKOUT -> colors.amber
-                PatternBreakoutStatus.FORMING -> Color(0xFF94A3B8)
+                PatternBreakoutStatus.FORMING -> MaterialTheme.colorScheme.onSurfaceVariant
             }
 
             Surface(
                 shape = RoundedCornerShape(14.dp),
-                color = Color(0xFF151B28).copy(alpha = 0.97f),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 border = BorderStroke(1.2.dp, dirColor.copy(alpha = 0.7f)),
                 shadowElevation = 10.dp,
                 modifier = Modifier
@@ -200,7 +200,7 @@ fun ChartPatternBreakoutTooltip(
                                     text = pattern.type.displayName,
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFF8FAFC),
+                                    color = MaterialTheme.colorScheme.onSurface,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -222,7 +222,7 @@ fun ChartPatternBreakoutTooltip(
                             Icon(
                                 imageVector = Icons.Rounded.Close,
                                 contentDescription = "Close pattern tooltip",
-                                tint = Color(0xFF94A3B8),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -243,14 +243,14 @@ fun ChartPatternBreakoutTooltip(
                         TooltipMetric(
                             "EST R:R",
                             "1:${String.format(Locale.US, "%.1f", pattern.riskRewardRatio)}",
-                            Color(0xFF60A5FA)
+                            MaterialTheme.colorScheme.primary
                         )
                     }
 
                     Text(
                         text = pattern.breakoutNote,
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFCBD5E1)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
                     // Live Firebase AI Verification Output (if requested)
@@ -264,7 +264,7 @@ fun ChartPatternBreakoutTooltip(
                                 Text(
                                     text = "AI validating breakout & false-break risk…",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFF94A3B8)
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
@@ -277,7 +277,7 @@ fun ChartPatternBreakoutTooltip(
                             }
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
-                                color = Color(0xFF1E293B),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
                                 border = BorderStroke(1.dp, verdictColor.copy(alpha = 0.45f)),
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -301,18 +301,18 @@ fun ChartPatternBreakoutTooltip(
                                         Text(
                                             text = op.bias.name,
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = Color(0xFF94A3B8)
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
                                     Text(
                                         text = op.summary,
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = Color(0xFFE2E8F0)
+                                        color = MaterialTheme.colorScheme.onSurface
                                     )
                                     Text(
                                         text = "Trigger / Risk: ${op.executionGuidance}",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = Color(0xFF93C5FD)
+                                        color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             }
@@ -327,7 +327,7 @@ fun ChartPatternBreakoutTooltip(
                         AiUiState.Idle, is AiUiState.Streaming -> Unit
                     }
 
-                    HorizontalDivider(color = Color(0xFF2A3244))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                     // Action Buttons
                     Row(
@@ -382,7 +382,7 @@ private fun TooltipMetric(label: String, value: String, valueColor: Color) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = Color(0xFF94A3B8)
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
             text = value,

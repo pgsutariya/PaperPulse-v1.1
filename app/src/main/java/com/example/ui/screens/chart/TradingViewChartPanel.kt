@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.domain.analysis.ChartAnalysis
 import com.example.domain.analysis.EmaCrossSetup
+import com.example.ui.theme.LocalTradingColors
 import kotlinx.coroutines.delay
 
 /**
@@ -116,6 +117,11 @@ fun TradingViewChartPanel(
 ) {
     val context = LocalContext.current
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val isDarkTheme = LocalTradingColors.current.isDark
+    // The scrims and badges sit directly on top of the WebView, so they follow the
+    // chart page's own background rather than the Material surface colour.
+    val chartSurface = if (isDarkTheme) Color(0xFF131722) else Color(0xFFFFFFFF)
+    val chartOnSurface = if (isDarkTheme) Color(0xFFD1D4DC) else Color(0xFF334155)
 
     var isChartReady by remember { mutableStateOf(false) }
     var chartVersion by remember { mutableStateOf("") }
@@ -135,7 +141,8 @@ fun TradingViewChartPanel(
         focusSetup,
         chartStyle,
         logScale,
-        magnetCrosshair
+        magnetCrosshair,
+        isDarkTheme
     ) {
         val payload = TradingViewChartPayloadBuilder.build(
             symbol = symbol,
@@ -145,7 +152,8 @@ fun TradingViewChartPanel(
             focusSetup = focusSetup,
             chartStyle = chartStyle,
             logScale = logScale,
-            magnetCrosshair = magnetCrosshair
+            magnetCrosshair = magnetCrosshair,
+            isDarkTheme = isDarkTheme
         )
         val json = TradingViewChartPayloadBuilder.toJson(payload)
         Base64.encodeToString(json.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
@@ -157,6 +165,7 @@ fun TradingViewChartPanel(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            // Repainted below whenever the scheme changes; this is only the initial value.
             setBackgroundColor(AndroidColor.parseColor("#131722"))
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
@@ -199,6 +208,12 @@ fun TradingViewChartPanel(
                 "PaperPulseChartBridge"
             )
         }
+    }
+
+    LaunchedEffect(isDarkTheme) {
+        webView.setBackgroundColor(
+            AndroidColor.parseColor(if (isDarkTheme) "#131722" else "#FFFFFF")
+        )
     }
 
     // Load or reload the local TradingView Lightweight Charts host page
@@ -267,8 +282,8 @@ fun TradingViewChartPanel(
                     label = { Text(style.label, style = MaterialTheme.typography.labelSmall) },
                     modifier = Modifier.testTag("tv_style_${style.jsKey}"),
                     colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = Color(0xFF2962FF).copy(alpha = 0.24f),
-                        selectedLabelColor = Color(0xFF6EA0FF)
+                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f),
+                        selectedLabelColor = MaterialTheme.colorScheme.primary
                     )
                 )
             }
@@ -278,8 +293,8 @@ fun TradingViewChartPanel(
                 label = { Text("Log", style = MaterialTheme.typography.labelSmall) },
                 modifier = Modifier.testTag("tv_log_scale_toggle"),
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = Color(0xFF2962FF).copy(alpha = 0.24f),
-                    selectedLabelColor = Color(0xFF6EA0FF)
+                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f),
+                    selectedLabelColor = MaterialTheme.colorScheme.primary
                 )
             )
             FilterChip(
@@ -288,8 +303,8 @@ fun TradingViewChartPanel(
                 label = { Text("Magnet", style = MaterialTheme.typography.labelSmall) },
                 modifier = Modifier.testTag("tv_magnet_toggle"),
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = Color(0xFF2962FF).copy(alpha = 0.24f),
-                    selectedLabelColor = Color(0xFF6EA0FF)
+                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f),
+                    selectedLabelColor = MaterialTheme.colorScheme.primary
                 )
             )
             FilterChip(
@@ -321,7 +336,7 @@ fun TradingViewChartPanel(
 
             if (!isChartReady && loadError == null) {
                 Surface(
-                    color = Color(0xFF131722).copy(alpha = 0.9f),
+                    color = chartSurface.copy(alpha = 0.9f),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     Column(
@@ -331,14 +346,14 @@ fun TradingViewChartPanel(
                     ) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(28.dp),
-                            color = Color(0xFF2962FF),
+                            color = MaterialTheme.colorScheme.primary,
                             strokeWidth = 2.5.dp
                         )
                         Spacer(Modifier.height(10.dp))
                         Text(
                             text = "Initializing TradingView Lightweight Charts…",
                             style = MaterialTheme.typography.labelMedium,
-                            color = Color(0xFFD1D4DC)
+                            color = chartOnSurface
                         )
                     }
                 }
@@ -346,9 +361,9 @@ fun TradingViewChartPanel(
 
             loadError?.let { err ->
                 Surface(
-                    color = Color(0xFF131722).copy(alpha = 0.96f),
+                    color = chartSurface.copy(alpha = 0.96f),
                     shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(1.dp, Color(0xFF2A2E39)),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(12.dp)
@@ -364,7 +379,7 @@ fun TradingViewChartPanel(
                         Icon(
                             imageVector = Icons.Rounded.WarningAmber,
                             contentDescription = null,
-                            tint = Color(0xFFF59E0B),
+                            tint = LocalTradingColors.current.amber,
                             modifier = Modifier.size(32.dp)
                         )
                         Spacer(Modifier.height(8.dp))
@@ -372,13 +387,13 @@ fun TradingViewChartPanel(
                             text = "TradingView Library Unavailable",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFFD1D4DC)
+                            color = chartOnSurface
                         )
                         Spacer(Modifier.height(4.dp))
                         Text(
                             text = err,
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF94A3B8),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
                         )
                         Spacer(Modifier.height(12.dp))
@@ -404,7 +419,7 @@ fun TradingViewChartPanel(
 
             if (isChartReady && chartVersion.isNotBlank()) {
                 Surface(
-                    color = Color(0xFF1E222D).copy(alpha = 0.8f),
+                    color = chartSurface.copy(alpha = 0.8f),
                     shape = RoundedCornerShape(6.dp),
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -413,7 +428,7 @@ fun TradingViewChartPanel(
                     Text(
                         text = "TV v$chartVersion",
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF94A3B8),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }

@@ -452,8 +452,8 @@ fun PriceChartCanvas(
         // AI Renko Supertrend (Institutional adaptive ATR trail + dynamic BUY/SELL pill badges)
         if (overlays.renkoSupertrend) {
             val st = analysis.renkoSupertrend
-            val bullTrailColor = Color(0xFF00E676)
-            val bearTrailColor = Color(0xFFFF5252)
+            val bullTrailColor = palette.bull
+            val bearTrailColor = palette.bear
             drawPath(seriesPath(st.bullLine, window, xOf, yOf), bullTrailColor, style = Stroke(2.3f))
             drawPath(seriesPath(st.bearLine, window, xOf, yOf), bearTrailColor, style = Stroke(2.3f))
             st.currentTrail?.let { trailPrice ->
@@ -498,7 +498,7 @@ fun PriceChartCanvas(
                     val loY = yOf(c.low)
                     val padW = (barW * 0.92f).coerceAtLeast(4f)
                     drawRoundRect(
-                        color = Color(0xFFFF1744).copy(alpha = 0.22f),
+                        color = palette.bear.copy(alpha = 0.22f),
                         topLeft = Offset(cx - padW / 2f, hiY - 2f),
                         size = Size(padW, (loY - hiY + 4f).coerceAtLeast(6f)),
                         cornerRadius = CornerRadius(3f, 3f)
@@ -513,9 +513,9 @@ fun PriceChartCanvas(
                     val botY = yOf(rz.bottom)
                     val zoneW = (chartW - left).coerceAtLeast(0f)
                     val zoneH = abs(botY - topY).coerceAtLeast(2f)
-                    drawRect(Color(0xFFFF1744).copy(alpha = 0.14f), Offset(left, min(topY, botY)), Size(zoneW, zoneH))
-                    drawRect(Color(0xFFFF5252).copy(alpha = 0.65f), Offset(left, min(topY, botY)), Size(zoneW, zoneH), style = Stroke(1f))
-                    safeText(tm, rz.label, left + 3f, min(topY, botY) - 11f, Color(0xFFFF5252), 8, bold = true)
+                    drawRect(palette.bear.copy(alpha = 0.14f), Offset(left, min(topY, botY)), Size(zoneW, zoneH))
+                    drawRect(palette.bear.copy(alpha = 0.65f), Offset(left, min(topY, botY)), Size(zoneW, zoneH), style = Stroke(1f))
+                    safeText(tm, rz.label, left + 3f, min(topY, botY) - 11f, palette.bear, 8, bold = true)
                 }
             // 12:45 IST Midday Breakout range
             rb.midday1245Range?.let { md ->
@@ -649,7 +649,7 @@ fun PriceChartCanvas(
                 .filter { it.endIndex >= window.start && it.startIndex < window.end }
                 .forEach { pat ->
                     val isSelected = pat.id == selectedPatternId
-                    val accent = if (pat.isBullish) Color(0xFF00E5A3) else Color(0xFFFF5C7C)
+                    val accent = if (pat.isBullish) palette.bull else palette.bear
                     val strokeW = if (isSelected) 2.6f else 1.8f
 
                     val uLine = pat.upperLine
@@ -774,7 +774,7 @@ fun PriceChartCanvas(
                     val badgeY = (yOf(anchorPrice) - 20f).coerceIn(topHudH + 4f, (plotBottom - 20f).coerceAtLeast(topHudH + 4f))
                     val badgeText = "⚡ ${pat.type.shortBadge} ${pat.confidenceScore}%"
                     drawRoundRect(
-                        color = if (isSelected) accent else Color(0xFF151B28).copy(alpha = 0.92f),
+                        color = if (isSelected) accent else palette.canvasBg.copy(alpha = 0.92f),
                         topLeft = Offset(badgeX, badgeY),
                         size = Size(106f, 16f),
                         cornerRadius = CornerRadius(5f, 5f)
