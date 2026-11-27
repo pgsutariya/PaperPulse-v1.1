@@ -29,10 +29,14 @@ import androidx.compose.material.icons.automirrored.rounded.TrendingUp
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.FilterList
 import androidx.compose.material.icons.rounded.GridOn
+import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material.icons.rounded.Newspaper
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsNone
+import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
@@ -76,6 +80,7 @@ import com.example.domain.model.MarketSegment
 import com.example.ui.components.EmptyStatePanel
 import com.example.ui.components.FeedHealthBadge
 import com.example.ui.components.FeedLostWarningBanner
+import com.example.ui.components.GlobalMarketsHeaderStrip
 import com.example.ui.components.InstrumentTypeBadge
 import com.example.ui.components.PortfolioPulseHeader
 import com.example.ui.components.PriceAlertsManagerDialog
@@ -83,10 +88,12 @@ import com.example.ui.components.SegmentBadge
 import com.example.ui.components.SetPriceAlertDialog
 import com.example.ui.components.SparklineChart
 import com.example.ui.components.WatchlistNewsFeedSection
+import com.example.ui.screens.market.FundamentalAnalysisDialog
 import com.example.ui.theme.LocalTradingColors
 import com.example.ui.theme.MonoPriceMedium
 import com.example.ui.theme.MonoPriceSmall
 import java.math.BigDecimal
+import java.util.Locale
 
 @Composable
 fun WatchlistScreen(
@@ -94,6 +101,9 @@ fun WatchlistScreen(
     onOpenFeedSettings: () -> Unit,
     onOpenOptionChain: (String) -> Unit = {},
     onOpenNews: () -> Unit = {},
+    onOpenMarketPulse: (Int) -> Unit = {},
+    onOpenStrategyCoaches: () -> Unit = {},
+    onOpenChart: (String) -> Unit = {},
     viewModel: WatchlistViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -116,7 +126,17 @@ fun WatchlistScreen(
             .fillMaxSize()
             .padding(horizontal = 16.dp)
     ) {
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
+
+        if (state.globalMarkets.isNotEmpty()) {
+            GlobalMarketsHeaderStrip(
+                quotes = state.globalMarkets,
+                isRefreshing = state.isRefreshingGlobal,
+                onRefresh = viewModel::refreshGlobalMarkets,
+                onOpenGlobalTab = { onOpenMarketPulse(3) }
+            )
+            Spacer(Modifier.height(8.dp))
+        }
 
         PortfolioPulseHeader(
             account = state.accountState,
@@ -197,6 +217,118 @@ fun WatchlistScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            AssistChip(
+                onClick = onOpenStrategyCoaches,
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Psychology,
+                        contentDescription = null,
+                        tint = tradingColors.violet,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = "AI Coaches",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tradingColors.violet
+                    )
+                },
+                modifier = Modifier.testTag("watchlist_open_ai_coaches")
+            )
+            AssistChip(
+                onClick = { onOpenMarketPulse(0) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Insights,
+                        contentDescription = null,
+                        tint = tradingColors.bullish,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = "Movers & 52W",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tradingColors.bullish
+                    )
+                },
+                modifier = Modifier.testTag("watchlist_open_movers")
+            )
+            AssistChip(
+                onClick = { onOpenMarketPulse(1) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.GridOn,
+                        contentDescription = null,
+                        tint = tradingColors.amber,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = "Heatmap",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tradingColors.amber
+                    )
+                },
+                modifier = Modifier.testTag("watchlist_open_heatmap")
+            )
+            AssistChip(
+                onClick = { onOpenMarketPulse(2) },
+                label = {
+                    Text(
+                        text = "Market Flow",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tradingColors.violet
+                    )
+                },
+                modifier = Modifier.testTag("watchlist_open_fii_dii")
+            )
+            AssistChip(
+                onClick = { onOpenMarketPulse(3) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Public,
+                        contentDescription = null,
+                        tint = tradingColors.cryptoCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = "Global",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = tradingColors.cryptoCyan
+                    )
+                },
+                modifier = Modifier.testTag("watchlist_open_global_markets")
+            )
+            AssistChip(
+                onClick = { onOpenMarketPulse(4) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.FilterList,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    Text(
+                        text = "Screener & Fundamentals",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                },
+                modifier = Modifier.testTag("watchlist_open_screener")
+            )
             AssistChip(
                 onClick = onOpenNews,
                 leadingIcon = {
@@ -466,13 +598,16 @@ fun WatchlistScreen(
                 items(state.instruments, key = { it.symbol }) { instrument ->
                     val badge = state.segmentStatuses[instrument.segment]?.badge ?: SegmentBadgeMode.SIMULATED
                     val activeAlerts = state.activeAlertsBySymbol[instrument.symbol].orEmpty()
+                    val hasFundamentals = instrument.symbol.uppercase(Locale.US) in state.fundamentalSymbols
                     InstrumentRowCard(
                         instrument = instrument,
                         feedBadge = badge,
                         activeAlerts = activeAlerts,
+                        canShowFundamentals = hasFundamentals,
                         onClick = { onInstrumentClick(instrument.symbol) },
                         onSetPriceAlert = { alertTargetSymbol = instrument.symbol },
-                        onFilterNewsForSymbol = { viewModel.onSelectNewsSymbol(instrument.symbol) }
+                        onFilterNewsForSymbol = { viewModel.onSelectNewsSymbol(instrument.symbol) },
+                        onOpenFundamentals = { viewModel.openFundamentals(instrument.symbol) }
                     )
                 }
             }
@@ -503,6 +638,24 @@ fun WatchlistScreen(
             onClearTriggered = viewModel::clearTriggeredPriceAlerts,
             onOpenSymbol = onInstrumentClick,
             onDismiss = { showAlertsManager = false }
+        )
+    }
+
+    state.selectedFundamentalStock?.let { stock ->
+        FundamentalAnalysisDialog(
+            stock = stock,
+            liveDetails = state.selectedFundamentalDetails,
+            isLoadingDetails = state.isLoadingFundamentalDetails,
+            onRefreshDetails = viewModel::refreshFundamentalDetails,
+            onOpenChart = {
+                viewModel.closeFundamentals()
+                onOpenChart(stock.symbol)
+            },
+            onTradeNow = {
+                viewModel.closeFundamentals()
+                onInstrumentClick(stock.symbol)
+            },
+            onDismiss = viewModel::closeFundamentals
         )
     }
 }
@@ -623,9 +776,11 @@ private fun InstrumentRowCard(
     instrument: Instrument,
     feedBadge: SegmentBadgeMode,
     activeAlerts: List<PriceAlert>,
+    canShowFundamentals: Boolean,
     onClick: () -> Unit,
     onSetPriceAlert: () -> Unit,
-    onFilterNewsForSymbol: () -> Unit
+    onFilterNewsForSymbol: () -> Unit,
+    onOpenFundamentals: () -> Unit
 ) {
     val tradingColors = LocalTradingColors.current
     val isPositive = instrument.changePercent >= BigDecimal.ZERO
@@ -843,6 +998,23 @@ private fun InstrumentRowCard(
                 },
                 modifier = Modifier.testTag("context_menu_trade_${instrument.symbol}")
             )
+            if (canShowFundamentals) {
+                DropdownMenuItem(
+                    text = { Text("Fundamental Analysis & Quarters", fontWeight = FontWeight.Medium) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.Insights,
+                            contentDescription = null,
+                            tint = tradingColors.violet
+                        )
+                    },
+                    onClick = {
+                        showContextMenu = false
+                        onOpenFundamentals()
+                    },
+                    modifier = Modifier.testTag("context_menu_fundamentals_${instrument.symbol}")
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Filter Watchlist News") },
                 leadingIcon = {

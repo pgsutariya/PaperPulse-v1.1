@@ -1,21 +1,29 @@
 package com.example.ui.screens.positions
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -26,6 +34,8 @@ import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material.icons.rounded.TableRows
+import androidx.compose.material.icons.rounded.ViewAgenda
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -48,10 +58,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -66,17 +79,37 @@ import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
 import com.example.domain.model.ProductType
 import com.example.domain.model.TrailMode
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.ui.components.AiSecondOpinionCard
+import com.example.ui.components.CompactTrailingSlRowIndicator
 import com.example.ui.components.EmptyStatePanel
 import com.example.ui.components.FeedHealthBadge
 import com.example.ui.components.FeedLostWarningBanner
 import com.example.ui.components.InstrumentTypeBadge
 import com.example.ui.components.SegmentBadge
+import com.example.ui.components.TrailingSlHeaderBadge
+import com.example.ui.components.TrailingSlStatus
+import com.example.ui.components.TrailingSlTelemetryCalculator
+import com.example.ui.components.TrailingSlVisualTracker
+import com.example.ui.components.guardGlobalHotkeysOnFocus
+import com.example.ui.components.rememberKeyboardAwareModalLock
 import com.example.ui.theme.LocalTradingColors
 import com.example.ui.theme.MonoPriceMedium
 import com.example.ui.theme.MonoPriceSmall
+import kotlinx.coroutines.delay
 import java.math.BigDecimal
 import java.math.RoundingMode
+
+private enum class PositionsViewMode {
+    TABLE,
+    CARDS
+}
 
 @Composable
 fun PositionsScreen(
@@ -85,11 +118,14 @@ fun PositionsScreen(
     viewModel: PositionsViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val riskEditorDraft by viewModel.riskEditorDraft.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val tradingColors = LocalTradingColors.current
 
-    var averagingItem by remember { mutableStateOf<PositionWithLivePnl?>(null) }
-    var showFundsDialog by remember { mutableStateOf(false) }
+    var averagingPositionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showFundsDialog by rememberSaveable { mutableStateOf(false) }
+    var viewMode by rememberSaveable { mutableStateOf(PositionsViewMode.TABLE) }
+    var expandedTablePositionId by rememberSaveable { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         viewModel.messages.collect { msg -> snackbarHostState.showSnackbar(msg) }
@@ -97,12 +133,14 @@ fun PositionsScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        containerColor = Color.Transparent
+        containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0)
     ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
             Spacer(Modifier.height(8.dp))
@@ -256,11 +294,66 @@ fun PositionsScreen(
                     subtitle = "Select an instrument from the Watchlist to open an Intraday or Carry Forward paper position."
                 )
             } else {
+                val activeTslCount = state.items.count { it.position.isTslEnabled && it.position.activeSlPrice != null }
+
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    item(key = "positions_view_toolbar") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                FilterChip(
+                                    selected = viewMode == PositionsViewMode.TABLE,
+                                    onClick = { viewMode = PositionsViewMode.TABLE },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Rounded.TableRows,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    label = { Text("Table") },
+                                    modifier = Modifier.testTag("positions_view_table")
+                                )
+                                FilterChip(
+                                    selected = viewMode == PositionsViewMode.CARDS,
+                                    onClick = { viewMode = PositionsViewMode.CARDS },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Rounded.ViewAgenda,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    label = { Text("Cards") },
+                                    modifier = Modifier.testTag("positions_view_cards")
+                                )
+                            }
+                            if (activeTslCount > 0) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = tradingColors.violetContainer,
+                                    border = BorderStroke(0.8.dp, tradingColors.violet.copy(alpha = 0.45f)),
+                                    modifier = Modifier.testTag("positions_active_tsl_counter")
+                                ) {
+                                    Text(
+                                        text = "$activeTslCount TSL Active",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = tradingColors.violet,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     item(key = "positions_ai_risk_audit") {
                         AiSecondOpinionCard(
                             title = "AI Portfolio Risk Audit",
@@ -274,48 +367,80 @@ fun PositionsScreen(
                             onOpenAiSettings = onOpenFeedSettings
                         )
                     }
-                    items(state.items, key = { it.position.id }) { item ->
-                        PositionCard(
-                            item = item,
-                            onOpenDetail = { onOpenDetail(item.position.symbol) },
-                            onAverage = { averagingItem = item },
-                            onSaveRisk = { sl, tgt, tslOn, tslMode, tslVal, ttOn, ttMode, ttVal ->
-                                viewModel.saveInlineRiskControls(
-                                    positionId = item.position.id,
-                                    slPrice = sl,
-                                    targetPrice = tgt,
-                                    isTslEnabled = tslOn,
-                                    tslMode = tslMode,
-                                    tslValue = tslVal,
-                                    isTrailingTargetEnabled = ttOn,
-                                    trailingTargetMode = ttMode,
-                                    trailingTargetValue = ttVal
-                                )
-                            },
-                            onConvertToCarryForward = { viewModel.convertToCarryForward(item.position.id) },
-                            onExitMarket = { viewModel.exitPosition(item.position.id) }
-                        )
+
+                    if (viewMode == PositionsViewMode.TABLE) {
+                        item(key = "positions_table_surface") {
+                            PositionsTableCard(
+                                items = state.items,
+                                expandedPositionId = expandedTablePositionId,
+                                editingPositionId = riskEditorDraft?.positionId,
+                                onToggleExpand = { id ->
+                                    expandedTablePositionId = if (expandedTablePositionId == id) null else id
+                                },
+                                onOpenRiskEditor = viewModel::openRiskEditor,
+                                onOpenDetail = onOpenDetail,
+                                onAverage = { averagingPositionId = it },
+                                onConvertToCarryForward = viewModel::convertToCarryForward,
+                                onExitMarket = viewModel::exitPosition
+                            )
+                        }
+                    } else {
+                        items(state.items, key = { it.position.id }) { item ->
+                            PositionCard(
+                                item = item,
+                                isEditing = riskEditorDraft?.positionId == item.position.id,
+                                onOpenRiskEditor = { viewModel.openRiskEditor(item.position.id) },
+                                onOpenDetail = { onOpenDetail(item.position.symbol) },
+                                onAverage = { averagingPositionId = item.position.id },
+                                onConvertToCarryForward = { viewModel.convertToCarryForward(item.position.id) },
+                                onExitMarket = { viewModel.exitPosition(item.position.id) }
+                            )
+                        }
                     }
                 }
             }
         }
     }
 
-    averagingItem?.let { item ->
-        val segAvailable = if (item.position.segment == MarketSegment.CRYPTO) {
-            state.cryptoAvailableMargin
-        } else {
-            state.availableMargin
-        }
-        AveragePositionDialog(
-            item = item,
-            availableMargin = segAvailable,
-            onDismiss = { averagingItem = null },
-            onConfirm = { addQty ->
-                viewModel.averagePosition(item.position.id, addQty)
-                averagingItem = null
-            }
+    riskEditorDraft?.let { draft ->
+        val liveItem = state.items.firstOrNull { it.position.id == draft.positionId }
+        PositionRiskEditorDialog(
+            draft = draft,
+            liveLtp = liveItem?.ltp ?: draft.averageEntryPrice,
+            onSlChange = viewModel::updateRiskEditorSl,
+            onTargetChange = viewModel::updateRiskEditorTarget,
+            onApplyPreset = { sl, tgt -> viewModel.applyRiskEditorPreset(sl, tgt) },
+            onToggleTsl = viewModel::toggleRiskEditorTsl,
+            onTslModeChange = viewModel::setRiskEditorTslMode,
+            onTslValueChange = viewModel::updateRiskEditorTslValue,
+            onToggleTt = viewModel::toggleRiskEditorTrailingTarget,
+            onTtModeChange = viewModel::setRiskEditorTrailingTargetMode,
+            onTtValueChange = viewModel::updateRiskEditorTrailingTargetValue,
+            onSave = viewModel::saveRiskEditor,
+            onDismiss = viewModel::dismissRiskEditor
         )
+    }
+
+    averagingPositionId?.let { posId ->
+        val item = state.items.firstOrNull { it.position.id == posId }
+        if (item == null) {
+            averagingPositionId = null
+        } else {
+            val segAvailable = if (item.position.segment == MarketSegment.CRYPTO) {
+                state.cryptoAvailableMargin
+            } else {
+                state.availableMargin
+            }
+            AveragePositionDialog(
+                item = item,
+                availableMargin = segAvailable,
+                onDismiss = { averagingPositionId = null },
+                onConfirm = { addQty ->
+                    viewModel.averagePosition(item.position.id, addQty)
+                    averagingPositionId = null
+                }
+            )
+        }
     }
 
     if (showFundsDialog) {
@@ -336,11 +461,346 @@ fun PositionsScreen(
 }
 
 @Composable
+private fun PositionsTableCard(
+    items: List<PositionWithLivePnl>,
+    expandedPositionId: String?,
+    editingPositionId: String?,
+    onToggleExpand: (String) -> Unit,
+    onOpenRiskEditor: (String) -> Unit,
+    onOpenDetail: (String) -> Unit,
+    onAverage: (String) -> Unit,
+    onConvertToCarryForward: (String) -> Unit,
+    onExitMarket: (String) -> Unit
+) {
+    val tradingColors = LocalTradingColors.current
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("positions_table_card"),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, tradingColors.border)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Table Header Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "POSITION",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1.15f)
+                )
+                Text(
+                    text = "LTP / P&L",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(0.95f)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "TRAILING SL",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = tradingColors.violet,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(1.1f)
+                )
+            }
+
+            HorizontalDivider(color = tradingColors.border)
+
+            items.forEachIndexed { index, item ->
+                val pos = item.position
+                val isExpanded = expandedPositionId == pos.id
+                val isEditing = editingPositionId == pos.id
+                val isProfit = item.unrealisedPnl >= BigDecimal.ZERO
+                val pnlColor = if (isProfit) tradingColors.bullish else tradingColors.bearish
+
+                val tslTelemetry = remember(
+                    pos.id,
+                    pos.isTslEnabled,
+                    pos.activeSlPrice,
+                    pos.tslBestPrice,
+                    pos.tslTrailMode,
+                    pos.tslTrailValue,
+                    pos.averageEntryPrice,
+                    pos.quantity,
+                    item.ltp
+                ) {
+                    TrailingSlTelemetryCalculator.compute(pos, item.ltp)
+                }
+
+                // Live LTP tick flash on each market tick
+                var lastLtp by remember(pos.id) { mutableStateOf(item.ltp) }
+                var tickFlashDir by remember(pos.id) { mutableStateOf(0) }
+                LaunchedEffect(item.ltp) {
+                    val cmp = item.ltp.compareTo(lastLtp)
+                    if (cmp != 0) {
+                        tickFlashDir = if (cmp > 0) 1 else -1
+                        lastLtp = item.ltp
+                        delay(420L)
+                        tickFlashDir = 0
+                    }
+                }
+                val ltpFlashColor by animateColorAsState(
+                    targetValue = when (tickFlashDir) {
+                        1 -> tradingColors.bullish.copy(alpha = 0.16f)
+                        -1 -> tradingColors.bearish.copy(alpha = 0.16f)
+                        else -> Color.Transparent
+                    },
+                    animationSpec = tween(durationMillis = 220),
+                    label = "posTableLtpFlash_${pos.id}"
+                )
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            if (isEditing) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.16f)
+                            else Color.Transparent
+                        )
+                        .testTag("position_table_row_${pos.symbol}")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 64.dp)
+                            .clickable { onToggleExpand(pos.id) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Column 1: Symbol, Side, Qty, Avg
+                        Column(
+                            modifier = Modifier.weight(1.15f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = pos.symbol,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = if (pos.side == OrderSide.BUY) tradingColors.bullishContainer else tradingColors.bearishContainer
+                                ) {
+                                    Text(
+                                        text = if (pos.side == OrderSide.BUY) "B" else "S",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (pos.side == OrderSide.BUY) tradingColors.bullish else tradingColors.bearish,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = "${pos.quantity} • ${pos.productType.shortCode}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                            Text(
+                                text = "Avg ${RiskMath.formatPrice(pos.averageEntryPrice, pos.segment)}",
+                                style = MonoPriceSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // Column 2: Live LTP (tick-flashing) + Unrealised P&L
+                        Column(
+                            modifier = Modifier.weight(0.95f),
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = RiskMath.formatPrice(item.ltp, pos.segment),
+                                style = MonoPriceSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(ltpFlashColor)
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                            Text(
+                                text = RiskMath.formatSignedCurrency(item.unrealisedPnl, pos.segment),
+                                style = MonoPriceSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = pnlColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            pos.activeTargetPrice?.let { tgt ->
+                                Text(
+                                    text = "Tgt ${RiskMath.formatPrice(tgt, pos.segment)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = tradingColors.bullish,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.width(8.dp))
+
+                        // Column 3: Dynamic Active Trailing Stop Loss Visual Indicator Cell
+                        if (tslTelemetry != null) {
+                            CompactTrailingSlRowIndicator(
+                                symbol = pos.symbol,
+                                telemetry = tslTelemetry,
+                                segment = pos.segment,
+                                side = pos.side,
+                                onClick = { onOpenRiskEditor(pos.id) },
+                                modifier = Modifier.weight(1.1f)
+                            )
+                        } else {
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1.1f)
+                                    .heightIn(min = 48.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onOpenRiskEditor(pos.id) }
+                                    .testTag("positions_table_sl_cell_${pos.symbol}"),
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                border = BorderStroke(0.8.dp, tradingColors.border)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                    horizontalAlignment = Alignment.End,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Text(
+                                        text = if (pos.activeSlPrice != null) "FIXED SL" else "NO SL",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (pos.activeSlPrice != null) tradingColors.bearish else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = pos.activeSlPrice?.let { RiskMath.formatPrice(it, pos.segment) } ?: "+ Add TSL",
+                                        style = MonoPriceSmall,
+                                        color = if (pos.activeSlPrice != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Expandable live TSL track + quick action bar
+                    AnimatedVisibility(visible = isExpanded) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.surfaceContainerLowest)
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (tslTelemetry != null) {
+                                TrailingSlVisualTracker(
+                                    symbol = pos.symbol,
+                                    telemetry = tslTelemetry,
+                                    segment = pos.segment,
+                                    side = pos.side,
+                                    trailMode = pos.tslTrailMode,
+                                    trailValue = pos.tslTrailValue
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { onOpenRiskEditor(pos.id) },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("SL / TSL", style = MaterialTheme.typography.labelSmall)
+                                }
+                                OutlinedButton(
+                                    onClick = { onAverage(pos.id) },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Rounded.Layers, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Avg", style = MaterialTheme.typography.labelSmall)
+                                }
+                                OutlinedButton(
+                                    onClick = { onOpenDetail(pos.symbol) },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Ticket", style = MaterialTheme.typography.labelSmall)
+                                }
+                                Button(
+                                    onClick = { onExitMarket(pos.id) },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = tradingColors.bearish, contentColor = Color.White),
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Exit", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            if (pos.productType == ProductType.INTRADAY && item.supportsCarryForward) {
+                                OutlinedButton(
+                                    onClick = { onConvertToCarryForward(pos.id) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Rounded.SwapHoriz, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Convert to Carry Forward", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (index < items.lastIndex) {
+                    HorizontalDivider(color = tradingColors.border.copy(alpha = 0.65f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PositionCard(
     item: PositionWithLivePnl,
+    isEditing: Boolean,
+    onOpenRiskEditor: () -> Unit,
     onOpenDetail: () -> Unit,
     onAverage: () -> Unit,
-    onSaveRisk: (BigDecimal?, BigDecimal?, Boolean, TrailMode, BigDecimal, Boolean, TrailMode, BigDecimal) -> Unit,
     onConvertToCarryForward: () -> Unit,
     onExitMarket: () -> Unit
 ) {
@@ -348,36 +808,32 @@ private fun PositionCard(
     val tradingColors = LocalTradingColors.current
     val isProfit = item.unrealisedPnl >= BigDecimal.ZERO
     val pnlColor = if (isProfit) tradingColors.bullish else tradingColors.bearish
-
-    var expandedEditor by remember(pos.id) { mutableStateOf(false) }
-    var slText by remember(pos.id) { mutableStateOf(pos.activeSlPrice?.toPlainString() ?: "") }
-    var targetText by remember(pos.id) { mutableStateOf(pos.activeTargetPrice?.toPlainString() ?: "") }
-    var tslEnabled by remember(pos.id) { mutableStateOf(pos.isTslEnabled) }
-    var tslMode by remember(pos.id) { mutableStateOf(pos.tslTrailMode) }
-    var tslValueText by remember(pos.id) { mutableStateOf(pos.tslTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8") }
-    var ttEnabled by remember(pos.id) { mutableStateOf(pos.isTrailingTargetEnabled) }
-    var ttMode by remember(pos.id) { mutableStateOf(pos.trailingTargetTrailMode) }
-    var ttValueText by remember(pos.id) { mutableStateOf(pos.trailingTargetTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8") }
-
-    // Sync persisted risk values when opening the editor, without clobbering active typing on ticks
-    LaunchedEffect(expandedEditor, pos.id) {
-        if (expandedEditor) {
-            slText = pos.activeSlPrice?.toPlainString() ?: ""
-            targetText = pos.activeTargetPrice?.toPlainString() ?: ""
-            tslEnabled = pos.isTslEnabled
-            tslMode = pos.tslTrailMode
-            tslValueText = pos.tslTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8"
-            ttEnabled = pos.isTrailingTargetEnabled
-            ttMode = pos.trailingTargetTrailMode
-            ttValueText = pos.trailingTargetTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8"
-        }
+    val tslTelemetry = remember(
+        pos.id,
+        pos.isTslEnabled,
+        pos.activeSlPrice,
+        pos.tslBestPrice,
+        pos.tslTrailMode,
+        pos.tslTrailValue,
+        pos.averageEntryPrice,
+        pos.quantity,
+        item.ltp
+    ) {
+        TrailingSlTelemetryCalculator.compute(pos, item.ltp)
+    }
+    val cardBorderColor = when {
+        isEditing -> MaterialTheme.colorScheme.primary
+        tslTelemetry?.status == TrailingSlStatus.PROFIT_LOCKED -> tradingColors.bullish.copy(alpha = 0.65f)
+        tslTelemetry?.status == TrailingSlStatus.NEAR_TRIGGER -> tradingColors.amber.copy(alpha = 0.70f)
+        tslTelemetry != null -> tradingColors.violet.copy(alpha = 0.60f)
+        else -> tradingColors.border
     }
 
     Surface(
         modifier = Modifier.fillMaxWidth().testTag("position_card_${pos.symbol}"),
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, tradingColors.border)
+        border = BorderStroke(if (tslTelemetry != null || isEditing) 1.3.dp else 1.dp, cardBorderColor)
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
@@ -439,6 +895,13 @@ private fun PositionCard(
                         style = MonoPriceMedium,
                         color = pnlColor
                     )
+                    if (tslTelemetry != null) {
+                        Spacer(Modifier.height(4.dp))
+                        TrailingSlHeaderBadge(
+                            status = tslTelemetry.status,
+                            modifier = Modifier.testTag("tsl_header_badge_${pos.symbol}")
+                        )
+                    }
                     if (pos.ocoGroupId != null) {
                         Spacer(Modifier.height(4.dp))
                         Surface(shape = RoundedCornerShape(6.dp), color = tradingColors.violetContainer) {
@@ -458,20 +921,31 @@ private fun PositionCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val slAccent = when (tslTelemetry?.status) {
+                    TrailingSlStatus.PROFIT_LOCKED -> tradingColors.bullish
+                    TrailingSlStatus.NEAR_TRIGGER -> tradingColors.amber
+                    TrailingSlStatus.BREAKEVEN -> tradingColors.cryptoCyan
+                    TrailingSlStatus.TRAILING_ACTIVE -> tradingColors.violet
+                    null -> tradingColors.bearish
+                }
                 Surface(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(10.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainer
+                    color = if (tslTelemetry != null) slAccent.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surfaceContainer,
+                    border = if (tslTelemetry != null) BorderStroke(1.dp, slAccent.copy(alpha = 0.45f)) else null
                 ) {
                     Column(modifier = Modifier.padding(8.dp)) {
+                        val ratchetArrow = if (pos.side == OrderSide.BUY) "↑" else "↓"
                         Text(
-                            text = if (pos.isTslEnabled) "TRAILING SL" else "STOP LOSS",
+                            text = if (pos.isTslEnabled) "TRAILING SL $ratchetArrow" else "STOP LOSS",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (pos.isTslEnabled) tradingColors.violet else tradingColors.bearish
+                            fontWeight = if (pos.isTslEnabled) FontWeight.Bold else FontWeight.Medium,
+                            color = slAccent
                         )
                         Text(
                             text = pos.activeSlPrice?.let { RiskMath.formatPrice(it, pos.segment) } ?: "None",
-                            style = MonoPriceSmall
+                            style = MonoPriceSmall,
+                            color = if (tslTelemetry != null) slAccent else MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }
@@ -504,6 +978,17 @@ private fun PositionCard(
                 }
             }
 
+            if (tslTelemetry != null) {
+                TrailingSlVisualTracker(
+                    symbol = pos.symbol,
+                    telemetry = tslTelemetry,
+                    segment = pos.segment,
+                    side = pos.side,
+                    trailMode = pos.tslTrailMode,
+                    trailValue = pos.tslTrailValue
+                )
+            }
+
             // Action Buttons Row 1: Average (+Lots) & Edit SL/Tgt
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -521,14 +1006,14 @@ private fun PositionCard(
                 }
 
                 OutlinedButton(
-                    onClick = { expandedEditor = !expandedEditor },
+                    onClick = onOpenRiskEditor,
                     modifier = Modifier.weight(1f).testTag("edit_risk_button_${pos.symbol}"),
                     shape = RoundedCornerShape(10.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
                 ) {
                     Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text(if (expandedEditor) "Hide Risk" else "Edit SL/Tgt", style = MaterialTheme.typography.labelMedium)
+                    Text("Edit SL/Tgt", style = MaterialTheme.typography.labelMedium)
                 }
             }
 
@@ -560,100 +1045,260 @@ private fun PositionCard(
                     Text("Exit Market", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 }
             }
+        }
+    }
+}
 
-            // Inline Risk Editor
-            AnimatedVisibility(visible = expandedEditor) {
-                Column(
+@Composable
+private fun PositionRiskEditorDialog(
+    draft: PositionRiskEditorDraft,
+    liveLtp: BigDecimal,
+    onSlChange: (String) -> Unit,
+    onTargetChange: (String) -> Unit,
+    onApplyPreset: (BigDecimal?, BigDecimal?) -> Unit,
+    onToggleTsl: (Boolean) -> Unit,
+    onTslModeChange: (TrailMode) -> Unit,
+    onTslValueChange: (String) -> Unit,
+    onToggleTt: (Boolean) -> Unit,
+    onTtModeChange: (TrailMode) -> Unit,
+    onTtValueChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val tradingColors = LocalTradingColors.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    // Keyboard-aware modal lock: blocks tab switching & disables outside-tap dismissal while IME is open
+    val modalLock = rememberKeyboardAwareModalLock(isOpen = true)
+
+    val isBuy = draft.side == OrderSide.BUY
+    val parsedSl = draft.slText.trim().takeIf { it.isNotEmpty() }?.toBigDecimalOrNull()
+    val parsedTarget = draft.targetText.trim().takeIf { it.isNotEmpty() }?.toBigDecimalOrNull()
+    val slTriggersNow = parsedSl != null && ((isBuy && parsedSl >= liveLtp) || (!isBuy && parsedSl <= liveLtp))
+    val targetTriggersNow = parsedTarget != null && ((isBuy && parsedTarget <= liveLtp) || (!isBuy && parsedTarget >= liveLtp))
+
+    Dialog(
+        onDismissRequest = { if (modalLock.allowBackdropDismiss && !draft.isSaving) onDismiss() },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = modalLock.allowBackdropDismiss,
+            dismissOnBackPress = !draft.isSaving
+        )
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .imePadding()
+                .testTag("position_risk_editor_modal"),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, tradingColors.border)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Modify SL & Target",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${draft.symbol} • ${draft.side.name} • Avg ${RiskMath.formatPrice(draft.averageEntryPrice, draft.segment)} • Live ${RiskMath.formatPrice(liveLtp, draft.segment)}",
+                            style = MonoPriceSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = {
+                        focusManager.clearFocus(force = true)
+                        keyboardController?.hide()
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Close SL/Target editor")
+                    }
+                }
+
+                // Quick 1-tap SL & Target presets anchored to live LTP / Entry
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = slText,
-                            onValueChange = { slText = sanitizeRiskDecimal(it) },
-                            label = { Text("SL Price (${pos.segment.currencySymbol})") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true,
-                            modifier = Modifier.weight(1f).testTag("inline_sl_input_${pos.symbol}")
-                        )
-                        OutlinedTextField(
-                            value = targetText,
-                            onValueChange = { targetText = sanitizeRiskDecimal(it) },
-                            label = { Text("Target Price (${pos.segment.currencySymbol})") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true,
-                            modifier = Modifier.weight(1f).testTag("inline_target_input_${pos.symbol}")
-                        )
-                    }
+                    val slFactor1 = if (isBuy) BigDecimal("0.990") else BigDecimal("1.010")
+                    val slFactor2 = if (isBuy) BigDecimal("0.980") else BigDecimal("1.020")
+                    val tgtFactor1 = if (isBuy) BigDecimal("1.015") else BigDecimal("0.985")
+                    val tgtFactor2 = if (isBuy) BigDecimal("1.030") else BigDecimal("0.970")
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Trailing SL", style = MaterialTheme.typography.titleSmall)
-                        Switch(checked = tslEnabled, onCheckedChange = { tslEnabled = it })
-                    }
-                    if (tslEnabled) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            TrailMode.entries.forEach { mode ->
-                                FilterChip(selected = tslMode == mode, onClick = { tslMode = mode }, label = { Text(mode.label) })
-                            }
-                            OutlinedTextField(
-                                value = tslValueText,
-                                onValueChange = { tslValueText = sanitizeRiskDecimal(it) },
-                                label = { Text("Trail") },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
+                    FilterChip(
+                        selected = false,
+                        onClick = { onApplyPreset(liveLtp.multiply(slFactor1), null) },
+                        label = { Text("SL 1%", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    FilterChip(
+                        selected = false,
+                        onClick = { onApplyPreset(liveLtp.multiply(slFactor2), null) },
+                        label = { Text("SL 2%", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    FilterChip(
+                        selected = false,
+                        onClick = { onApplyPreset(draft.averageEntryPrice, null) },
+                        label = { Text("SL Cost", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    FilterChip(
+                        selected = false,
+                        onClick = { onApplyPreset(null, liveLtp.multiply(tgtFactor1)) },
+                        label = { Text("Tgt 1.5%", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    FilterChip(
+                        selected = false,
+                        onClick = { onApplyPreset(null, liveLtp.multiply(tgtFactor2)) },
+                        label = { Text("Tgt 3%", style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Trailing Target", style = MaterialTheme.typography.titleSmall)
-                        Switch(checked = ttEnabled, onCheckedChange = { ttEnabled = it })
-                    }
-                    if (ttEnabled) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            TrailMode.entries.forEach { mode ->
-                                FilterChip(selected = ttMode == mode, onClick = { ttMode = mode }, label = { Text(mode.label) })
-                            }
-                            OutlinedTextField(
-                                value = ttValueText,
-                                onValueChange = { ttValueText = sanitizeRiskDecimal(it) },
-                                label = { Text("Trail") },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                singleLine = true,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = draft.slText,
+                        onValueChange = onSlChange,
+                        label = { Text("SL Price (${draft.segment.currencySymbol})") },
+                        placeholder = { Text(if (isBuy) "< ${liveLtp.toPlainString()}" else "> ${liveLtp.toPlainString()}") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        isError = slTriggersNow,
+                        modifier = Modifier
+                            .weight(1f)
+                            .guardGlobalHotkeysOnFocus()
+                            .testTag("inline_sl_input_${draft.symbol}")
+                    )
+                    OutlinedTextField(
+                        value = draft.targetText,
+                        onValueChange = onTargetChange,
+                        label = { Text("Target Price (${draft.segment.currencySymbol})") },
+                        placeholder = { Text(if (isBuy) "> ${liveLtp.toPlainString()}" else "< ${liveLtp.toPlainString()}") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        isError = targetTriggersNow,
+                        modifier = Modifier
+                            .weight(1f)
+                            .guardGlobalHotkeysOnFocus()
+                            .testTag("inline_target_input_${draft.symbol}")
+                    )
+                }
 
-                    Button(
-                        onClick = {
-                            onSaveRisk(
-                                slText.trim().toBigDecimalOrNull(),
-                                targetText.trim().toBigDecimalOrNull(),
-                                tslEnabled,
-                                tslMode,
-                                tslValueText.trim().toBigDecimalOrNull() ?: BigDecimal("1"),
-                                ttEnabled,
-                                ttMode,
-                                ttValueText.trim().toBigDecimalOrNull() ?: BigDecimal("1")
-                            )
-                            expandedEditor = false
+                if (slTriggersNow || targetTriggersNow) {
+                    Text(
+                        text = if (slTriggersNow) {
+                            "Heads up: SL is past live LTP (${RiskMath.formatPrice(liveLtp, draft.segment)}) and will trigger immediately on save."
+                        } else {
+                            "Heads up: Target is already past live LTP (${RiskMath.formatPrice(liveLtp, draft.segment)}) and will trigger immediately on save."
                         },
-                        modifier = Modifier.fillMaxWidth().testTag("save_inline_risk_${pos.symbol}"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = tradingColors.amber
+                    )
+                }
+
+                draft.validationError?.let { err ->
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = tradingColors.bearishContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = err,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = tradingColors.bearish,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Trailing SL", style = MaterialTheme.typography.titleSmall)
+                    Switch(checked = draft.tslEnabled, onCheckedChange = onToggleTsl)
+                }
+                if (draft.tslEnabled) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TrailMode.entries.forEach { mode ->
+                            FilterChip(selected = draft.tslMode == mode, onClick = { onTslModeChange(mode) }, label = { Text(mode.label) })
+                        }
+                        OutlinedTextField(
+                            value = draft.tslValueText,
+                            onValueChange = onTslValueChange,
+                            label = { Text("Trail") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f).guardGlobalHotkeysOnFocus()
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Trailing Target", style = MaterialTheme.typography.titleSmall)
+                    Switch(checked = draft.ttEnabled, onCheckedChange = onToggleTt)
+                }
+                if (draft.ttEnabled) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TrailMode.entries.forEach { mode ->
+                            FilterChip(selected = draft.ttMode == mode, onClick = { onTtModeChange(mode) }, label = { Text(mode.label) })
+                        }
+                        OutlinedTextField(
+                            value = draft.ttValueText,
+                            onValueChange = onTtValueChange,
+                            label = { Text("Trail") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f).guardGlobalHotkeysOnFocus()
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            focusManager.clearFocus(force = true)
+                            keyboardController?.hide()
+                            onDismiss()
+                        },
+                        enabled = !draft.isSaving,
+                        modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(10.dp)
                     ) {
-                        Text("Save Inline Risk Controls")
+                        Text("Cancel")
+                    }
+                    Button(
+                        onClick = {
+                            focusManager.clearFocus(force = true)
+                            keyboardController?.hide()
+                            onSave()
+                        },
+                        enabled = !draft.isSaving,
+                        modifier = Modifier.weight(1.4f).testTag("save_inline_risk_${draft.symbol}"),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text(if (draft.isSaving) "Saving..." else "Save SL / Target")
                     }
                 }
             }
@@ -689,8 +1334,11 @@ private fun AveragePositionDialog(
     }
     val insufficient = estExtraMargin > availableMargin
 
+    val modalLock = rememberKeyboardAwareModalLock(isOpen = true)
+
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (modalLock.allowBackdropDismiss) onDismiss() },
+        properties = DialogProperties(dismissOnClickOutside = modalLock.allowBackdropDismiss),
         title = {
             Column {
                 Text("Average Running Trade", fontWeight = FontWeight.Bold)
@@ -733,7 +1381,7 @@ private fun AveragePositionDialog(
                         label = { Text("Add Qty (Lot $lot)") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true,
-                        modifier = Modifier.weight(1f).testTag("average_qty_input")
+                        modifier = Modifier.weight(1f).guardGlobalHotkeysOnFocus().testTag("average_qty_input")
                     )
                     IconButton(
                         onClick = {
@@ -813,8 +1461,11 @@ private fun CapitalManagementDialog(
     var resetInrText by remember { mutableStateOf("1000000") }
     var resetUsdText by remember { mutableStateOf("10000") }
 
+    val modalLock = rememberKeyboardAwareModalLock(isOpen = true)
+
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (modalLock.allowBackdropDismiss) onDismiss() },
+        properties = DialogProperties(dismissOnClickOutside = modalLock.allowBackdropDismiss),
         title = { Text("Manage Paper Capital", fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -855,14 +1506,14 @@ private fun CapitalManagementDialog(
                     label = { Text(if (isCryptoWallet) "Amount ($ USD)" else "Amount (₹ INR)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("capital_amount_input")
+                    modifier = Modifier.fillMaxWidth().guardGlobalHotkeysOnFocus().testTag("capital_amount_input")
                 )
                 OutlinedTextField(
                     value = noteText,
                     onValueChange = { noteText = it },
                     label = { Text("Note (optional)") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().guardGlobalHotkeysOnFocus()
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
@@ -899,7 +1550,7 @@ private fun CapitalManagementDialog(
                         label = { Text("Reset ₹") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).guardGlobalHotkeysOnFocus()
                     )
                     OutlinedTextField(
                         value = resetUsdText,
@@ -907,7 +1558,7 @@ private fun CapitalManagementDialog(
                         label = { Text("Reset $") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).guardGlobalHotkeysOnFocus()
                     )
                     Button(
                         onClick = {

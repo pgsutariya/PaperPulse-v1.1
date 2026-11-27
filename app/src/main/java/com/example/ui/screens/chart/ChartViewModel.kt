@@ -14,6 +14,7 @@ import com.example.domain.analysis.AdvancedIndicators
 import com.example.domain.analysis.AiRenkoConfig
 import com.example.domain.analysis.AmdState
 import com.example.domain.analysis.ChartAnalysis
+import com.example.domain.analysis.DetectedChartPattern
 import com.example.domain.analysis.EmaCrossSetup
 import com.example.domain.analysis.MarketAnalyzer
 import com.example.domain.analysis.MdrState
@@ -63,10 +64,12 @@ data class ChartOverlays(
     val setupLevels: Boolean = true,
     val renkoSupertrend: Boolean = true,
     val redBar: Boolean = true,
-    val firstRedRange: Boolean = true
+    val firstRedRange: Boolean = true,
+    val chartPatterns: Boolean = true
 )
 
 enum class OverlayKey(val label: String) {
+    CHART_PATTERNS("AI Patterns"),
     RENKO_SUPERTREND("AI Renko ST"),
     RED_BAR("Red Bar"),
     FIRST_RED_RANGE("1st Red Range"),
@@ -124,6 +127,8 @@ data class ChartUiState(
     val tvZoomCommandSeq: Int = 0,
     val tvZoomDirection: Int = 0,
     val renkoConfig: AiRenkoConfig = AiRenkoConfig(),
+    val selectedPattern: DetectedChartPattern? = null,
+    val selectedPatternAiState: AiUiState<AiSignalSecondOpinion> = AiUiState.Idle,
     val aiChartState: AiUiState<AiSignalSecondOpinion> = AiUiState.Idle,
     val aiConnectionStatus: AiConnectionStatus = AiConnectionStatus()
 )
@@ -161,6 +166,7 @@ class ChartViewModel @Inject constructor(
     private val _riskPercent = MutableStateFlow(1.0)
     private val _interactive = MutableStateFlow(InteractiveChartState())
     private val _aiChartState = MutableStateFlow<AiUiState<AiSignalSecondOpinion>>(AiUiState.Idle)
+    private val _patternAiStates = MutableStateFlow<Map<String, AiUiState<AiSignalSecondOpinion>>>(emptyMap())
 
     private var refreshJob: Job? = null
 
@@ -172,8 +178,8 @@ class ChartViewModel @Inject constructor(
         StatusBits(pan, loading, note, risk, inter)
     }
 
-    private val aiFlow = combine(_aiChartState, aiMarketRepository.connectionStatus) { aiState, conn ->
-        aiState to conn
+    private val aiFlow = combine(_aiChartState, aiMarketRepository.connectionStatus, _patternAiStates) { aiState, conn, patMap ->
+        Triple(aiState, conn, patMap)
     }
 
     val uiState: StateFlow<ChartUiState> = combine(
@@ -190,7 +196,12 @@ class ChartViewModel @Inject constructor(
         val status = values[3] as StatusBits
         val computed = values[4] as ComputedFrame
         @Suppress("UNCHECKED_CAST")
-        val aiPair = values[5] as Pair<AiUiState<AiSignalSecondOpinion>, AiConnectionStatus>
+        val aiTriple = values[5] as Triple<AiUiState<AiSignalSecondOpinion>, AiConnectionStatus, Map<String, AiUiState<AiSignalSecondOpinion>>>
+        val selPatId = status.interactive.selectedPatternId
+        val selectedPat = selPatId?.let { id ->
+            computed.analysis?.chartPatterns?.firstOrNull { it.id == id }
+        }
+        val selectedPatAi = selectedPat?.let { aiTriple.third[it.id] } ?: AiUiState.Idle
         ChartUiState(
             symbol = symbol,
             instrument = inst,
@@ -218,8 +229,10 @@ class ChartViewModel @Inject constructor(
             tvZoomCommandSeq = status.interactive.tvZoomCommandSeq,
             tvZoomDirection = status.interactive.tvZoomDirection,
             renkoConfig = status.interactive.renkoConfig,
-            aiChartState = aiPair.first,
-            aiConnectionStatus = aiPair.second
+            selectedPattern = selectedPat,
+            selectedPatternAiState = selectedPatAi,
+            aiChartState = aiTriple.first,
+            aiConnectionStatus = aiTriple.second
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ChartUiState(symbol = symbol))
 
@@ -287,6 +300,7 @@ class ChartViewModel @Inject constructor(
 
     fun toggleOverlay(key: OverlayKey) = _overlays.update { o ->
         when (key) {
+            OverlayKey.CHART_PATTERNS -> o.copy(chartPatterns = !o.chartPatterns)
             OverlayKey.RENKO_SUPERTREND -> o.copy(renkoSupertrend = !o.renkoSupertrend)
             OverlayKey.RED_BAR -> o.copy(redBar = !o.redBar)
             OverlayKey.FIRST_RED_RANGE -> o.copy(firstRedRange = !o.firstRedRange)
@@ -304,6 +318,53 @@ class ChartViewModel @Inject constructor(
             OverlayKey.DIVERGENCE -> o.copy(divergences = !o.divergences)
             OverlayKey.SETUP -> o.copy(setupLevels = !o.setupLevels)
         }
+    }
+
+    fun selectPattern(patternId: String?) {
+        _interactive.update { cur ->
+            val next = if (cur.selectedPatternId == patternId) null else patternId
+            cur.copy(selectedPatternId = next)
+        }
+    }
+
+    fun dismissPatternTooltip() {
+        _interactive.update { it.copy(selectedPatternId = null) }
+    }
+
+    fun verifyPatternWithAi(pattern: DetectedChartPattern) {
+        val current = uiState.value
+        val analysis = current.analysis ?: return
+        viewModelScope.launch {
+            _patternAiStates.update { it + (pattern.id to AiUiState.Loading) }
+            val res = aiMarketRepository.validateChartPattern(
+                symbol = symbol,
+                timeframeLabel = current.timeframe.label,
+                instrument = current.instrument,
+                pattern = pattern,
+                recentCandles = analysis.candles.takeLast(20)
+            )
+            val next = res.fold(
+                onSuccess = { AiUiState.Success(it) },
+                onFailure = { AiUiState.Error(it.message ?: "AI pattern verification failed.") }
+            )
+            _patternAiStates.update { it + (pattern.id to next) }
+        }
+    }
+
+    fun buildPatternOrderRoute(pattern: DetectedChartPattern): InstrumentDetailRoute {
+        val scale = uiState.value.instrument?.tickSize?.scale()?.coerceAtLeast(2) ?: 2
+        fun fmt(v: Double) = BigDecimal.valueOf(v).setScale(scale, java.math.RoundingMode.HALF_UP).toPlainString()
+        val isLong = pattern.direction == SignalDirection.LONG
+        val product = if (uiState.value.timeframe.isIntraday) ProductType.INTRADAY else ProductType.CARRY_FORWARD
+        return InstrumentDetailRoute(
+            symbol = symbol,
+            prefillSide = if (isLong) OrderSide.BUY.name else OrderSide.SELL.name,
+            prefillEntry = fmt(pattern.breakoutLevel),
+            prefillSl = fmt(pattern.invalidationPrice),
+            prefillTarget = fmt(pattern.targetPrice),
+            prefillProduct = product.name,
+            prefillValidity = if (product == ProductType.CARRY_FORWARD) ValidityType.GTT.name else ValidityType.DAY.name
+        )
     }
 
     fun setLowerPane(pane: LowerPane) {
@@ -558,7 +619,8 @@ class ChartViewModel @Inject constructor(
         val tvMagnetCrosshair: Boolean = true,
         val tvZoomCommandSeq: Int = 0,
         val tvZoomDirection: Int = 0,
-        val renkoConfig: AiRenkoConfig = AiRenkoConfig()
+        val renkoConfig: AiRenkoConfig = AiRenkoConfig(),
+        val selectedPatternId: String? = null
     )
 
     private data class StatusBits(

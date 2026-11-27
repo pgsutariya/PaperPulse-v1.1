@@ -6,6 +6,9 @@ import kotlinx.serialization.Serializable
 data object WatchlistRoute
 
 @Serializable
+data object HeatmapsRoute
+
+@Serializable
 data object SignalsRoute
 
 @Serializable
@@ -45,3 +48,11 @@ data class OptionChainRoute(
 
 @Serializable
 data object NewsRoute
+
+@Serializable
+data class MarketPulseRoute(
+    val initialTab: Int = 0
+)
+
+@Serializable
+data object StrategyCoachesRoute

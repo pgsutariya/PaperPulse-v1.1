@@ -139,12 +139,12 @@ fun SignalsScreen(
                     )
                     Column {
                         Text(
-                            text = "Advisory Trade Signals",
+                            text = "High-Accuracy Trade Signals",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Auto-removes hit SL/Target • Tracks Accuracy & BTST/STBT",
+                            text = "${state.highAccuracyCount} signals ≥60% Acc • ${state.stockOptionsCount} Stock Options • Double Conf & Sniper",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -181,34 +181,94 @@ fun SignalsScreen(
             }
         }
 
-        // Active / Saved / Performance tab row
+        // Active / Saved / Performance / Volatility / Astro Alerts tab row
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             SignalsTab.entries.forEach { tab ->
-                val count = when (tab) {
-                    SignalsTab.ACTIVE -> state.activeCount
-                    SignalsTab.SAVED -> state.savedCount
-                    SignalsTab.HISTORY -> state.historyCount
+                val tabText = when (tab) {
+                    SignalsTab.ACTIVE -> "${tab.label} (${state.activeCount})"
+                    SignalsTab.SAVED -> "${tab.label} (${state.savedCount})"
+                    SignalsTab.HISTORY -> "${tab.label} (${state.historyCount})"
+                    SignalsTab.VOLATILITY -> "${tab.label} • ${state.volatilityDashboard.snapshot.regime.shortLabel}"
+                    SignalsTab.ASTRO_EVENTS -> "${tab.label} (${state.astroAlerts.upcomingCount})"
                 }
                 val selected = state.filters.tab == tab
                 FilterChip(
                     selected = selected,
                     onClick = { viewModel.setTab(tab) },
-                    label = { Text("${tab.label} ($count)", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("signals_tab_${tab.name.lowercase()}"),
+                    label = { Text(tabText, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    modifier = Modifier.testTag("signals_tab_${tab.name.lowercase()}"),
                     colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                        selectedContainerColor = when (tab) {
+                            SignalsTab.ASTRO_EVENTS -> tradingColors.amberContainer
+                            SignalsTab.VOLATILITY -> tradingColors.violetContainer
+                            else -> MaterialTheme.colorScheme.primaryContainer
+                        },
+                        selectedLabelColor = when (tab) {
+                            SignalsTab.ASTRO_EVENTS -> tradingColors.amber
+                            SignalsTab.VOLATILITY -> tradingColors.violet
+                            else -> MaterialTheme.colorScheme.primary
+                        }
                     )
                 )
             }
         }
 
-        // Asset-Class Filter Row (All, Stock, Index, F&O, MCX, Crypto, Crypto F&O, BTST / STBT)
+        if (state.filters.tab == SignalsTab.VOLATILITY) {
+            VolatilityDashboardTab(
+                state = state.volatilityDashboard,
+                onSelectSymbol = viewModel::selectAnalyticsSymbol,
+                onSelectTimeframe = viewModel::selectAnalyticsTimeframe,
+                onRefresh = { viewModel.refreshVolatilityAndBacktest(forceHistoryFetch = true) },
+                onUpdateCalibration = viewModel::updateCalibrationConfig,
+                onApplyAutoCalibration = viewModel::applyAutoCalibrationFromVolatility,
+                onApplyAndRescan = viewModel::applyCalibrationAndRescanSignals,
+                onOpenBacktester = viewModel::openBacktesterFromVolatility,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+            return@Column
+        }
+
+        if (state.filters.tab == SignalsTab.ASTRO_EVENTS) {
+            PlanetaryLunarAlertsTab(
+                state = state.astroAlerts,
+                onPreviousMonth = viewModel::previousAstroMonth,
+                onNextMonth = viewModel::nextAstroMonth,
+                onJumpToday = viewModel::jumpAstroToday,
+                onSelectDate = viewModel::selectAstroDate,
+                onSelectCategory = viewModel::selectAstroEventCategory,
+                onToggleEventAlert = viewModel::toggleAstroEventAlert,
+                onApplyEventFilter = viewModel::applyAstroEventFilterToSignals,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+            return@Column
+        }
+
+        // Interactive Astrological Trend Filters Panel (Lunar Cycles + Planetary Positions/Aspects)
+        AstroTrendFiltersPanel(
+            astro = state.astroSnapshot,
+            config = state.astroFilterConfig,
+            astroMatchedCount = state.astroMatchedCount,
+            isRefreshing = state.isRefreshing,
+            onToggleEnabled = viewModel::toggleAstroFilterEnabled,
+            onSelectLunarFilter = viewModel::setAstroLunarFilter,
+            onSelectPlanetaryFilter = viewModel::setAstroPlanetaryFilter,
+            onToggleAlignDirection = viewModel::toggleAstroAlignDirection,
+            onToggleAvoidMercuryRx = viewModel::toggleAstroAvoidMercuryRx,
+            onSelectMinTurnScore = viewModel::setAstroMinTurningScore,
+            onApplyAndRescan = viewModel::applyAstroFiltersAndRescan
+        )
+
+        // Asset-Class Filter Row (All, Stock, Stock Options, Index, F&O, MCX, Crypto, Crypto F&O, BTST / STBT)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -230,7 +290,19 @@ fun SignalsScreen(
             }
         }
 
-        // Secondary Filter Strip (Direction, Strategy, Confidence)
+        // Secondary Filter Strip: Accuracy Gate (60%+/55%+/50%+/All), Direction, Winning Strategies, Confidence
+        val orderedStrategies = remember {
+            val featured = listOf(
+                SignalStrategy.DOUBLE_CONFIRMATION,
+                SignalStrategy.PULLBACK_SNIPER,
+                SignalStrategy.STOCK_OPTIONS_FLOW,
+                SignalStrategy.DATA_DRIVEN_QUANT,
+                SignalStrategy.ASTRO_CYCLE,
+                SignalStrategy.AI_RENKO_SUPERTREND,
+                SignalStrategy.RED_BAR_BREAKOUT
+            )
+            featured + SignalStrategy.entries.filterNot { it in featured }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -238,11 +310,31 @@ fun SignalsScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            MinWinProbFilter.entries.forEach { probFilter ->
+                FilterChip(
+                    selected = state.filters.minWinProb == probFilter,
+                    onClick = { viewModel.setMinWinProbFilter(probFilter) },
+                    label = { Text(probFilter.label) },
+                    modifier = Modifier.testTag("signal_acc_${probFilter.name.lowercase()}"),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = tradingColors.bullishContainer,
+                        selectedLabelColor = tradingColors.bullish
+                    )
+                )
+            }
             SignalDirection.entries.forEach { dir ->
                 FilterChip(
                     selected = state.filters.direction == dir,
                     onClick = { viewModel.setDirectionFilter(dir) },
                     label = { Text(dir.name) }
+                )
+            }
+            orderedStrategies.forEach { strategy ->
+                FilterChip(
+                    selected = state.filters.strategy == strategy,
+                    onClick = { viewModel.setStrategyFilter(strategy) },
+                    label = { Text(strategy.shortLabel) },
+                    modifier = Modifier.testTag("signal_strat_${strategy.name.lowercase()}")
                 )
             }
             SignalConfidence.entries.forEach { conf ->
@@ -252,42 +344,40 @@ fun SignalsScreen(
                     label = { Text("${conf.label} Conf") }
                 )
             }
-            SignalStrategy.entries.forEach { strategy ->
-                FilterChip(
-                    selected = state.filters.strategy == strategy,
-                    onClick = { viewModel.setStrategyFilter(strategy) },
-                    label = { Text(strategy.shortLabel) }
-                )
-            }
         }
 
         if (state.filters.tab == SignalsTab.HISTORY) {
-            var showByInstrument by remember { mutableStateOf(true) }
-
-            SignalAccuracySummaryCard(
-                stats = state.accuracyStats,
-                onClearHistory = viewModel::clearSignalHistory
-            )
-
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 FilterChip(
-                    selected = showByInstrument,
-                    onClick = { showByInstrument = true },
+                    selected = state.historySubTab == HistorySubTab.BACKTESTER,
+                    onClick = { viewModel.setHistorySubTab(HistorySubTab.BACKTESTER) },
+                    label = { Text("Strategy Backtester") },
+                    modifier = Modifier.testTag("signals_perf_backtester_tab"),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = tradingColors.bullishContainer,
+                        selectedLabelColor = tradingColors.bullish
+                    )
+                )
+                FilterChip(
+                    selected = state.historySubTab == HistorySubTab.BY_INSTRUMENT,
+                    onClick = { viewModel.setHistorySubTab(HistorySubTab.BY_INSTRUMENT) },
                     label = { Text("By Instrument (${state.instrumentPerformance.size})") },
-                    modifier = Modifier.weight(1f).testTag("signals_perf_by_instrument_tab"),
+                    modifier = Modifier.testTag("signals_perf_by_instrument_tab"),
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                         selectedLabelColor = MaterialTheme.colorScheme.primary
                     )
                 )
                 FilterChip(
-                    selected = !showByInstrument,
-                    onClick = { showByInstrument = false },
+                    selected = state.historySubTab == HistorySubTab.SIGNAL_LOG,
+                    onClick = { viewModel.setHistorySubTab(HistorySubTab.SIGNAL_LOG) },
                     label = { Text("Signal Log (${state.historyRecords.size})") },
-                    modifier = Modifier.weight(1f).testTag("signals_perf_log_tab"),
+                    modifier = Modifier.testTag("signals_perf_log_tab"),
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                         selectedLabelColor = MaterialTheme.colorScheme.primary
@@ -295,41 +385,59 @@ fun SignalsScreen(
                 )
             }
 
-            if (state.historyRecords.isEmpty()) {
-                Box(
+            if (state.historySubTab == HistorySubTab.BACKTESTER) {
+                StrategyBacktesterSection(
+                    state = state.strategyBacktester,
+                    onSelectSymbol = viewModel::selectAnalyticsSymbol,
+                    onSelectTimeframe = viewModel::selectAnalyticsTimeframe,
+                    onRunBacktest = { viewModel.refreshVolatilityAndBacktest(forceHistoryFetch = true) },
+                    onOpenVolatilityCalibrator = viewModel::openVolatilityFromBacktester,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    EmptyStatePanel(
-                        icon = Icons.Rounded.Bolt,
-                        title = "No Resolved Signal Records Yet",
-                        subtitle = "When active signals hit Target 1, Target 2, Stop Loss, or Expire, they are removed from Active and tracked here for live accuracy."
-                    )
-                }
-            } else if (showByInstrument) {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentPadding = PaddingValues(bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(state.instrumentPerformance, key = { it.symbol }) { perf ->
-                        InstrumentSignalPerformanceCard(perf = perf)
-                    }
-                }
+                        .weight(1f)
+                )
             } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentPadding = PaddingValues(bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(state.historyRecords, key = { it.id }) { rec ->
-                        SignalRecordCard(record = rec)
+                SignalAccuracySummaryCard(
+                    stats = state.accuracyStats,
+                    onClearHistory = viewModel::clearSignalHistory
+                )
+
+                if (state.historyRecords.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        EmptyStatePanel(
+                            icon = Icons.Rounded.Bolt,
+                            title = "No Resolved Signal Records Yet",
+                            subtitle = "When active signals hit Target 1, Target 2, Stop Loss, or Expire, they are removed from Active and tracked here for live accuracy."
+                        )
+                    }
+                } else if (state.historySubTab == HistorySubTab.BY_INSTRUMENT) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentPadding = PaddingValues(bottom = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(state.instrumentPerformance, key = { it.symbol }) { perf ->
+                            InstrumentSignalPerformanceCard(perf = perf)
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentPadding = PaddingValues(bottom = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(state.historyRecords, key = { it.id }) { rec ->
+                            SignalRecordCard(record = rec)
+                        }
                     }
                 }
             }
@@ -648,6 +756,35 @@ private fun SignalCard(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
                         )
+                    }
+                    if (item.concurringCount >= 2) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = tradingColors.bullishContainer
+                        ) {
+                            Text(
+                                text = "${item.concurringCount}x CONF",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = tradingColors.bullish,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                    item.sniperConfidenceScore?.let { sniperScore ->
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (sniperScore >= 75) tradingColors.bullishContainer else MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.testTag("signal_sniper_score_${sig.symbol}")
+                        ) {
+                            Text(
+                                text = "SNIPER $sniperScore",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (sniperScore >= 75) tradingColors.bullish else MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                            )
+                        }
                     }
                     Surface(shape = RoundedCornerShape(6.dp), color = confBg) {
                         Text(

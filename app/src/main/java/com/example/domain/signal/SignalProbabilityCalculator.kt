@@ -15,11 +15,16 @@ object SignalProbabilityCalculator {
     private const val MAX_PROBABILITY = 88
 
     fun baseStrategyPrior(strategy: SignalStrategy): Double = when (strategy) {
+        SignalStrategy.DOUBLE_CONFIRMATION -> 68.0
+        SignalStrategy.PULLBACK_SNIPER -> 66.0
         SignalStrategy.CONFLUENCE_70 -> 65.0
+        SignalStrategy.DATA_DRIVEN_QUANT -> 65.0
         SignalStrategy.AI_RENKO_SUPERTREND -> 64.0
+        SignalStrategy.STOCK_OPTIONS_FLOW -> 64.0
         SignalStrategy.MOMENTUM_BREAKOUT -> 63.0
         SignalStrategy.SMC_ICT -> 62.0
         SignalStrategy.RED_BAR_BREAKOUT -> 62.0
+        SignalStrategy.ASTRO_CYCLE -> 62.0
         SignalStrategy.EMA50_RSI_MACD -> 61.0
         SignalStrategy.ASR_TRADING -> 60.0
         SignalStrategy.NCL_TRADING -> 60.0
@@ -44,7 +49,8 @@ object SignalProbabilityCalculator {
 
     fun estimate(
         signal: TradeSignal,
-        historicalRecords: List<SignalRecord> = emptyList()
+        historicalRecords: List<SignalRecord> = emptyList(),
+        concurringSignalCount: Int = 0
     ): Int {
         var prior = baseStrategyPrior(signal.strategy)
 
@@ -62,9 +68,16 @@ object SignalProbabilityCalculator {
         }
 
         prior += when {
-            signal.riskRewardRatio in 1.8..3.2 -> 2.0
-            signal.riskRewardRatio > 4.2 -> -2.0
+            signal.riskRewardRatio in 1.8..3.6 -> 2.0
+            signal.riskRewardRatio > 4.5 -> -2.0
             signal.riskRewardRatio < 1.2 -> -3.0
+            else -> 0.0
+        }
+
+        // Double/multi-strategy directional consensus boost on the same symbol
+        prior += when {
+            concurringSignalCount >= 3 -> 5.0
+            concurringSignalCount == 2 -> 3.0
             else -> 0.0
         }
 

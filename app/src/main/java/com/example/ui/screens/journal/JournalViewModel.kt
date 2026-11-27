@@ -33,6 +33,8 @@ import com.example.ui.components.CalendarDaySentiment
 import com.example.ui.components.CalendarHeatmapDay
 import com.example.ui.components.DailyRealizedPnlPoint
 import com.example.ui.components.MonthlyHeatmapData
+import com.example.ui.components.PRESET_TRADE_TAGS
+import com.example.ui.components.StrategyTagPerformance
 import com.example.ui.components.TradeSummaryReportMetrics
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -56,6 +58,7 @@ data class JournalUiState(
     val filteredEntries: List<TradeJournalEntry> = emptyList(),
     val selectedTagFilter: String? = null,
     val tagCounts: Map<String, Int> = emptyMap(),
+    val strategyPerformance: List<StrategyTagPerformance> = emptyList(),
     val instrumentPerformance: List<InstrumentTradePerformance> = emptyList(),
     val capitalTransactions: List<CapitalTransaction> = emptyList(),
     val indiaDailyPnl30d: List<DailyRealizedPnlPoint> = emptyList(),
@@ -199,27 +202,29 @@ class JournalViewModel @Inject constructor(
         }
 
         val tagCounts = computeTagCounts(entries)
+        val strategyPerformance = computeStrategyTagPerformance(entries)
         val filteredEntries = filterEntriesByTag(entries, aux.selectedTagFilter)
 
-        val indiaEntries = entries.filter { it.segment != MarketSegment.CRYPTO }
-        val cryptoEntries = entries.filter { it.segment == MarketSegment.CRYPTO }
+        // All historical performance metrics respect the active Strategy Tag filter when selected
+        val filteredIndia = filteredEntries.filter { it.segment != MarketSegment.CRYPTO }
+        val filteredCrypto = filteredEntries.filter { it.segment == MarketSegment.CRYPTO }
 
-        val gross = indiaEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.grossPnl) }
-        val charges = indiaEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
-        val brokerage = indiaEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.brokerage) }
-        val taxes = indiaEntries.fold(BigDecimal.ZERO) { acc, e ->
+        val gross = filteredIndia.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.grossPnl) }
+        val charges = filteredIndia.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
+        val brokerage = filteredIndia.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.brokerage) }
+        val taxes = filteredIndia.fold(BigDecimal.ZERO) { acc, e ->
             acc.add(e.sttCtt).add(e.exchangeCharges).add(e.sebiCharges).add(e.stampDuty).add(e.gst)
         }
-        val net = indiaEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+        val net = filteredIndia.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
 
-        val cryptoGross = cryptoEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.grossPnl) }
-        val cryptoCharges = cryptoEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
-        val cryptoNet = cryptoEntries.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+        val cryptoGross = filteredCrypto.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.grossPnl) }
+        val cryptoCharges = filteredCrypto.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.charges) }
+        val cryptoNet = filteredCrypto.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
 
-        val wins = entries.count { it.netPnl > BigDecimal.ZERO }
-        val winRate = if (entries.isEmpty()) 0 else (wins * 100) / entries.size
+        val wins = filteredEntries.count { it.netPnl > BigDecimal.ZERO }
+        val winRate = if (filteredEntries.isEmpty()) 0 else (wins * 100) / filteredEntries.size
 
-        val byInstrument = entries
+        val byInstrument = filteredEntries
             .groupBy { it.symbol }
             .map { (symbol, list) ->
                 val seg = list.first().segment
@@ -237,10 +242,6 @@ class JournalViewModel @Inject constructor(
                 )
             }
             .sortedWith(compareByDescending<InstrumentTradePerformance> { it.totalTrades }.thenByDescending { it.netPnl })
-
-        // Compute 30D daily P&L & Trade Summary Report against the active tag filter when selected
-        val filteredIndia = filteredEntries.filter { it.segment != MarketSegment.CRYPTO }
-        val filteredCrypto = filteredEntries.filter { it.segment == MarketSegment.CRYPTO }
         val nowMillis = System.currentTimeMillis()
         val indiaDaily30d = buildDailyPnlSeries(filteredIndia, days = 30, nowMillis = nowMillis)
         val cryptoDaily30d = buildDailyPnlSeries(filteredCrypto, days = 30, nowMillis = nowMillis)
@@ -283,6 +284,7 @@ class JournalViewModel @Inject constructor(
             filteredEntries = filteredEntries,
             selectedTagFilter = aux.selectedTagFilter,
             tagCounts = tagCounts,
+            strategyPerformance = strategyPerformance,
             instrumentPerformance = byInstrument,
             capitalTransactions = capitalTxns,
             indiaDailyPnl30d = indiaDaily30d,
@@ -329,7 +331,7 @@ class JournalViewModel @Inject constructor(
     }
 
     fun selectTagFilter(tag: String?) {
-        _selectedTagFilter.value = tag?.trim()?.takeIf { it.isNotEmpty() }
+        _selectedTagFilter.value = tag?.let { normalizeTag(it) }?.takeIf { it.isNotEmpty() }
     }
 
     fun previousHeatmapMonth() {
@@ -345,11 +347,11 @@ class JournalViewModel @Inject constructor(
     }
 
     fun toggleTagOnEntry(entryId: String, currentTags: List<String>, tag: String) {
-        val cleaned = tag.trim()
+        val cleaned = normalizeTag(tag)
         if (cleaned.isEmpty()) return
-        val exists = currentTags.any { it.equals(cleaned, ignoreCase = true) }
+        val exists = currentTags.any { normalizeTag(it).equals(cleaned, ignoreCase = true) }
         val updated = if (exists) {
-            currentTags.filterNot { it.equals(cleaned, ignoreCase = true) }
+            currentTags.filterNot { normalizeTag(it).equals(cleaned, ignoreCase = true) }
         } else {
             currentTags + cleaned
         }
@@ -359,16 +361,17 @@ class JournalViewModel @Inject constructor(
     }
 
     fun addTagToEntry(entryId: String, currentTags: List<String>, newTag: String) {
-        val cleaned = newTag.trim()
+        val cleaned = normalizeTag(newTag)
         if (cleaned.isEmpty()) return
-        if (currentTags.any { it.equals(cleaned, ignoreCase = true) }) return
+        if (currentTags.any { normalizeTag(it).equals(cleaned, ignoreCase = true) }) return
         viewModelScope.launch {
             tradingRepository.updateJournalTags(entryId, currentTags + cleaned)
         }
     }
 
     fun removeTagFromEntry(entryId: String, currentTags: List<String>, tagToRemove: String) {
-        val updated = currentTags.filterNot { it.equals(tagToRemove, ignoreCase = true) }
+        val cleaned = normalizeTag(tagToRemove)
+        val updated = currentTags.filterNot { normalizeTag(it).equals(cleaned, ignoreCase = true) }
         viewModelScope.launch {
             tradingRepository.updateJournalTags(entryId, updated)
         }
@@ -536,16 +539,25 @@ class JournalViewModel @Inject constructor(
             )
         }
 
+        fun normalizeTag(raw: String): String {
+            val stripped = raw.trim().trimStart('#').trim()
+            if (stripped.isEmpty()) return ""
+            return PRESET_TRADE_TAGS.firstOrNull { it.equals(stripped, ignoreCase = true) } ?: stripped
+        }
+
         fun computeTagCounts(entries: List<TradeJournalEntry>): Map<String, Int> {
             val canonicalByLower = LinkedHashMap<String, String>()
             val countsByLower = LinkedHashMap<String, Int>()
             entries.forEach { entry ->
+                val uniqueEntryTags = LinkedHashSet<String>()
                 entry.tags.forEach { tag ->
-                    val cleaned = tag.trim()
+                    val cleaned = normalizeTag(tag)
                     if (cleaned.isNotEmpty()) {
                         val key = cleaned.lowercase(Locale.US)
-                        canonicalByLower.putIfAbsent(key, cleaned)
-                        countsByLower[key] = (countsByLower[key] ?: 0) + 1
+                        if (uniqueEntryTags.add(key)) {
+                            canonicalByLower.putIfAbsent(key, cleaned)
+                            countsByLower[key] = (countsByLower[key] ?: 0) + 1
+                        }
                     }
                 }
             }
@@ -560,10 +572,66 @@ class JournalViewModel @Inject constructor(
             entries: List<TradeJournalEntry>,
             selectedTag: String?
         ): List<TradeJournalEntry> {
-            val target = selectedTag?.trim()?.takeIf { it.isNotEmpty() } ?: return entries
+            val target = selectedTag?.let { normalizeTag(it) }?.takeIf { it.isNotEmpty() } ?: return entries
             return entries.filter { entry ->
-                entry.tags.any { it.equals(target, ignoreCase = true) }
+                entry.tags.any { normalizeTag(it).equals(target, ignoreCase = true) }
             }
+        }
+
+        fun computeStrategyTagPerformance(entries: List<TradeJournalEntry>): List<StrategyTagPerformance> {
+            if (entries.isEmpty()) return emptyList()
+            val canonicalByLower = LinkedHashMap<String, String>()
+            val grouped = LinkedHashMap<String, MutableList<TradeJournalEntry>>()
+
+            entries.forEach { entry ->
+                val seenInEntry = HashSet<String>()
+                entry.tags.forEach { rawTag ->
+                    val cleaned = normalizeTag(rawTag)
+                    if (cleaned.isNotEmpty()) {
+                        val key = cleaned.lowercase(Locale.US)
+                        if (seenInEntry.add(key)) {
+                            canonicalByLower.putIfAbsent(key, cleaned)
+                            grouped.getOrPut(key) { mutableListOf() }.add(entry)
+                        }
+                    }
+                }
+            }
+
+            return grouped.map { (key, list) ->
+                val wins = list.count { it.netPnl > BigDecimal.ZERO }
+                val losses = list.count { it.netPnl < BigDecimal.ZERO }
+                val winRate = (wins * 100.0) / list.size.toDouble()
+                val indiaList = list.filter { it.segment != MarketSegment.CRYPTO }
+                val cryptoList = list.filter { it.segment == MarketSegment.CRYPTO }
+                val indiaNet = indiaList.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+                val cryptoNet = cryptoList.fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+
+                val grossWin = list.filter { it.netPnl > BigDecimal.ZERO }
+                    .fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl) }
+                val grossLossAbs = list.filter { it.netPnl < BigDecimal.ZERO }
+                    .fold(BigDecimal.ZERO) { acc, e -> acc.add(e.netPnl.abs()) }
+                val pf: Double? = when {
+                    grossLossAbs > BigDecimal.ZERO -> grossWin.toDouble() / grossLossAbs.toDouble()
+                    grossWin > BigDecimal.ZERO -> Double.POSITIVE_INFINITY
+                    else -> null
+                }
+
+                StrategyTagPerformance(
+                    tag = canonicalByLower[key] ?: key,
+                    totalTrades = list.size,
+                    wins = wins,
+                    losses = losses,
+                    winRatePercent = winRate,
+                    indiaNetPnl = indiaNet,
+                    cryptoNetPnl = cryptoNet,
+                    hasIndiaTrades = indiaList.isNotEmpty(),
+                    hasCryptoTrades = cryptoList.isNotEmpty(),
+                    profitFactor = pf
+                )
+            }.sortedWith(
+                compareByDescending<StrategyTagPerformance> { it.totalTrades }
+                    .thenByDescending { it.combinedNetForSort }
+            )
         }
 
         fun buildDailyPnlSeries(

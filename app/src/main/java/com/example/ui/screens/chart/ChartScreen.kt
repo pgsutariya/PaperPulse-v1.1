@@ -219,52 +219,83 @@ fun ChartScreen(
                             .weight(1f)
                             .testTag("panel_chart_container")
                     ) {
-                        if (state.chartEngine == ChartEngineMode.TRADINGVIEW) {
-                            TradingViewChartPanel(
-                                symbol = state.symbol,
-                                analysis = analysis,
-                                overlays = state.overlays,
-                                lowerPane = state.lowerPane,
-                                focusSetup = focus,
-                                chartStyle = state.tvChartStyle,
-                                logScale = state.tvLogScale,
-                                magnetCrosshair = state.tvMagnetCrosshair,
-                                zoomCommandSeq = state.tvZoomCommandSeq,
-                                zoomDirection = state.tvZoomDirection,
-                                onSelectChartStyle = viewModel::setTvChartStyle,
-                                onToggleLogScale = viewModel::toggleTvLogScale,
-                                onToggleMagnetCrosshair = viewModel::toggleTvMagnetCrosshair,
-                                onFallbackToCanvas = { viewModel.setChartEngine(ChartEngineMode.CANVAS) },
-                                modifier = Modifier.fillMaxSize().padding(2.dp)
-                            )
-                        } else {
-                            Column(Modifier.fillMaxSize().padding(2.dp)) {
-                                PriceChartCanvas(
+                        Box(Modifier.fillMaxSize()) {
+                            if (state.chartEngine == ChartEngineMode.TRADINGVIEW) {
+                                TradingViewChartPanel(
+                                    symbol = state.symbol,
                                     analysis = analysis,
                                     overlays = state.overlays,
-                                    window = window,
+                                    lowerPane = state.lowerPane,
                                     focusSetup = focus,
-                                    palette = palette,
-                                    measureMode = state.measureMode,
-                                    measureStartIndex = state.measureStartIndex,
-                                    measureEndIndex = state.measureEndIndex,
-                                    onMeasureTap = viewModel::onMeasureTap,
-                                    onPinchZoom = viewModel::zoomByScale,
-                                    onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .weight(0.76f)
-                                        .testTag("chart_price_canvas")
+                                    chartStyle = state.tvChartStyle,
+                                    logScale = state.tvLogScale,
+                                    magnetCrosshair = state.tvMagnetCrosshair,
+                                    zoomCommandSeq = state.tvZoomCommandSeq,
+                                    zoomDirection = state.tvZoomDirection,
+                                    onSelectChartStyle = viewModel::setTvChartStyle,
+                                    onToggleLogScale = viewModel::toggleTvLogScale,
+                                    onToggleMagnetCrosshair = viewModel::toggleTvMagnetCrosshair,
+                                    onFallbackToCanvas = { viewModel.setChartEngine(ChartEngineMode.CANVAS) },
+                                    modifier = Modifier.fillMaxSize().padding(2.dp)
                                 )
-                                LowerPaneCanvas(
-                                    analysis = analysis,
-                                    pane = state.lowerPane,
-                                    window = window,
-                                    showDivergences = state.overlays.divergences,
-                                    palette = palette,
+                            } else {
+                                Column(Modifier.fillMaxSize().padding(2.dp)) {
+                                    PriceChartCanvas(
+                                        analysis = analysis,
+                                        overlays = state.overlays,
+                                        window = window,
+                                        focusSetup = focus,
+                                        palette = palette,
+                                        measureMode = state.measureMode,
+                                        measureStartIndex = state.measureStartIndex,
+                                        measureEndIndex = state.measureEndIndex,
+                                        selectedPatternId = state.selectedPattern?.id,
+                                        onPatternTap = viewModel::selectPattern,
+                                        onMeasureTap = viewModel::onMeasureTap,
+                                        onPinchZoom = viewModel::zoomByScale,
+                                        onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .weight(0.76f)
+                                            .testTag("chart_price_canvas")
+                                    )
+                                    LowerPaneCanvas(
+                                        analysis = analysis,
+                                        pane = state.lowerPane,
+                                        window = window,
+                                        showDivergences = state.overlays.divergences,
+                                        palette = palette,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .weight(0.24f)
+                                    )
+                                }
+                            }
+                            if (state.overlays.chartPatterns && analysis.chartPatterns.isNotEmpty()) {
+                                ChartPatternFloatingStrip(
+                                    patterns = analysis.chartPatterns,
+                                    selectedPatternId = state.selectedPattern?.id,
+                                    onSelectPattern = viewModel::selectPattern,
                                     modifier = Modifier
-                                        .fillMaxWidth()
-                                        .weight(0.24f)
+                                        .align(Alignment.TopStart)
+                                        .padding(
+                                            top = if (state.chartEngine == ChartEngineMode.TRADINGVIEW) 46.dp else 24.dp,
+                                            start = 8.dp,
+                                            end = 66.dp
+                                        )
+                                )
+                                ChartPatternBreakoutTooltip(
+                                    pattern = state.selectedPattern,
+                                    aiState = state.selectedPatternAiState,
+                                    onVerifyWithAi = viewModel::verifyPatternWithAi,
+                                    onTradeBreakout = { pat ->
+                                        viewModel.dismissPatternTooltip()
+                                        onTrade(viewModel.buildPatternOrderRoute(pat))
+                                    },
+                                    onDismiss = viewModel::dismissPatternTooltip,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(horizontal = 10.dp, vertical = 10.dp)
                                 )
                             }
                         }
@@ -378,55 +409,87 @@ fun ChartScreen(
                     .fillMaxWidth()
                     .testTag("panel_chart_container")
             ) {
-                if (state.chartEngine == ChartEngineMode.TRADINGVIEW) {
-                    TradingViewChartPanel(
-                        symbol = state.symbol,
-                        analysis = analysis,
-                        overlays = state.overlays,
-                        lowerPane = state.lowerPane,
-                        focusSetup = focus,
-                        chartStyle = state.tvChartStyle,
-                        logScale = state.tvLogScale,
-                        magnetCrosshair = state.tvMagnetCrosshair,
-                        zoomCommandSeq = state.tvZoomCommandSeq,
-                        zoomDirection = state.tvZoomDirection,
-                        onSelectChartStyle = viewModel::setTvChartStyle,
-                        onToggleLogScale = viewModel::toggleTvLogScale,
-                        onToggleMagnetCrosshair = viewModel::toggleTvMagnetCrosshair,
-                        onFallbackToCanvas = { viewModel.setChartEngine(ChartEngineMode.CANVAS) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(520.dp)
-                            .padding(2.dp)
-                    )
-                } else {
-                    Column(Modifier.padding(2.dp)) {
-                        PriceChartCanvas(
+                Box(Modifier.fillMaxWidth()) {
+                    if (state.chartEngine == ChartEngineMode.TRADINGVIEW) {
+                        TradingViewChartPanel(
+                            symbol = state.symbol,
                             analysis = analysis,
                             overlays = state.overlays,
-                            window = window,
+                            lowerPane = state.lowerPane,
                             focusSetup = focus,
-                            palette = palette,
-                            measureMode = state.measureMode,
-                            measureStartIndex = state.measureStartIndex,
-                            measureEndIndex = state.measureEndIndex,
-                            onMeasureTap = viewModel::onMeasureTap,
-                            onPinchZoom = viewModel::zoomByScale,
-                            onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
+                            chartStyle = state.tvChartStyle,
+                            logScale = state.tvLogScale,
+                            magnetCrosshair = state.tvMagnetCrosshair,
+                            zoomCommandSeq = state.tvZoomCommandSeq,
+                            zoomDirection = state.tvZoomDirection,
+                            onSelectChartStyle = viewModel::setTvChartStyle,
+                            onToggleLogScale = viewModel::toggleTvLogScale,
+                            onToggleMagnetCrosshair = viewModel::toggleTvMagnetCrosshair,
+                            onFallbackToCanvas = { viewModel.setChartEngine(ChartEngineMode.CANVAS) },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(380.dp)
-                                .testTag("chart_price_canvas")
+                                .height(520.dp)
+                                .padding(2.dp)
                         )
-                        LowerPaneCanvas(
-                            analysis = analysis,
-                            pane = state.lowerPane,
-                            window = window,
-                            showDivergences = state.overlays.divergences,
-                            palette = palette,
+                    } else {
+                        Column(Modifier.padding(2.dp)) {
+                            PriceChartCanvas(
+                                analysis = analysis,
+                                overlays = state.overlays,
+                                window = window,
+                                focusSetup = focus,
+                                palette = palette,
+                                measureMode = state.measureMode,
+                                measureStartIndex = state.measureStartIndex,
+                                measureEndIndex = state.measureEndIndex,
+                                selectedPatternId = state.selectedPattern?.id,
+                                onPatternTap = viewModel::selectPattern,
+                                onMeasureTap = viewModel::onMeasureTap,
+                                onPinchZoom = viewModel::zoomByScale,
+                                onPanBars = { delta -> viewModel.panByBars(delta, analysis.candles.size) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(380.dp)
+                                    .testTag("chart_price_canvas")
+                            )
+                            LowerPaneCanvas(
+                                analysis = analysis,
+                                pane = state.lowerPane,
+                                window = window,
+                                showDivergences = state.overlays.divergences,
+                                palette = palette,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(120.dp)
+                            )
+                        }
+                    }
+
+                    if (state.overlays.chartPatterns && analysis.chartPatterns.isNotEmpty()) {
+                        ChartPatternFloatingStrip(
+                            patterns = analysis.chartPatterns,
+                            selectedPatternId = state.selectedPattern?.id,
+                            onSelectPattern = viewModel::selectPattern,
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .height(120.dp)
+                                .align(Alignment.TopStart)
+                                .padding(
+                                    top = if (state.chartEngine == ChartEngineMode.TRADINGVIEW) 46.dp else 24.dp,
+                                    start = 8.dp,
+                                    end = 66.dp
+                                )
+                        )
+                        ChartPatternBreakoutTooltip(
+                            pattern = state.selectedPattern,
+                            aiState = state.selectedPatternAiState,
+                            onVerifyWithAi = viewModel::verifyPatternWithAi,
+                            onTradeBreakout = { pat ->
+                                viewModel.dismissPatternTooltip()
+                                onTrade(viewModel.buildPatternOrderRoute(pat))
+                            },
+                            onDismiss = viewModel::dismissPatternTooltip,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 10.dp, vertical = 10.dp)
                         )
                     }
                 }
@@ -471,6 +534,13 @@ fun ChartScreen(
                 onOpenAiSettings = onOpenFeedSettings
             )
 
+            AiChartPatternsPanel(
+                analysis = analysis,
+                selectedPatternId = state.selectedPattern?.id,
+                onSelectPattern = viewModel::selectPattern,
+                onTradeBreakout = { pat -> onTrade(viewModel.buildPatternOrderRoute(pat)) }
+            )
+
             SetupsPanel(
                 reports = analysis.setups,
                 riskPercent = state.riskPercent,
@@ -499,6 +569,7 @@ fun ChartScreen(
 }
 
 private fun isOverlayOn(o: ChartOverlays, key: OverlayKey): Boolean = when (key) {
+    OverlayKey.CHART_PATTERNS -> o.chartPatterns
     OverlayKey.RENKO_SUPERTREND -> o.renkoSupertrend
     OverlayKey.RED_BAR -> o.redBar
     OverlayKey.FIRST_RED_RANGE -> o.firstRedRange
@@ -599,6 +670,7 @@ private fun ChipRow(content: @Composable () -> Unit) {
 @Composable
 private fun LegendRow(palette: ChartPalette) {
     ChipRow {
+        LegendDot("AI Patterns", Color(0xFF00E5A3))
         LegendDot("AI Renko ST", Color(0xFF00E676))
         LegendDot("1st Red / 12:45", palette.bear)
         LegendDot("EMA9", palette.cyan)

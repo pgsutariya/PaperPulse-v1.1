@@ -174,6 +174,12 @@ class MarketDataRepositoryImpl @Inject constructor(
     override suspend fun ensureSeeded() {
         if (instrumentDao.count() == 0) {
             instrumentDao.upsertAll(SeedData.seedInstruments())
+        } else {
+            val existingSymbols = instrumentDao.getAllOnce().map { it.symbol }.toSet()
+            val missingStockOptions = SeedData.stockOptionInstruments().filter { it.symbol !in existingSymbols }
+            if (missingStockOptions.isNotEmpty()) {
+                instrumentDao.upsertAll(missingStockOptions)
+            }
         }
         if (accountDao.getAccount() == null) {
             accountDao.upsert(SeedData.defaultAccount())
@@ -693,6 +699,56 @@ class MarketDataRepositoryImpl @Inject constructor(
                 _liveStatusMessage.value
             )
         }
+    }
+
+    override suspend fun ensureEquityInstrument(
+        symbol: String,
+        displayName: String,
+        ltp: BigDecimal,
+        previousClose: BigDecimal,
+        dayHigh: BigDecimal,
+        dayLow: BigDecimal,
+        volume: Long,
+        segment: MarketSegment
+    ) {
+        val cleanSymbol = symbol.trim().uppercase()
+        if (cleanSymbol.isBlank()) return
+        val existing = instrumentDao.getBySymbol(cleanSymbol)
+        if (existing != null) return
+        val safeLtp = ltp.max(BigDecimal("0.05"))
+        val safePrev = previousClose.takeIf { it > BigDecimal.ZERO } ?: safeLtp
+        val safeHigh = dayHigh.max(safeLtp)
+        val safeLow = dayLow.takeIf { it > BigDecimal.ZERO }?.min(safeLtp) ?: safeLtp
+        val spark = listOf(
+            safePrev,
+            safePrev.add(safeLtp).divide(BigDecimal("2"), 2, java.math.RoundingMode.HALF_UP),
+            safeLow,
+            safeHigh,
+            safeLtp
+        )
+        val entity = InstrumentEntity(
+            symbol = cleanSymbol,
+            displayName = displayName.ifBlank { cleanSymbol },
+            segment = segment,
+            type = InstrumentType.STOCK,
+            lotSize = 1,
+            tickSize = BigDecimal("0.05"),
+            ltp = safeLtp,
+            previousClose = safePrev,
+            dayHigh = safeHigh,
+            dayLow = safeLow,
+            volume = volume.coerceAtLeast(1L),
+            expiryLabel = null,
+            strikePrice = null,
+            optionType = null,
+            supportsIntraday = true,
+            supportsCarryForward = true,
+            sparkline = spark,
+            lastTickDirection = if (safeLtp >= safePrev) 1 else -1
+        )
+        instrumentDao.upsertAll(listOf(entity))
+        val updatedUniverse = instrumentDao.getAllOnce().map { it.toDomain() }
+        populateUniverse(updatedUniverse)
     }
 
     companion object {

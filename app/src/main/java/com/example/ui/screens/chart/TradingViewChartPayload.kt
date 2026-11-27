@@ -214,6 +214,45 @@ object TradingViewChartPayloadBuilder {
                 data = extractSeries(analysis.renkoSupertrend.bearLine)
             )
         }
+        if (overlays.chartPatterns && analysis.chartPatterns.isNotEmpty()) {
+            analysis.chartPatterns.forEachIndexed { pIdx, pat ->
+                val patColor = if (pat.isBullish) "#00E5A3" else "#FF5C7C"
+                pat.upperLine?.let { u ->
+                    val sTime = indexToTime[u.startIndex]
+                    val eTime = indexToTime[u.endIndex]
+                    if (sTime != null && eTime != null && eTime > sTime && u.startPrice.isFinite() && u.endPrice.isFinite()) {
+                        overlayLines += TvLineSeriesPayload(
+                            id = "pat_${pIdx}_u",
+                            title = "${pat.type.shortBadge} Upper",
+                            color = patColor,
+                            lineWidth = 2,
+                            dashed = false,
+                            data = listOf(
+                                TvValuePoint(sTime, u.startPrice),
+                                TvValuePoint(eTime, u.endPrice)
+                            )
+                        )
+                    }
+                }
+                pat.lowerLine?.let { l ->
+                    val sTime = indexToTime[l.startIndex]
+                    val eTime = indexToTime[l.endIndex]
+                    if (sTime != null && eTime != null && eTime > sTime && l.startPrice.isFinite() && l.endPrice.isFinite()) {
+                        overlayLines += TvLineSeriesPayload(
+                            id = "pat_${pIdx}_l",
+                            title = "${pat.type.shortBadge} Lower",
+                            color = patColor,
+                            lineWidth = 2,
+                            dashed = false,
+                            data = listOf(
+                                TvValuePoint(sTime, l.startPrice),
+                                TvValuePoint(eTime, l.endPrice)
+                            )
+                        )
+                    }
+                }
+            }
+        }
 
         // Horizontal Price Lines (Pivots, SMC POIs, Liquidity, Setup Levels, Volume Profile POC)
         val priceLines = mutableListOf<TvPriceLinePayload>()
@@ -328,6 +367,29 @@ object TradingViewChartPayloadBuilder {
                 if (rz.top.isFinite()) priceLines += TvPriceLinePayload(rz.top, rz.label, "#FF5252", 1, true)
             }
         }
+        if (overlays.chartPatterns && analysis.chartPatterns.isNotEmpty()) {
+            analysis.chartPatterns.take(2).forEach { pat ->
+                val patColor = if (pat.isBullish) "#00E5A3" else "#FF5C7C"
+                if (pat.breakoutLevel.isFinite()) {
+                    priceLines += TvPriceLinePayload(
+                        price = pat.breakoutLevel,
+                        title = "BO: ${pat.type.shortBadge}",
+                        color = COLOR_AMBER,
+                        lineWidth = 2,
+                        dashed = true
+                    )
+                }
+                if (pat.targetPrice.isFinite()) {
+                    priceLines += TvPriceLinePayload(
+                        price = pat.targetPrice,
+                        title = "Tgt: ${pat.type.shortBadge}",
+                        color = patColor,
+                        lineWidth = 1,
+                        dashed = true
+                    )
+                }
+            }
+        }
 
         // Series Markers (BOS/CHoCH, Divergences, Setup Crossover) — must be sorted ascending by time
         val markers = mutableListOf<TvMarkerPayload>()
@@ -438,6 +500,18 @@ object TradingViewChartPayloadBuilder {
                     color = if (ib.isRed) COLOR_BEAR else COLOR_BULL,
                     shape = "square",
                     text = "IB"
+                )
+            }
+        }
+        if (overlays.chartPatterns && analysis.chartPatterns.isNotEmpty()) {
+            analysis.chartPatterns.forEach { pat ->
+                val sec = indexToTime[pat.endIndex] ?: return@forEach
+                markers += TvMarkerPayload(
+                    time = sec,
+                    position = if (pat.isBullish) "belowBar" else "aboveBar",
+                    color = if (pat.isBullish) "#00E5A3" else "#FF5C7C",
+                    shape = if (pat.isBullish) "arrowUp" else "arrowDown",
+                    text = "${pat.type.shortBadge} ${pat.confidenceScore}%"
                 )
             }
         }

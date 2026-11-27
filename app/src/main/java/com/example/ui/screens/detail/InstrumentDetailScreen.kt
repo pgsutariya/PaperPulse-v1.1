@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -68,6 +70,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.engine.MarketClock
+import com.example.domain.engine.PriceAwareExecutionDecision
+import com.example.domain.engine.PriceAwareExecutionPlan
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.OrderSide
 import com.example.domain.model.OrderType
@@ -80,8 +84,11 @@ import com.example.ui.components.AiSecondOpinionCard
 import com.example.ui.components.FeedHealthBadge
 import com.example.ui.components.FeedLostWarningBanner
 import com.example.ui.components.InstrumentTypeBadge
+import com.example.ui.components.MarketDepthCard
 import com.example.ui.components.SegmentBadge
 import com.example.ui.components.SparklineChart
+import com.example.ui.components.guardGlobalHotkeysOnFocus
+import com.example.ui.components.rememberKeyboardAwareModalLock
 import com.example.ui.theme.LocalTradingColors
 import com.example.ui.theme.MonoPriceLarge
 import com.example.ui.theme.MonoPriceMedium
@@ -103,6 +110,8 @@ fun InstrumentDetailScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val tradingColors = LocalTradingColors.current
     var showGtdDatePicker by remember { mutableStateOf(false) }
+    // Keyboard-aware lock keeps user inside Order Ticket while typing custom prices / SL / Target
+    rememberKeyboardAwareModalLock(isOpen = true)
 
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
@@ -186,6 +195,7 @@ fun InstrumentDetailScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -278,27 +288,17 @@ fun InstrumentDetailScreen(
                 }
             }
 
-            if (state.prefilledFromSignal) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(Icons.Rounded.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                        Text(
-                            text = "Pre-filled from Advisory Signal — review Entry, SL, Target & confirm manually.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
+            state.priceAwarePlan?.let { plan ->
+                PriceAwareExecutionCard(
+                    plan = plan,
+                    segment = inst.segment,
+                    hasSignalTarget = draft.signalTargetEntryPrice != null,
+                    guardEnabled = draft.priceAwareGuardEnabled,
+                    slippageTolerancePercent = draft.slippageTolerancePercent,
+                    onToggleGuard = viewModel::togglePriceAwareGuard,
+                    onSlippageToleranceChange = viewModel::updateSlippageTolerance,
+                    onClearSignalEntry = viewModel::clearSignalTargetEntry
+                )
             }
 
             if (state.symbolSignals.isNotEmpty()) {
@@ -364,6 +364,16 @@ fun InstrumentDetailScreen(
                 )
             }
 
+            // 2b. Real-Time 5-Level Market Depth (Order Book)
+            state.priceAwarePlan?.orderBook?.let { liveBook ->
+                MarketDepthCard(
+                    orderBook = liveBook,
+                    segment = inst.segment,
+                    selectedLimitPrice = draft.limitPriceText.toBigDecimalOrNull(),
+                    onSelectPriceForLimit = viewModel::selectLimitPriceFromDepth
+                )
+            }
+
             // 3. Order Type & Product Type Card
             Surface(
                 shape = RoundedCornerShape(16.dp),
@@ -425,7 +435,7 @@ fun InstrumentDetailScreen(
                             label = { Text("Qty (Lot ${inst.lotSize})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             singleLine = true,
-                            modifier = Modifier.weight(1f).testTag("order_quantity_input")
+                            modifier = Modifier.weight(1f).guardGlobalHotkeysOnFocus().testTag("order_quantity_input")
                         )
                         IconButton(
                             onClick = { viewModel.stepQuantity(1) },
@@ -456,7 +466,7 @@ fun InstrumentDetailScreen(
                                     label = { Text("Trigger Price") },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     singleLine = true,
-                                    modifier = Modifier.weight(1f).testTag("order_trigger_input")
+                                    modifier = Modifier.weight(1f).guardGlobalHotkeysOnFocus().testTag("order_trigger_input")
                                 )
                             }
                             if (showLimit) {
@@ -466,7 +476,7 @@ fun InstrumentDetailScreen(
                                     label = { Text(if (draft.orderType == OrderType.BRACKET) "Entry Limit (blank=Mkt)" else "Limit Price") },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     singleLine = true,
-                                    modifier = Modifier.weight(1f).testTag("order_limit_input")
+                                    modifier = Modifier.weight(1f).guardGlobalHotkeysOnFocus().testTag("order_limit_input")
                                 )
                             }
                         }
@@ -540,7 +550,7 @@ fun InstrumentDetailScreen(
                             label = { Text(if (draft.slMode == RiskInputMode.PERCENT) "SL Distance (%)" else "SL Trigger Price (${inst.segment.currencySymbol})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            modifier = Modifier.fillMaxWidth().testTag("sl_value_input")
+                            modifier = Modifier.fillMaxWidth().guardGlobalHotkeysOnFocus().testTag("sl_value_input")
                         )
 
                         // Trailing Stop Loss Sub-section
@@ -575,7 +585,7 @@ fun InstrumentDetailScreen(
                                 label = { Text(if (draft.tslMode == TrailMode.PERCENT) "Trail Distance (%)" else "Trail Amount (${inst.segment.currencySymbol})") },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("tsl_value_input")
+                                modifier = Modifier.fillMaxWidth().guardGlobalHotkeysOnFocus().testTag("tsl_value_input")
                             )
                         }
                     }
@@ -613,7 +623,7 @@ fun InstrumentDetailScreen(
                             label = { Text(if (draft.targetMode == RiskInputMode.PERCENT) "Target Distance (%)" else "Target Price (${inst.segment.currencySymbol})") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            modifier = Modifier.fillMaxWidth().testTag("target_value_input")
+                            modifier = Modifier.fillMaxWidth().guardGlobalHotkeysOnFocus().testTag("target_value_input")
                         )
 
                         Row(
@@ -647,7 +657,7 @@ fun InstrumentDetailScreen(
                                 label = { Text(if (draft.trailingTargetMode == TrailMode.PERCENT) "Trailing Target Pullback (%)" else "Pullback Amount (${inst.segment.currencySymbol})") },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("trailing_target_value_input")
+                                modifier = Modifier.fillMaxWidth().guardGlobalHotkeysOnFocus().testTag("trailing_target_value_input")
                             )
                         }
                     }
@@ -688,7 +698,7 @@ fun InstrumentDetailScreen(
                                 label = { Text("GTT Validity Days (1 - 365)") },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("gtt_days_input")
+                                modifier = Modifier.fillMaxWidth().guardGlobalHotkeysOnFocus().testTag("gtt_days_input")
                             )
                         }
                         ValidityType.GTD -> {
@@ -808,6 +818,14 @@ fun InstrumentDetailScreen(
                         }
                     }
                     Spacer(Modifier.height(4.dp))
+                    val effectiveCtaType = state.priceAwarePlan?.takeIf {
+                        draft.priceAwareGuardEnabled && draft.signalTargetEntryPrice != null
+                    }?.effectiveOrderType ?: draft.orderType
+                    val ctaProtectionTag = when (state.priceAwarePlan?.takeIf { draft.priceAwareGuardEnabled && draft.signalTargetEntryPrice != null }?.decision) {
+                        PriceAwareExecutionDecision.PROTECTED_LIMIT_AT_ENTRY -> " (LIMIT @ ENTRY)"
+                        PriceAwareExecutionDecision.PROTECTED_STOP_LIMIT_ENTRY -> " (SL-L @ ENTRY)"
+                        else -> ""
+                    }
                     Button(
                         onClick = viewModel::placeOrder,
                         enabled = !state.isSubmitting,
@@ -822,7 +840,7 @@ fun InstrumentDetailScreen(
                         )
                     ) {
                         Text(
-                            text = if (state.isSubmitting) "EXECUTING..." else "PLACE PAPER ${draft.side.name} • ${draft.orderType.label.uppercase()}",
+                            text = if (state.isSubmitting) "EXECUTING..." else "PLACE PAPER ${draft.side.name} • ${effectiveCtaType.label.uppercase()}$ctaProtectionTag",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold
                         )
@@ -853,6 +871,206 @@ fun InstrumentDetailScreen(
             }
         ) {
             DatePicker(state = datePickerState)
+        }
+    }
+}
+
+@Composable
+private fun PriceAwareExecutionCard(
+    plan: PriceAwareExecutionPlan,
+    segment: com.example.domain.model.MarketSegment,
+    hasSignalTarget: Boolean,
+    guardEnabled: Boolean,
+    slippageTolerancePercent: Double,
+    onToggleGuard: (Boolean) -> Unit,
+    onSlippageToleranceChange: (Double) -> Unit,
+    onClearSignalEntry: () -> Unit
+) {
+    val tradingColors = LocalTradingColors.current
+    val decisionColor = when (plan.decision) {
+        PriceAwareExecutionDecision.WITHIN_ENTRY_ZONE -> tradingColors.bullish
+        PriceAwareExecutionDecision.PROTECTED_LIMIT_AT_ENTRY -> tradingColors.amber
+        PriceAwareExecutionDecision.PROTECTED_STOP_LIMIT_ENTRY -> tradingColors.violet
+        PriceAwareExecutionDecision.MANUAL_PASSTHROUGH -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val decisionContainer = when (plan.decision) {
+        PriceAwareExecutionDecision.WITHIN_ENTRY_ZONE -> tradingColors.bullishContainer
+        PriceAwareExecutionDecision.PROTECTED_LIMIT_AT_ENTRY -> tradingColors.amber.copy(alpha = 0.16f)
+        PriceAwareExecutionDecision.PROTECTED_STOP_LIMIT_ENTRY -> tradingColors.violetContainer
+        PriceAwareExecutionDecision.MANUAL_PASSTHROUGH -> MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            1.dp,
+            if (plan.wasConvertedToProtectedOrder) decisionColor.copy(alpha = 0.65f) else tradingColors.border
+        ),
+        modifier = Modifier.fillMaxWidth().testTag("price_aware_execution_card")
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Shield,
+                        contentDescription = null,
+                        tint = decisionColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Column {
+                        Text(
+                            text = if (hasSignalTarget) "PRICE-AWARE SIGNAL GUARD" else "ORDER BOOK LIQUIDITY",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Spread ${String.format(java.util.Locale.US, "%.2f%%", plan.orderBook.spreadPercent)} • Top Book ${plan.bookFillEstimate.topLevelCoveragePercent}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = decisionContainer
+                ) {
+                    Text(
+                        text = plan.decision.badgeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = decisionColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            // Live Order Book Top-of-Book & VWAP Strip
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Text("BEST BID", style = MaterialTheme.typography.labelSmall, color = tradingColors.bullish)
+                        Text(RiskMath.formatPrice(plan.orderBook.bestBid, segment), style = MonoPriceSmall)
+                    }
+                }
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Text("BEST ASK", style = MaterialTheme.typography.labelSmall, color = tradingColors.bearish)
+                        Text(RiskMath.formatPrice(plan.orderBook.bestAsk, segment), style = MonoPriceSmall)
+                    }
+                }
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Text("EST. VWAP FILL", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        Text(RiskMath.formatPrice(plan.estimatedBookFillPrice, segment), style = MonoPriceSmall)
+                    }
+                }
+            }
+
+            if (hasSignalTarget && plan.targetEntryPrice != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Target Entry ${RiskMath.formatPrice(plan.targetEntryPrice, segment)} vs LTP ${RiskMath.formatPrice(plan.ltp, segment)} (${String.format(java.util.Locale.US, "%+.2f%%", plan.deviationFromEntryPercent)})",
+                            style = MonoPriceSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = decisionColor
+                        )
+                        Text(
+                            text = "Prevent immediate market fill outside tolerance",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = guardEnabled,
+                        onCheckedChange = onToggleGuard,
+                        modifier = Modifier.testTag("price_aware_guard_switch")
+                    )
+                }
+
+                if (guardEnabled) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = decisionContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = plan.summary,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = decisionColor,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Slippage Tolerance: ±${String.format(java.util.Locale.US, "%.2f%%", slippageTolerancePercent)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        TextButton(onClick = onClearSignalEntry) {
+                            Text("Clear Entry Lock", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(0.15, 0.35, 0.75, 1.50).forEach { preset ->
+                            val selected = kotlin.math.abs(slippageTolerancePercent - preset) < 0.04
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onSlippageToleranceChange(preset) },
+                                label = { Text("${String.format(java.util.Locale.US, "%.2f", preset)}%", style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.weight(1f).testTag("slippage_preset_${(preset * 100).toInt()}")
+                            )
+                        }
+                    }
+
+                    Slider(
+                        value = slippageTolerancePercent.toFloat().coerceIn(0.10f, 2.50f),
+                        onValueChange = { onSlippageToleranceChange(it.toDouble()) },
+                        valueRange = 0.10f..2.50f,
+                        modifier = Modifier.fillMaxWidth().testTag("slippage_tolerance_slider")
+                    )
+                }
+            }
         }
     }
 }

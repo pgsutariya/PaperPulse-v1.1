@@ -15,6 +15,8 @@ import com.example.data.local.SeedData
 import com.example.data.local.TradeJournalDao
 import com.example.data.local.toDomain
 import com.example.domain.engine.MarketClock
+import com.example.domain.engine.PriceAwareExecutionDecision
+import com.example.domain.engine.PriceAwareExecutionService
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.AccountState
 import com.example.domain.model.ExitReason
@@ -123,8 +125,37 @@ class TradingRepository private constructor(
             )
         }
         val config = prefsRepository.getConfig()
-        val referencePrice = request.limitPrice ?: request.triggerPrice ?: instrument.ltp
-        validateRiskGeometry(request, referencePrice)?.let { return Result.failure(IllegalArgumentException(it)) }
+
+        // Price-Aware Execution Guard: cross-references Signal Target Entry Price against live
+        // order book liquidity & user-defined slippage tolerance so orders never fill immediately
+        // at unfavorable market prices (e.g. LTP at 110 or 90 when Signal Entry is 100).
+        val executionPlan = if (request.priceAwareGuardEnabled && request.targetEntryPrice != null) {
+            PriceAwareExecutionService.evaluate(
+                instrument = instrument.toDomain(),
+                side = request.side,
+                quantity = request.quantity,
+                requestedOrderType = request.orderType,
+                targetEntryPrice = request.targetEntryPrice,
+                userLimitPrice = request.limitPrice,
+                userTriggerPrice = request.triggerPrice,
+                slippageTolerancePercent = request.slippageTolerancePercent,
+                priceAwareGuardEnabled = true
+            )
+        } else {
+            null
+        }
+
+        val effectiveOrderType = executionPlan?.effectiveOrderType ?: request.orderType
+        val effectiveLimitPrice = executionPlan?.effectiveLimitPrice ?: request.limitPrice
+        val effectiveTriggerPrice = executionPlan?.effectiveTriggerPrice ?: request.triggerPrice
+        val effectiveRequest = request.copy(
+            orderType = effectiveOrderType,
+            limitPrice = effectiveLimitPrice,
+            triggerPrice = effectiveTriggerPrice
+        )
+
+        val referencePrice = effectiveLimitPrice ?: effectiveTriggerPrice ?: instrument.ltp
+        validateRiskGeometry(effectiveRequest, referencePrice)?.let { return Result.failure(IllegalArgumentException(it)) }
         val requiredMargin = ledgerService.computeRequiredMargin(
             productType = request.productType,
             price = referencePrice,
@@ -162,6 +193,14 @@ class TradingRepository private constructor(
             cryptoFeePercent = config.cryptoFeePercent
         )
 
+        val pendingReason = when (executionPlan?.decision) {
+            PriceAwareExecutionDecision.PROTECTED_LIMIT_AT_ENTRY ->
+                "Price-Aware Limit @ Entry ${RiskMath.formatPrice(effectiveLimitPrice ?: referencePrice, instrument.segment)} (LTP outside ±${String.format(java.util.Locale.US, "%.2f", request.slippageTolerancePercent)}%)"
+            PriceAwareExecutionDecision.PROTECTED_STOP_LIMIT_ENTRY ->
+                "Price-Aware SL-Limit Trigger @ Entry ${RiskMath.formatPrice(effectiveTriggerPrice ?: referencePrice, instrument.segment)} (waiting for entry zone)"
+            else -> "Waiting for ${effectiveOrderType.label} trigger"
+        }
+
         val orderId = UUID.randomUUID().toString()
         val entryOrder = OrderEntity(
             id = orderId,
@@ -169,11 +208,11 @@ class TradingRepository private constructor(
             segment = instrument.segment,
             instrumentType = instrument.type,
             side = request.side,
-            orderType = request.orderType,
+            orderType = effectiveOrderType,
             productType = request.productType,
             quantity = request.quantity,
-            limitPrice = request.limitPrice?.let { RiskMath.roundToTick(it, instrument.tickSize) },
-            triggerPrice = request.triggerPrice?.let { RiskMath.roundToTick(it, instrument.tickSize) },
+            limitPrice = effectiveLimitPrice?.let { RiskMath.roundToTick(it, instrument.tickSize) },
+            triggerPrice = effectiveTriggerPrice?.let { RiskMath.roundToTick(it, instrument.tickSize) },
             filledPrice = null,
             status = OrderStatus.PENDING,
             validityType = request.validityType,
@@ -193,7 +232,7 @@ class TradingRepository private constructor(
             attachedTrailingTargetEnabled = request.targetEnabled && request.trailingTargetEnabled,
             attachedTrailingTargetMode = if (request.targetEnabled && request.trailingTargetEnabled) request.trailingTargetMode else null,
             attachedTrailingTargetValue = if (request.targetEnabled && request.trailingTargetEnabled) request.trailingTargetValue else null,
-            statusReason = "Waiting for ${request.orderType.label} trigger",
+            statusReason = pendingReason,
             createdAtMillis = nowMillis,
             updatedAtMillis = nowMillis,
             lotSize = instrument.lotSize,
@@ -206,8 +245,8 @@ class TradingRepository private constructor(
             totalCharges = estCharges.total
         )
 
-        val immediateFill = request.orderType == OrderType.MARKET ||
-            (request.orderType == OrderType.BRACKET && request.limitPrice == null)
+        val immediateFill = effectiveOrderType == OrderType.MARKET ||
+            (effectiveOrderType == OrderType.BRACKET && effectiveLimitPrice == null)
 
         val qtyLabel = RiskMath.formatQtyWithLots(request.quantity, instrument.lotSize)
         return if (immediateFill) {
@@ -221,7 +260,17 @@ class TradingRepository private constructor(
             }
         } else {
             orderDao.upsert(entryOrder)
-            val msg = "Placed ${request.orderType.label} ${request.side.name} ${instrument.symbol} • Qty $qtyLabel (${request.validityType.label})"
+            val entryLabel = when {
+                effectiveTriggerPrice != null && effectiveLimitPrice != null ->
+                    "Trig ${RiskMath.formatPrice(effectiveTriggerPrice, instrument.segment)} / Cap ${RiskMath.formatPrice(effectiveLimitPrice, instrument.segment)}"
+                effectiveLimitPrice != null ->
+                    "Entry Limit ${RiskMath.formatPrice(effectiveLimitPrice, instrument.segment)}"
+                effectiveTriggerPrice != null ->
+                    "Trig ${RiskMath.formatPrice(effectiveTriggerPrice, instrument.segment)}"
+                else -> request.validityType.label
+            }
+            val guardPrefix = if (executionPlan?.wasConvertedToProtectedOrder == true) "Price-Aware " else ""
+            val msg = "Placed $guardPrefix${effectiveOrderType.label} ${request.side.name} ${instrument.symbol} • Qty $qtyLabel @ $entryLabel"
             notificationManager?.notifyTradeActivity("Pending Order Placed", msg)
             Result.success(msg)
         }
@@ -668,7 +717,8 @@ class TradingRepository private constructor(
         newLimitPrice: BigDecimal?,
         newTriggerPrice: BigDecimal?,
         newAttachedSlValue: BigDecimal? = null,
-        newAttachedTargetValue: BigDecimal? = null
+        newAttachedTargetValue: BigDecimal? = null,
+        updateAttachedRisk: Boolean = false
     ): Result<String> = executionEngine.withEngineLock {
         val nowMillis = System.currentTimeMillis()
         var result: Result<String> = Result.failure(IllegalStateException("Pending order not found"))
@@ -694,6 +744,55 @@ class TradingRepository private constructor(
             val roundedLimit = newLimitPrice?.takeIf { it > BigDecimal.ZERO }?.let { RiskMath.roundToTick(it, tickSize) }
             val roundedTrigger = newTriggerPrice?.takeIf { it > BigDecimal.ZERO }?.let { RiskMath.roundToTick(it, tickSize) }
 
+            // Validate SL/Target bracket integrity against the exact parent position when editing an SL or TARGET leg
+            val linkedPosition = if (existing.legRole == "SL" || existing.legRole == "TARGET") {
+                positionDao.getBySymbol(existing.symbol)
+                    .firstOrNull { it.slOrderId == existing.id || it.targetOrderId == existing.id }
+            } else null
+
+            if (linkedPosition != null && roundedTrigger != null) {
+                val isBuyPos = linkedPosition.side == OrderSide.BUY
+                if (existing.legRole == "SL" && linkedPosition.activeTargetPrice != null) {
+                    val tgt = linkedPosition.activeTargetPrice
+                    if (isBuyPos && roundedTrigger >= tgt) {
+                        result = Result.failure(
+                            IllegalArgumentException("For BUY ${existing.symbol}, Stop Loss must stay below Target (${RiskMath.formatPrice(tgt, existing.segment)})")
+                        )
+                        return@withTransaction
+                    }
+                    if (!isBuyPos && roundedTrigger <= tgt) {
+                        result = Result.failure(
+                            IllegalArgumentException("For SELL ${existing.symbol}, Stop Loss must stay above Target (${RiskMath.formatPrice(tgt, existing.segment)})")
+                        )
+                        return@withTransaction
+                    }
+                } else if (existing.legRole == "TARGET" && linkedPosition.activeSlPrice != null) {
+                    val sl = linkedPosition.activeSlPrice
+                    if (isBuyPos && roundedTrigger <= sl) {
+                        result = Result.failure(
+                            IllegalArgumentException("For BUY ${existing.symbol}, Target must stay above Stop Loss (${RiskMath.formatPrice(sl, existing.segment)})")
+                        )
+                        return@withTransaction
+                    }
+                    if (!isBuyPos && roundedTrigger >= sl) {
+                        result = Result.failure(
+                            IllegalArgumentException("For SELL ${existing.symbol}, Target must stay below Stop Loss (${RiskMath.formatPrice(sl, existing.segment)})")
+                        )
+                        return@withTransaction
+                    }
+                }
+            }
+
+            val resolvedSlValue = if (updateAttachedRisk) newAttachedSlValue else (newAttachedSlValue ?: existing.attachedSlValue)
+            val resolvedSlMode = if (updateAttachedRisk) {
+                if (newAttachedSlValue != null) existing.attachedSlMode ?: RiskInputMode.PRICE else null
+            } else existing.attachedSlMode
+
+            val resolvedTargetValue = if (updateAttachedRisk) newAttachedTargetValue else (newAttachedTargetValue ?: existing.attachedTargetValue)
+            val resolvedTargetMode = if (updateAttachedRisk) {
+                if (newAttachedTargetValue != null) existing.attachedTargetMode ?: RiskInputMode.PRICE else null
+            } else existing.attachedTargetMode
+
             val config = prefsRepository.getConfig()
             val refPrice = roundedLimit ?: roundedTrigger ?: instrument?.ltp ?: BigDecimal.ONE
             val estCharges = RiskMath.calculateOrderCharges(
@@ -710,8 +809,10 @@ class TradingRepository private constructor(
                 quantity = newQuantity,
                 limitPrice = roundedLimit,
                 triggerPrice = roundedTrigger,
-                attachedSlValue = newAttachedSlValue ?: existing.attachedSlValue,
-                attachedTargetValue = newAttachedTargetValue ?: existing.attachedTargetValue,
+                attachedSlMode = resolvedSlMode,
+                attachedSlValue = resolvedSlValue,
+                attachedTargetMode = resolvedTargetMode,
+                attachedTargetValue = resolvedTargetValue,
                 statusReason = "Modified by user",
                 updatedAtMillis = nowMillis,
                 lotSize = lotSize,
@@ -725,14 +826,26 @@ class TradingRepository private constructor(
             )
             orderDao.upsert(updated)
 
-            // Keep open position risk prices in sync if this is an SL/Target protective leg
-            if ((existing.legRole == "SL" || existing.legRole == "TARGET") && roundedTrigger != null) {
-                positionDao.getBySymbol(existing.symbol).forEach { pos ->
-                    if (pos.slOrderId == existing.id) {
-                        positionDao.upsert(pos.copy(activeSlPrice = roundedTrigger, updatedAtMillis = nowMillis))
-                    } else if (pos.targetOrderId == existing.id) {
-                        positionDao.upsert(pos.copy(activeTargetPrice = roundedTrigger, updatedAtMillis = nowMillis))
-                    }
+            // Keep ONLY the exact linked open position in sync by strict order ID match
+            if (linkedPosition != null && roundedTrigger != null) {
+                if (linkedPosition.slOrderId == existing.id) {
+                    positionDao.upsert(
+                        linkedPosition.copy(
+                            activeSlPrice = roundedTrigger,
+                            updatedAtMillis = nowMillis
+                        )
+                    )
+                } else if (linkedPosition.targetOrderId == existing.id) {
+                    val targetChanged = roundedTrigger != linkedPosition.activeTargetPrice
+                    positionDao.upsert(
+                        linkedPosition.copy(
+                            activeTargetPrice = roundedTrigger,
+                            trailingTargetActivated = if (targetChanged) false else linkedPosition.trailingTargetActivated,
+                            trailingTargetPeakPrice = if (targetChanged) null else linkedPosition.trailingTargetPeakPrice,
+                            trailingTargetExitTrigger = if (targetChanged) null else linkedPosition.trailingTargetExitTrigger,
+                            updatedAtMillis = nowMillis
+                        )
+                    )
                 }
             }
 

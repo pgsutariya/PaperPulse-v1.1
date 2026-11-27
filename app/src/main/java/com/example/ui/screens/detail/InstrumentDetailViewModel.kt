@@ -15,6 +15,8 @@ import com.example.data.repository.TradingRepository
 import com.example.data.signal.SignalRepository
 import com.example.data.signal.SignalUiItem
 import com.example.domain.engine.MarketClock
+import com.example.domain.engine.PriceAwareExecutionPlan
+import com.example.domain.engine.PriceAwareExecutionService
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.AccountState
 import com.example.domain.model.Instrument
@@ -71,6 +73,9 @@ data class OrderTicketDraft(
     val validityType: ValidityType = ValidityType.DAY,
     val gttDaysText: String = "7",
     val gtdDateMillis: Long = System.currentTimeMillis() + 86_400_000L * 3L,
+    val signalTargetEntryPrice: BigDecimal? = null,
+    val priceAwareGuardEnabled: Boolean = true,
+    val slippageTolerancePercent: Double = PriceAwareExecutionService.DEFAULT_SLIPPAGE_TOLERANCE_PERCENT,
     val initializedDefaults: Boolean = false
 )
 
@@ -79,6 +84,7 @@ data class InstrumentDetailUiState(
     val accountState: AccountState? = null,
     val config: TradingConfig = TradingConfig(),
     val draft: OrderTicketDraft = OrderTicketDraft(),
+    val priceAwarePlan: PriceAwareExecutionPlan? = null,
     val isSubmitting: Boolean = false,
     val feedBadge: SegmentBadgeMode = SegmentBadgeMode.SIMULATED,
     val riskControlsSuspended: Boolean = false,
@@ -161,6 +167,7 @@ class InstrumentDetailViewModel @Inject constructor(
                 ?: draft.validityType
             val preSl = route.prefillSl
             val preTarget = route.prefillTarget
+            val preEntryDecimal = route.prefillEntry?.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO }
             val defaultOrderType = if (hasSignalPrefill) OrderType.BRACKET else draft.orderType
             val preLimit = when {
                 route.prefillEntry != null -> route.prefillEntry
@@ -184,9 +191,27 @@ class InstrumentDetailViewModel @Inject constructor(
                     targetEnabled = preTarget != null || it.targetEnabled,
                     targetMode = if (preTarget != null) RiskInputMode.PRICE else it.targetMode,
                     targetValueText = preTarget ?: it.targetValueText,
+                    signalTargetEntryPrice = preEntryDecimal,
+                    priceAwareGuardEnabled = preEntryDecimal != null || it.priceAwareGuardEnabled,
                     initializedDefaults = true
                 )
             }
+        }
+        val livePlan = inst?.let { liveInst ->
+            val targetEntry = draft.signalTargetEntryPrice
+                ?: draft.limitPriceText.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO && draft.orderType in setOf(OrderType.LIMIT, OrderType.BRACKET) }
+            val qty = (draft.quantityText.toIntOrNull() ?: liveInst.lotSize).coerceAtLeast(1)
+            PriceAwareExecutionService.evaluate(
+                instrument = liveInst,
+                side = draft.side,
+                quantity = qty,
+                requestedOrderType = draft.orderType,
+                targetEntryPrice = targetEntry,
+                userLimitPrice = draft.limitPriceText.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO },
+                userTriggerPrice = draft.triggerPriceText.toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO },
+                slippageTolerancePercent = draft.slippageTolerancePercent,
+                priceAwareGuardEnabled = draft.priceAwareGuardEnabled && draft.signalTargetEntryPrice != null
+            )
         }
         val segStatus = inst?.let { health.first[it.segment] }
         val segBadge = segStatus?.badge ?: SegmentBadgeMode.SIMULATED
@@ -196,12 +221,13 @@ class InstrumentDetailViewModel @Inject constructor(
             accountState = account,
             config = config,
             draft = draft,
+            priceAwarePlan = livePlan,
             isSubmitting = submitting,
             feedBadge = segBadge,
             riskControlsSuspended = health.second && segBadge == SegmentBadgeMode.SUSPENDED,
             liveStatusMessage = statusMsg,
             symbolSignals = health.fourth,
-            prefilledFromSignal = hasSignalPrefill,
+            prefilledFromSignal = hasSignalPrefill || draft.signalTargetEntryPrice != null,
             aiAuditState = aiPair.first,
             aiConnectionStatus = aiPair.second,
             orderFeedbackMessage = feedback?.first,
@@ -279,8 +305,10 @@ class InstrumentDetailViewModel @Inject constructor(
                 orderType = OrderType.BRACKET,
                 productType = product,
                 validityType = validity,
-                limitPriceText = "",
+                limitPriceText = signal.entryPrice.toPlainString(),
                 triggerPriceText = signal.entryPrice.toPlainString(),
+                signalTargetEntryPrice = signal.entryPrice,
+                priceAwareGuardEnabled = true,
                 slEnabled = true,
                 slMode = RiskInputMode.PRICE,
                 slValueText = signal.stopLoss.toPlainString(),
@@ -289,7 +317,22 @@ class InstrumentDetailViewModel @Inject constructor(
                 targetValueText = target.toPlainString()
             )
         }
-        _events.tryEmit(DetailEvent.ShowMessage("Applied ${signal.strategy.shortLabel} signal to ticket — review & place manually"))
+        _events.tryEmit(DetailEvent.ShowMessage("Applied ${signal.strategy.shortLabel} signal @ Entry ${RiskMath.formatPrice(signal.entryPrice, signal.segment)} — Price-Aware Guard active"))
+    }
+
+    fun togglePriceAwareGuard(enabled: Boolean) {
+        _orderFeedback.value = null
+        _draft.update { it.copy(priceAwareGuardEnabled = enabled) }
+    }
+
+    fun updateSlippageTolerance(percent: Double) {
+        _orderFeedback.value = null
+        _draft.update { it.copy(slippageTolerancePercent = percent.coerceIn(0.10, 2.50)) }
+    }
+
+    fun clearSignalTargetEntry() {
+        _orderFeedback.value = null
+        _draft.update { it.copy(signalTargetEntryPrice = null, priceAwareGuardEnabled = false) }
     }
 
     fun setSide(side: OrderSide) {
@@ -303,12 +346,12 @@ class InstrumentDetailViewModel @Inject constructor(
         _draft.update { d ->
             val enableBracketLegs = type == OrderType.BRACKET
             val nextLimit = when (type) {
-                OrderType.BRACKET -> "" // Blank = immediate Market bracket fill (matches field hint)
-                OrderType.LIMIT, OrderType.SL_L, OrderType.TGT_L -> d.limitPriceText.ifBlank { ltpText }
+                OrderType.BRACKET -> d.signalTargetEntryPrice?.toPlainString() ?: ""
+                OrderType.LIMIT, OrderType.SL_L, OrderType.TGT_L -> d.limitPriceText.ifBlank { d.signalTargetEntryPrice?.toPlainString() ?: ltpText }
                 else -> d.limitPriceText
             }
             val nextTrigger = when (type) {
-                OrderType.SL_M, OrderType.SL_L, OrderType.TGT_M, OrderType.TGT_L -> d.triggerPriceText.ifBlank { ltpText }
+                OrderType.SL_M, OrderType.SL_L, OrderType.TGT_M, OrderType.TGT_L -> d.triggerPriceText.ifBlank { d.signalTargetEntryPrice?.toPlainString() ?: ltpText }
                 else -> d.triggerPriceText
             }
             d.copy(
@@ -354,6 +397,25 @@ class InstrumentDetailViewModel @Inject constructor(
     fun updateTriggerPrice(text: String) {
         _orderFeedback.value = null
         _draft.update { it.copy(triggerPriceText = sanitizeDecimal(text)) }
+    }
+
+    fun selectLimitPriceFromDepth(price: BigDecimal, tappedBookSide: OrderSide) {
+        val inst = uiState.value.instrument ?: return
+        val rounded = RiskMath.roundToTick(price, inst.tickSize)
+        _orderFeedback.value = null
+        _draft.update { d ->
+            val nextType = if (d.orderType == OrderType.MARKET) OrderType.LIMIT else d.orderType
+            d.copy(
+                orderType = nextType,
+                limitPriceText = rounded.toPlainString()
+            )
+        }
+        val sideTag = if (tappedBookSide == OrderSide.BUY) "Bid" else "Ask"
+        _events.tryEmit(
+            DetailEvent.ShowMessage(
+                "Limit price set to ${RiskMath.formatPrice(rounded, inst.segment)} from $sideTag depth"
+            )
+        )
     }
 
     fun toggleSl(enabled: Boolean) {
@@ -523,7 +585,25 @@ class InstrumentDetailViewModel @Inject constructor(
             else -> limitPrice
         }
         val effectiveTriggerPrice = if (needsTrigger) triggerPrice else null
-        val isImmediateFill = d.orderType == OrderType.MARKET || (d.orderType == OrderType.BRACKET && bracketLimit == null)
+
+        val usePriceAwareGuard = d.priceAwareGuardEnabled && d.signalTargetEntryPrice != null
+        val previewPlan = if (usePriceAwareGuard) {
+            PriceAwareExecutionService.evaluate(
+                instrument = inst,
+                side = d.side,
+                quantity = qty,
+                requestedOrderType = d.orderType,
+                targetEntryPrice = d.signalTargetEntryPrice,
+                userLimitPrice = bracketLimit,
+                userTriggerPrice = effectiveTriggerPrice,
+                slippageTolerancePercent = d.slippageTolerancePercent,
+                priceAwareGuardEnabled = true
+            )
+        } else null
+
+        val finalOrderType = previewPlan?.effectiveOrderType ?: d.orderType
+        val finalLimit = previewPlan?.effectiveLimitPrice ?: bracketLimit
+        val isImmediateFill = finalOrderType == OrderType.MARKET || (finalOrderType == OrderType.BRACKET && finalLimit == null)
 
         viewModelScope.launch {
             _orderFeedback.value = null
@@ -552,7 +632,10 @@ class InstrumentDetailViewModel @Inject constructor(
                         trailingTargetValue = ttVal,
                         validityType = d.validityType,
                         gttDays = gttDays,
-                        gtdDateMillis = d.gtdDateMillis
+                        gtdDateMillis = d.gtdDateMillis,
+                        targetEntryPrice = d.signalTargetEntryPrice,
+                        slippageTolerancePercent = d.slippageTolerancePercent,
+                        priceAwareGuardEnabled = usePriceAwareGuard
                     )
                 )
                 result.onSuccess { msg ->

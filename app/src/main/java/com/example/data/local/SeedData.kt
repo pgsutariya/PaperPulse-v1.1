@@ -120,6 +120,7 @@ object SeedData {
             strikePrice = "52000.00",
             optionType = OptionType.PE
         ),
+    ) + stockOptionInstruments() + listOf(
 
         // BSE Stocks, Futures & Options
         instrument(
@@ -294,6 +295,149 @@ object SeedData {
             prevClose = "814.00",
             volume = 14_500L,
             supportsCarryForward = false // Demonstrates intraday-only rule where product conversion is disabled
+        )
+    )
+
+    fun stockOptionInstruments(): List<InstrumentEntity> = listOf(
+        instrument(
+            symbol = "RELIANCE26NOV1300CE",
+            displayName = "RELIANCE 1300 Call Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 250,
+            tickSize = "0.05",
+            ltp = "28.60",
+            prevClose = "23.40",
+            volume = 6_840_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "1300.00",
+            optionType = OptionType.CE
+        ),
+        instrument(
+            symbol = "RELIANCE26NOV1260PE",
+            displayName = "RELIANCE 1260 Put Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 250,
+            tickSize = "0.05",
+            ltp = "19.85",
+            prevClose = "24.10",
+            volume = 4_920_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "1260.00",
+            optionType = OptionType.PE
+        ),
+        instrument(
+            symbol = "HDFCBANK26NOV1750CE",
+            displayName = "HDFCBANK 1750 Call Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 550,
+            tickSize = "0.05",
+            ltp = "31.20",
+            prevClose = "26.15",
+            volume = 8_150_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "1750.00",
+            optionType = OptionType.CE
+        ),
+        instrument(
+            symbol = "HDFCBANK26NOV1720PE",
+            displayName = "HDFCBANK 1720 Put Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 550,
+            tickSize = "0.05",
+            ltp = "22.40",
+            prevClose = "27.80",
+            volume = 5_410_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "1720.00",
+            optionType = OptionType.PE
+        ),
+        instrument(
+            symbol = "TCS26NOV4200CE",
+            displayName = "TCS 4200 Call Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 175,
+            tickSize = "0.05",
+            ltp = "64.50",
+            prevClose = "58.20",
+            volume = 2_890_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "4200.00",
+            optionType = OptionType.CE
+        ),
+        instrument(
+            symbol = "TCS26NOV4100PE",
+            displayName = "TCS 4100 Put Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 175,
+            tickSize = "0.05",
+            ltp = "54.75",
+            prevClose = "49.10",
+            volume = 2_450_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "4100.00",
+            optionType = OptionType.PE
+        ),
+        instrument(
+            symbol = "TATAMOTORS26NOV820CE",
+            displayName = "TATAMOTORS 820 Call Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 550,
+            tickSize = "0.05",
+            ltp = "21.90",
+            prevClose = "17.45",
+            volume = 7_620_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "820.00",
+            optionType = OptionType.CE
+        ),
+        instrument(
+            symbol = "SBIN26NOV840CE",
+            displayName = "SBIN 840 Call Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 750,
+            tickSize = "0.05",
+            ltp = "18.40",
+            prevClose = "14.95",
+            volume = 9_310_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "840.00",
+            optionType = OptionType.CE
+        ),
+        instrument(
+            symbol = "ICICIBANK26NOV1320CE",
+            displayName = "ICICIBANK 1320 Call Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 700,
+            tickSize = "0.05",
+            ltp = "24.80",
+            prevClose = "20.30",
+            volume = 6_120_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "1320.00",
+            optionType = OptionType.CE
+        ),
+        instrument(
+            symbol = "INFY26NOV1900CE",
+            displayName = "INFY 1900 Call Nov",
+            segment = MarketSegment.NSE,
+            type = InstrumentType.OPTIONS,
+            lotSize = 400,
+            tickSize = "0.05",
+            ltp = "34.10",
+            prevClose = "29.25",
+            volume = 4_780_000L,
+            expiryLabel = "26 Nov 2026",
+            strikePrice = "1900.00",
+            optionType = OptionType.CE
         )
     )
 

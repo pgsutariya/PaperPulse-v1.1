@@ -297,5 +297,8 @@ data class OrderPlacementRequest(
     val trailingTargetValue: BigDecimal? = null,
     val validityType: ValidityType = ValidityType.DAY,
     val gttDays: Int = 7,
-    val gtdDateMillis: Long? = null
+    val gtdDateMillis: Long? = null,
+    val targetEntryPrice: BigDecimal? = null,
+    val slippageTolerancePercent: Double = 0.35,
+    val priceAwareGuardEnabled: Boolean = false
 )

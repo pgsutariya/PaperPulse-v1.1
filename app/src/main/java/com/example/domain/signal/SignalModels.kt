@@ -1,5 +1,7 @@
 package com.example.domain.signal
 
+import com.example.domain.analysis.AstroTrendFilterConfig
+import com.example.domain.analysis.StrategyCalibrationConfig
 import com.example.domain.model.MarketSegment
 import java.math.BigDecimal
 import java.time.Instant
@@ -86,7 +88,12 @@ enum class SignalStrategy(val label: String, val shortLabel: String) {
     ASR_TRADING("ASR Support & Resistance", "ASR"),
     NCL_TRADING("NCL Narrow Candle Breakout", "NCL"),
     AI_RENKO_SUPERTREND("AI Renko Supertrend (Brahmastra)", "RENKO ST"),
-    RED_BAR_BREAKOUT("Red Bar / 12:45 Breakout", "RED BAR");
+    RED_BAR_BREAKOUT("Red Bar / 12:45 Breakout", "RED BAR"),
+    DOUBLE_CONFIRMATION("Double Confirmation Pro (HTF + LTF)", "DBL CONF"),
+    PULLBACK_SNIPER("Pullback Sniper (VWAP + EMA Bands)", "SNIPER"),
+    STOCK_OPTIONS_FLOW("Stock Options Momentum & IV", "STK OPT"),
+    DATA_DRIVEN_QUANT("Data-Driven Quant Edge (RVOL + ER + Z)", "DATA QUANT"),
+    ASTRO_CYCLE("Astro Cycle + Price Action Confluence", "ASTRO");
 
     /** Suggested paper-trading product for this strategy family. */
     val prefersCarryForward: Boolean
@@ -125,6 +132,7 @@ enum class SignalOutcome(val label: String) {
 enum class SignalAssetCategory(val label: String) {
     ALL("All"),
     STOCK("Stock"),
+    STOCK_OPTIONS("Stock Options"),
     INDEX("Index"),
     FNO("F&O"),
     MCX("MCX"),
@@ -232,7 +240,9 @@ data class SignalContext(
     val candlesByTimeframe: Map<Timeframe, List<Candle>>,
     val currentLtp: BigDecimal,
     val now: Instant = Instant.now(),
-    val instrumentType: com.example.domain.model.InstrumentType = com.example.domain.model.InstrumentType.STOCK
+    val instrumentType: com.example.domain.model.InstrumentType = com.example.domain.model.InstrumentType.STOCK,
+    val astroFilterConfig: AstroTrendFilterConfig = AstroTrendFilterConfig(),
+    val calibrationConfig: StrategyCalibrationConfig = StrategyCalibrationConfig()
 )
 
 interface StrategyEvaluator {

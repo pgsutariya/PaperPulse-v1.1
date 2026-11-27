@@ -269,8 +269,22 @@ class ExecutionEngine private constructor(
                 .filter { it.legRole == null || it.legRole == "ENTRY" }
             for (order in pendingEntries) {
                 if (shouldFillPendingEntry(order, ltp)) {
-                    val execPrice = ltp
-                    val filled = ledgerService.fillEntryOrder(order, execPrice, instrument, config, nowMillis)
+                    val isBuy = order.side == OrderSide.BUY
+                    val execPrice = when (order.orderType) {
+                        OrderType.LIMIT, OrderType.BRACKET, OrderType.SL_L, OrderType.TGT_L -> {
+                            val lim = order.limitPrice
+                            if (lim != null) {
+                                if (isBuy) minOf(ltp, lim) else maxOf(ltp, lim)
+                            } else ltp
+                        }
+                        else -> ltp
+                    }
+                    val effectiveConfig = if (order.orderType in setOf(OrderType.LIMIT, OrderType.BRACKET, OrderType.SL_L, OrderType.TGT_L) && order.limitPrice != null) {
+                        config.copy(slippageBps = 0)
+                    } else {
+                        config
+                    }
+                    val filled = ledgerService.fillEntryOrder(order, execPrice, instrument, effectiveConfig, nowMillis)
                     val msg = if (filled) {
                         "${order.side.name} ${order.symbol} (${RiskMath.formatQtyWithLots(order.quantity, instrument.lotSize)}) filled @ ${RiskMath.formatPrice(execPrice, instrument.segment)}"
                     } else {

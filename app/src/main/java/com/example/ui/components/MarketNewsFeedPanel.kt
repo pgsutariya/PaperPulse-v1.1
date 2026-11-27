@@ -60,15 +60,25 @@ import com.example.data.news.NewsSentiment
 import com.example.ui.theme.LocalTradingColors
 
 val PRESET_TRADE_TAGS = listOf(
+    "Scalp",
+    "TrendFollow",
     "Breakout",
     "Reversal",
-    "News",
-    "SMC",
-    "Momentum",
-    "Scalp",
-    "Trend",
     "Pullback",
-    "Earnings"
+    "Swing",
+    "MeanReversion",
+    "News",
+    "Options",
+    "Momentum"
+)
+
+private val CORE_FILTER_STRATEGY_TAGS = listOf(
+    "Scalp",
+    "TrendFollow",
+    "Breakout",
+    "Reversal",
+    "Pullback",
+    "Swing"
 )
 
 @Composable
@@ -80,10 +90,23 @@ fun TradeTagFilterBar(
     modifier: Modifier = Modifier
 ) {
     val tradingColors = LocalTradingColors.current
-    val sortedTags = remember(tagCounts) {
+    val displayTags = remember(tagCounts) {
+        val seen = LinkedHashSet<String>()
+        val result = mutableListOf<String>()
         tagCounts.entries
             .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key.lowercase() })
-            .map { it.key }
+            .forEach { (tag, _) ->
+                val clean = tag.trim().trimStart('#').trim()
+                if (clean.isNotEmpty() && seen.add(clean.lowercase())) {
+                    result.add(clean)
+                }
+            }
+        CORE_FILTER_STRATEGY_TAGS.forEach { preset ->
+            if (seen.add(preset.lowercase())) {
+                result.add(preset)
+            }
+        }
+        result
     }
 
     Surface(
@@ -114,7 +137,7 @@ fun TradeTagFilterBar(
                         modifier = Modifier.size(15.dp)
                     )
                     Text(
-                        text = "FILTER BY TRADE TAG",
+                        text = "STRATEGY TAGS",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -148,14 +171,8 @@ fun TradeTagFilterBar(
                     )
                 )
 
-                val displayTags = if (sortedTags.isNotEmpty()) {
-                    sortedTags
-                } else {
-                    listOf("Breakout", "Reversal", "News")
-                }
-
                 displayTags.forEach { tag ->
-                    val count = tagCounts[tag] ?: 0
+                    val count = tagCounts.entries.firstOrNull { it.key.equals(tag, ignoreCase = true) }?.value ?: 0
                     val isSelected = selectedTag.equals(tag, ignoreCase = true)
                     FilterChip(
                         selected = isSelected,
@@ -193,7 +210,7 @@ fun TradeTagEditorDialog(
         val seen = LinkedHashSet<String>()
         val list = mutableListOf<String>()
         (PRESET_TRADE_TAGS + suggestedTags + currentTags).forEach { tag ->
-            val clean = tag.trim()
+            val clean = tag.trim().trimStart('#').trim()
             if (clean.isNotEmpty() && seen.add(clean.lowercase())) {
                 list.add(clean)
             }
@@ -211,11 +228,11 @@ fun TradeTagEditorDialog(
                 tint = MaterialTheme.colorScheme.primary
             )
         },
-        title = { Text("Tag $symbol Trade", fontWeight = FontWeight.Bold) },
+        title = { Text("Strategy Tags • $symbol", fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    text = "Tap preset labels or add your own custom strategy tag:",
+                    text = "Assign a trading style (#Scalp, #TrendFollow, #Breakout) or add a custom strategy tag:",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -225,7 +242,7 @@ fun TradeTagEditorDialog(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     mergedSuggestions.forEach { tag ->
-                        val isAssigned = currentTags.any { it.equals(tag, ignoreCase = true) }
+                        val isAssigned = currentTags.any { it.trim().trimStart('#').equals(tag, ignoreCase = true) }
                         FilterChip(
                             selected = isAssigned,
                             onClick = { onToggleTag(tag) },
@@ -256,22 +273,22 @@ fun TradeTagEditorDialog(
                     OutlinedTextField(
                         value = customTagInput,
                         onValueChange = { if (it.length <= 28) customTagInput = it },
-                        label = { Text("Custom Tag") },
-                        placeholder = { Text("e.g. Gap Up, VWAP") },
+                        label = { Text("Custom Strategy Tag") },
+                        placeholder = { Text("e.g. Scalp, TrendFollow, VWAP") },
                         singleLine = true,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("custom_tag_input")
                     )
+                    val normalizedCustom = customTagInput.trim().trimStart('#').trim()
                     Button(
                         onClick = {
-                            val trimmed = customTagInput.trim()
-                            if (trimmed.isNotEmpty()) {
-                                onAddCustomTag(trimmed)
+                            if (normalizedCustom.isNotEmpty()) {
+                                onAddCustomTag(normalizedCustom)
                                 customTagInput = ""
                             }
                         },
-                        enabled = customTagInput.trim().isNotEmpty(),
+                        enabled = normalizedCustom.isNotEmpty(),
                         modifier = Modifier.testTag("custom_tag_add_button")
                     ) {
                         Text("Add")
@@ -640,7 +657,7 @@ fun AddTradeTagButton(
                 modifier = Modifier.size(14.dp)
             )
             Text(
-                text = "Tag",
+                text = "Strategy",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.Medium

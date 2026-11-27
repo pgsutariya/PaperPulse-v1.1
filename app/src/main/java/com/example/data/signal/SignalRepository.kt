@@ -40,11 +40,21 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
+import com.example.domain.analysis.AstroTradingEngine
+import com.example.domain.analysis.AstroTrendFilterConfig
+import com.example.domain.analysis.StrategyCalibrationConfig
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
 data class SignalUiItem(
     val signal: TradeSignal,
     val userStatus: String,
     val isSaved: Boolean,
-    val winProbabilityPercent: Int = SignalProbabilityCalculator.estimate(signal)
+    val winProbabilityPercent: Int = SignalProbabilityCalculator.estimate(signal),
+    val concurringCount: Int = 1,
+    val sniperConfidenceScore: Int? = null,
+    val astroAlignmentLabel: String? = null
 )
 
 @Singleton
@@ -67,6 +77,22 @@ class SignalRepository @Inject constructor(
     private val historyMutex = Mutex()
     private val historyFetchedAt = ConcurrentHashMap<String, Long>()
 
+    private val _astroFilterConfig = MutableStateFlow(AstroTrendFilterConfig())
+    val astroFilterConfig: StateFlow<AstroTrendFilterConfig> = _astroFilterConfig.asStateFlow()
+
+    private val _calibrationConfig = MutableStateFlow(StrategyCalibrationConfig())
+    val calibrationConfig: StateFlow<StrategyCalibrationConfig> = _calibrationConfig.asStateFlow()
+
+    val instrumentsFlow: Flow<List<Instrument>> = marketDataRepository.instruments
+
+    fun updateAstroFilterConfig(config: AstroTrendFilterConfig) {
+        _astroFilterConfig.value = config
+    }
+
+    fun updateCalibrationConfig(config: StrategyCalibrationConfig) {
+        _calibrationConfig.value = config
+    }
+
     /** Re-emits periodically so signals disappear when they expire even without new DB writes. */
     private val expiryClock: Flow<Long> = flow {
         while (true) {
@@ -87,20 +113,41 @@ class SignalRepository @Inject constructor(
     ) { entities, savedIds, records, _ ->
         val savedSet = savedIds.toSet()
         val now = Instant.now()
-        entities.mapNotNull { entity ->
+        val livePairs = entities.mapNotNull { entity ->
             if (entity.userStatus == "DISMISSED") return@mapNotNull null
             val domain = entity.toDomain()
             if (domain.expiresAt != null && !domain.expiresAt.isAfter(now)) {
                 return@mapNotNull null
             }
+            entity to domain
+        }
+        // Count how many distinct strategies agree on the same (symbol, direction) for Double Confirmation consensus
+        val consensusByKey = livePairs
+            .groupBy { (_, d) -> d.symbol to d.direction }
+            .mapValues { (_, list) -> list.map { it.second.strategy }.distinct().size }
+
+        val astroNow = AstroTradingEngine.compute(now)
+        val astroCfg = _astroFilterConfig.value
+
+        livePairs.map { (entity, domain) ->
+            val concurring = consensusByKey[domain.symbol to domain.direction] ?: 1
+            val astroEval = AstroTradingEngine.evaluateFilterMatch(astroNow, domain.direction, astroCfg)
             SignalUiItem(
                 signal = domain,
                 userStatus = entity.userStatus,
                 isSaved = domain.id in savedSet,
-                winProbabilityPercent = SignalProbabilityCalculator.estimate(domain, records)
+                winProbabilityPercent = SignalProbabilityCalculator.estimate(
+                    signal = domain,
+                    historicalRecords = records,
+                    concurringSignalCount = concurring
+                ),
+                concurringCount = concurring,
+                sniperConfidenceScore = extractSniperConfidenceScore(domain.reasons),
+                astroAlignmentLabel = astroEval.badgeLabel
             )
         }.sortedWith(
             compareByDescending<SignalUiItem> { it.winProbabilityPercent }
+                .thenByDescending { it.concurringCount }
                 .thenByDescending { it.signal.confidence.rank }
                 .thenByDescending { it.signal.generatedAt.epochSecond }
         )
@@ -424,7 +471,9 @@ class SignalRepository @Inject constructor(
             candlesByTimeframe = candlesByTf,
             currentLtp = instrument.ltp,
             now = now,
-            instrumentType = instrument.type
+            instrumentType = instrument.type,
+            astroFilterConfig = _astroFilterConfig.value,
+            calibrationConfig = _calibrationConfig.value
         )
         val generated = signalEngine.evaluate(context)
         if (generated.isEmpty()) return
@@ -449,6 +498,17 @@ class SignalRepository @Inject constructor(
 
     private fun signature(signal: TradeSignal): String =
         "${signal.symbol}|${signal.strategy.name}|${signal.direction.name}"
+
+    private fun extractSniperConfidenceScore(reasons: List<String>): Int? {
+        val regex = Regex("""Confidence Score:\s*(\d{2,3})/100""")
+        for (reason in reasons) {
+            val match = regex.find(reason)
+            if (match != null) {
+                return match.groupValues[1].toIntOrNull()
+            }
+        }
+        return null
+    }
 
     companion object {
         private const val MIN_EVAL_INTERVAL_MS = 3_000L

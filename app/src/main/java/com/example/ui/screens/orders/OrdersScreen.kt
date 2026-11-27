@@ -8,17 +8,19 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Add
@@ -44,28 +46,32 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.engine.MarketClock
+import com.example.domain.engine.OrderBookSnapshot
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.Order
 import com.example.domain.model.OrderSide
 import com.example.domain.model.OrderStatus
-import com.example.domain.model.OrderType
 import com.example.domain.model.ValidityType
 import com.example.ui.components.EmptyStatePanel
+import com.example.ui.components.MarketDepthCard
 import com.example.ui.components.SegmentBadge
 import com.example.ui.components.ValidityStateBadge
+import com.example.ui.components.guardGlobalHotkeysOnFocus
+import com.example.ui.components.rememberKeyboardAwareModalLock
 import com.example.ui.theme.LocalTradingColors
 import com.example.ui.theme.MonoPriceSmall
 import java.math.BigDecimal
@@ -75,8 +81,9 @@ fun OrdersScreen(
     viewModel: OrdersViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val editorDraft by viewModel.orderEditorDraft.collectAsStateWithLifecycle()
+    val editorOrderBook by viewModel.editorOrderBook.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    var editingOrder by remember { mutableStateOf<Order?>(null) }
 
     LaunchedEffect(Unit) {
         viewModel.messages.collect { msg -> snackbarHostState.showSnackbar(msg) }
@@ -84,12 +91,14 @@ fun OrdersScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        containerColor = Color.Transparent
+        containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0)
     ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
             Spacer(Modifier.height(8.dp))
@@ -137,7 +146,7 @@ fun OrdersScreen(
                     items(state.orders, key = { it.id }) { order ->
                         OrderRowCard(
                             order = order,
-                            onEdit = { editingOrder = order },
+                            onEdit = { viewModel.openOrderEditor(order.id) },
                             onCancel = { viewModel.cancelOrder(order.id) }
                         )
                     }
@@ -146,21 +155,19 @@ fun OrdersScreen(
         }
     }
 
-    editingOrder?.let { order ->
+    editorDraft?.let { draft ->
         ModifyPendingOrderDialog(
-            order = order,
-            onDismiss = { editingOrder = null },
-            onSave = { qty, limit, trigger, sl, tgt ->
-                viewModel.modifyPendingOrder(
-                    orderId = order.id,
-                    newQuantity = qty,
-                    newLimitPrice = limit,
-                    newTriggerPrice = trigger,
-                    newAttachedSlValue = sl,
-                    newAttachedTargetValue = tgt
-                )
-                editingOrder = null
-            }
+            draft = draft,
+            orderBook = editorOrderBook,
+            onQtyChange = viewModel::updateEditorQty,
+            onStepQty = viewModel::stepEditorQty,
+            onLimitChange = viewModel::updateEditorLimit,
+            onTriggerChange = viewModel::updateEditorTrigger,
+            onSlChange = viewModel::updateEditorSl,
+            onTargetChange = viewModel::updateEditorTarget,
+            onSelectDepthPrice = viewModel::selectEditorLimitFromDepth,
+            onDismiss = viewModel::dismissOrderEditor,
+            onSave = viewModel::saveOrderEditor
         )
     }
 }
@@ -241,6 +248,8 @@ private fun OrderRowCard(
                 Column(horizontalAlignment = Alignment.End) {
                     val priceLabel = when {
                         order.filledPrice != null -> "Fill ${RiskMath.formatPrice(order.filledPrice, order.segment)}"
+                        order.triggerPrice != null && order.limitPrice != null ->
+                            "Trig ${RiskMath.formatPrice(order.triggerPrice, order.segment)} / Lim ${RiskMath.formatPrice(order.limitPrice, order.segment)}"
                         order.triggerPrice != null -> "Trig ${RiskMath.formatPrice(order.triggerPrice, order.segment)}"
                         order.limitPrice != null -> "Lim ${RiskMath.formatPrice(order.limitPrice, order.segment)}"
                         else -> "Market"
@@ -312,67 +321,78 @@ private fun OrderRowCard(
 
 @Composable
 private fun ModifyPendingOrderDialog(
-    order: Order,
+    draft: PendingOrderEditorDraft,
+    orderBook: OrderBookSnapshot?,
+    onQtyChange: (String) -> Unit,
+    onStepQty: (Int) -> Unit,
+    onLimitChange: (String) -> Unit,
+    onTriggerChange: (String) -> Unit,
+    onSlChange: (String) -> Unit,
+    onTargetChange: (String) -> Unit,
+    onSelectDepthPrice: (BigDecimal, OrderSide) -> Unit,
     onDismiss: () -> Unit,
-    onSave: (Int, BigDecimal?, BigDecimal?, BigDecimal?, BigDecimal?) -> Unit
+    onSave: () -> Unit
 ) {
-    val lot = order.lotSize.coerceAtLeast(1)
-    var qtyText by remember(order.id) { mutableStateOf(order.quantity.toString()) }
-    var limitText by remember(order.id) { mutableStateOf(order.limitPrice?.toPlainString() ?: "") }
-    var triggerText by remember(order.id) { mutableStateOf(order.triggerPrice?.toPlainString() ?: "") }
-    var slText by remember(order.id) { mutableStateOf(order.attachedSlValue?.toPlainString() ?: "") }
-    var tgtText by remember(order.id) { mutableStateOf(order.attachedTargetValue?.toPlainString() ?: "") }
-
-    val showLimit = order.orderType in setOf(OrderType.LIMIT, OrderType.SL_L, OrderType.TGT_L, OrderType.BRACKET) || order.limitPrice != null
-    val showTrigger = order.orderType in setOf(OrderType.SL_M, OrderType.SL_L, OrderType.TGT_M, OrderType.TGT_L) || order.triggerPrice != null
+    val tradingColors = LocalTradingColors.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    // Keyboard-aware modal lock: prevents tab switching & accidental backdrop close while typing prices
+    val modalLock = rememberKeyboardAwareModalLock(isOpen = true)
+    val lot = draft.lotSize.coerceAtLeast(1)
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (modalLock.allowBackdropDismiss && !draft.isSaving) onDismiss() },
+        properties = DialogProperties(
+            dismissOnClickOutside = modalLock.allowBackdropDismiss,
+            dismissOnBackPress = !draft.isSaving
+        ),
         title = {
             Column {
                 Text("Modify Pending Order", fontWeight = FontWeight.Bold)
                 Text(
-                    "${order.symbol} • ${order.side.name} • ${order.orderType.label} • Lot $lot",
+                    "${draft.symbol} • ${draft.side.name} • ${draft.orderType.label}${draft.legRole?.let { " ($it)" } ?: ""} • Lot $lot",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     IconButton(
-                        onClick = {
-                            val cur = qtyText.toIntOrNull() ?: lot
-                            qtyText = (cur - lot).coerceAtLeast(lot).toString()
-                        },
+                        onClick = { onStepQty(-1) },
                         modifier = Modifier.background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(10.dp))
                     ) {
                         Icon(Icons.Rounded.Remove, contentDescription = "Decrease quantity")
                     }
                     OutlinedTextField(
-                        value = qtyText,
-                        onValueChange = { qtyText = it.filter(Char::isDigit) },
+                        value = draft.qtyText,
+                        onValueChange = onQtyChange,
                         label = { Text("Qty (Lot $lot)") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true,
-                        modifier = Modifier.weight(1f).testTag("modify_order_qty_input")
+                        modifier = Modifier
+                            .weight(1f)
+                            .guardGlobalHotkeysOnFocus()
+                            .testTag("modify_order_qty_input")
                     )
                     IconButton(
-                        onClick = {
-                            val cur = qtyText.toIntOrNull() ?: 0
-                            qtyText = (cur + lot).toString()
-                        },
+                        onClick = { onStepQty(1) },
                         modifier = Modifier.background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(10.dp))
                     ) {
                         Icon(Icons.Rounded.Add, contentDescription = "Increase quantity")
                     }
                 }
-                val parsedQty = qtyText.toIntOrNull() ?: 0
+                val parsedQty = draft.qtyText.toIntOrNull() ?: 0
                 if (parsedQty > 0) {
                     Text(
                         text = "Order Size: ${RiskMath.formatQtyWithLots(parsedQty, lot)}",
@@ -381,43 +401,81 @@ private fun ModifyPendingOrderDialog(
                     )
                 }
 
-                if (showLimit) {
+                if (draft.showLimit) {
                     OutlinedTextField(
-                        value = limitText,
-                        onValueChange = { limitText = it },
-                        label = { Text("Limit Price") },
+                        value = draft.limitText,
+                        onValueChange = onLimitChange,
+                        label = { Text("Limit Price (${draft.segment.currencySymbol})") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth().testTag("modify_order_limit_input")
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .guardGlobalHotkeysOnFocus()
+                            .testTag("modify_order_limit_input")
                     )
                 }
-                if (showTrigger) {
+                if (orderBook != null && (draft.showLimit || draft.showTrigger)) {
+                    MarketDepthCard(
+                        orderBook = orderBook,
+                        segment = draft.segment,
+                        selectedLimitPrice = draft.limitText.toBigDecimalOrNull()
+                            ?: draft.triggerText.toBigDecimalOrNull(),
+                        onSelectPriceForLimit = onSelectDepthPrice,
+                        compact = true
+                    )
+                }
+                if (draft.showTrigger) {
                     OutlinedTextField(
-                        value = triggerText,
-                        onValueChange = { triggerText = it },
-                        label = { Text("Trigger Price") },
+                        value = draft.triggerText,
+                        onValueChange = onTriggerChange,
+                        label = { Text("Trigger Price (${draft.segment.currencySymbol})") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth().testTag("modify_order_trigger_input")
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .guardGlobalHotkeysOnFocus()
+                            .testTag("modify_order_trigger_input")
                     )
                 }
-                if (order.legRole == null) {
+                if (draft.canEditAttachedRisk) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
-                            value = slText,
-                            onValueChange = { slText = it },
+                            value = draft.slText,
+                            onValueChange = onSlChange,
                             label = { Text("Attached SL") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .weight(1f)
+                                .guardGlobalHotkeysOnFocus()
+                                .testTag("modify_order_sl_input")
                         )
                         OutlinedTextField(
-                            value = tgtText,
-                            onValueChange = { tgtText = it },
+                            value = draft.targetText,
+                            onValueChange = onTargetChange,
                             label = { Text("Attached Target") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .weight(1f)
+                                .guardGlobalHotkeysOnFocus()
+                                .testTag("modify_order_target_input")
+                        )
+                    }
+                }
+
+                draft.validationError?.let { err ->
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = tradingColors.bearishContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = err,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = tradingColors.bearish,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
                         )
                     }
                 }
@@ -426,22 +484,27 @@ private fun ModifyPendingOrderDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val qty = qtyText.toIntOrNull() ?: order.quantity
-                    onSave(
-                        qty,
-                        limitText.toBigDecimalOrNull(),
-                        triggerText.toBigDecimalOrNull(),
-                        slText.toBigDecimalOrNull(),
-                        tgtText.toBigDecimalOrNull()
-                    )
+                    focusManager.clearFocus(force = true)
+                    keyboardController?.hide()
+                    onSave()
                 },
+                enabled = !draft.isSaving,
                 modifier = Modifier.testTag("confirm_modify_order_button")
             ) {
-                Text("Update Order")
+                Text(if (draft.isSaving) "Updating..." else "Update Order")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(
+                onClick = {
+                    focusManager.clearFocus(force = true)
+                    keyboardController?.hide()
+                    onDismiss()
+                },
+                enabled = !draft.isSaving
+            ) {
+                Text("Cancel")
+            }
         }
     )
 }

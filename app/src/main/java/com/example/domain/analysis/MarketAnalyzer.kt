@@ -62,7 +62,8 @@ data class ChartAnalysis(
     val orderFlow: OrderFlowSnapshot,
     val killZone: SessionCalendar.KillZone?,
     val renkoSupertrend: AiRenkoSupertrendSnapshot = AiRenkoSupertrendSnapshot(),
-    val redBar: RedBarSnapshot = RedBarSnapshot()
+    val redBar: RedBarSnapshot = RedBarSnapshot(),
+    val chartPatterns: List<DetectedChartPattern> = emptyList()
 ) {
     val lastClose: Double get() = candles.lastOrNull()?.close ?: 0.0
     val volumeAboveMa: Boolean
@@ -153,6 +154,7 @@ object MarketAnalyzer {
             timeframe = timeframe,
             segment = segment
         )
+        val chartPatterns = ChartPatternEngine.detect(candles)
 
         return ChartAnalysis(
             candles = candles,
@@ -199,7 +201,8 @@ object MarketAnalyzer {
                 SessionCalendar.activeKillZone(it.timestamp.toEpochMilli(), segment)
             },
             renkoSupertrend = renkoSupertrend,
-            redBar = redBar
+            redBar = redBar,
+            chartPatterns = chartPatterns
         )
     }
 

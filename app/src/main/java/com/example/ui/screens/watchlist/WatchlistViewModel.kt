@@ -9,6 +9,7 @@ import com.example.data.feed.live.AngelScripSearchResult
 import com.example.data.feed.live.FeedType
 import com.example.data.feed.live.LiveConnectionStatus
 import com.example.data.feed.live.SegmentFeedStatus
+import com.example.data.market.MarketIntelligenceRepository
 import com.example.data.news.MarketNewsArticle
 import com.example.data.news.MarketNewsFeedState
 import com.example.data.news.MarketNewsRepository
@@ -17,6 +18,9 @@ import com.example.data.repository.MarketDataRepository
 import com.example.data.repository.TradingRepository
 import com.example.domain.engine.MarketClock
 import com.example.domain.engine.RiskMath
+import com.example.domain.market.GlobalMarketQuote
+import com.example.domain.market.LiveFundamentalDetails
+import com.example.domain.market.StockMarketSnapshot
 import com.example.domain.model.AccountState
 import com.example.domain.model.FeedConnectionState
 import com.example.domain.model.FeedSourceType
@@ -25,6 +29,7 @@ import com.example.domain.model.InstrumentType
 import com.example.domain.model.MarketSegment
 import com.example.domain.model.OrderSide
 import com.example.domain.model.Position
+import java.util.Locale
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -69,7 +74,13 @@ data class WatchlistUiState(
     val filteredWatchlistNews: List<MarketNewsArticle> = emptyList(),
     val priceAlerts: List<PriceAlert> = emptyList(),
     val activeAlertsBySymbol: Map<String, List<PriceAlert>> = emptyMap(),
-    val ltpBySymbol: Map<String, BigDecimal> = emptyMap()
+    val ltpBySymbol: Map<String, BigDecimal> = emptyMap(),
+    val globalMarkets: List<GlobalMarketQuote> = emptyList(),
+    val isRefreshingGlobal: Boolean = false,
+    val fundamentalSymbols: Set<String> = emptySet(),
+    val selectedFundamentalStock: StockMarketSnapshot? = null,
+    val selectedFundamentalDetails: LiveFundamentalDetails? = null,
+    val isLoadingFundamentalDetails: Boolean = false
 )
 
 @HiltViewModel
@@ -77,13 +88,17 @@ class WatchlistViewModel @Inject constructor(
     private val marketDataRepository: MarketDataRepository,
     tradingRepository: TradingRepository,
     private val marketNewsRepository: MarketNewsRepository,
-    private val priceAlertRepository: PriceAlertRepository
+    private val priceAlertRepository: PriceAlertRepository,
+    private val marketIntelligenceRepository: MarketIntelligenceRepository
 ) : ViewModel() {
 
     private val searchQuery = MutableStateFlow("")
     private val selectedSegment = MutableStateFlow<MarketSegment?>(null)
     private val selectedType = MutableStateFlow<InstrumentType?>(null)
     private val selectedNewsSymbol = MutableStateFlow<String?>(null)
+    private val _selectedFundamentalSymbol = MutableStateFlow<String?>(null)
+    private val _fundamentalDetailsMap = MutableStateFlow<Map<String, LiveFundamentalDetails>>(emptyMap())
+    private val _isLoadingFundamentalDetails = MutableStateFlow(false)
 
     private val _liveSearchState = MutableStateFlow(LiveSearchSnapshot())
     private val _openSymbolEvents = MutableSharedFlow<String>(extraBufferCapacity = 4)
@@ -97,11 +112,15 @@ class WatchlistViewModel @Inject constructor(
         viewModelScope.launch {
             val initialInstruments = marketDataRepository.instruments.first { it.isNotEmpty() }
             latestAllInstruments = initialInstruments
+            marketIntelligenceRepository.mergeWatchlistInstruments(initialInstruments)
             marketNewsRepository.refreshForWatchlist(
                 instruments = initialInstruments,
                 focusSymbol = null,
                 force = false
             )
+        }
+        viewModelScope.launch {
+            marketIntelligenceRepository.refreshAll()
         }
     }
 
@@ -118,6 +137,33 @@ class WatchlistViewModel @Inject constructor(
         priceAlertRepository.allAlerts
     ) { newsState, newsSymbol, alerts ->
         NewsAndAlertsBundle(newsState, newsSymbol, alerts)
+    }
+
+    private val marketIntelBundleFlow = combine(
+        marketIntelligenceRepository.globalMarkets,
+        marketIntelligenceRepository.isRefreshing,
+        marketIntelligenceRepository.stocks,
+        _selectedFundamentalSymbol,
+        _fundamentalDetailsMap,
+        _isLoadingFundamentalDetails
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        val globals = values[0] as List<GlobalMarketQuote>
+        val refreshing = values[1] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val stocks = values[2] as List<StockMarketSnapshot>
+        val selFundSym = values[3] as String?
+        @Suppress("UNCHECKED_CAST")
+        val detailsMap = values[4] as Map<String, LiveFundamentalDetails>
+        val loadingDetails = values[5] as Boolean
+        MarketIntelBundle(
+            globalMarkets = globals,
+            isRefreshing = refreshing,
+            stocks = stocks,
+            selectedFundamentalSymbol = selFundSym,
+            fundamentalDetailsMap = detailsMap,
+            isLoadingFundamentalDetails = loadingDetails
+        )
     }
 
     private val feedHealthFlow = combine(
@@ -154,7 +200,8 @@ class WatchlistViewModel @Inject constructor(
         feedHealthFlow,
         clockFlow,
         _liveSearchState,
-        newsBundleFlow
+        newsBundleFlow,
+        marketIntelBundleFlow
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val allInstruments = values[0] as List<Instrument>
@@ -170,6 +217,7 @@ class WatchlistViewModel @Inject constructor(
         val istClock = values[8] as String
         val liveSearch = values[9] as LiveSearchSnapshot
         val newsBundle = values[10] as NewsAndAlertsBundle
+        val intelBundle = values[11] as MarketIntelBundle
         val newsState = newsBundle.newsState
         val newsSymbol = newsBundle.selectedSymbol
         val allAlerts = newsBundle.alerts
@@ -217,6 +265,16 @@ class WatchlistViewModel @Inject constructor(
             .filter { it.isActive }
             .groupBy { it.symbol }
 
+        val fundamentalSymbols = intelBundle.stocks
+            .map { it.symbol.uppercase(Locale.US) }
+            .toSet()
+        val selectedFundamentalStock = intelBundle.selectedFundamentalSymbol?.let { sym ->
+            intelBundle.stocks.firstOrNull { it.symbol.equals(sym, ignoreCase = true) }
+        }
+        val selectedFundamentalDetails = selectedFundamentalStock?.let {
+            intelBundle.fundamentalDetailsMap[it.symbol.uppercase(Locale.US)]
+        }
+
         WatchlistUiState(
             instruments = filtered,
             searchQuery = query,
@@ -244,7 +302,13 @@ class WatchlistViewModel @Inject constructor(
             filteredWatchlistNews = filteredNews,
             priceAlerts = allAlerts,
             activeAlertsBySymbol = activeAlertsBySymbol,
-            ltpBySymbol = ltpMap
+            ltpBySymbol = ltpMap,
+            globalMarkets = intelBundle.globalMarkets,
+            isRefreshingGlobal = intelBundle.isRefreshing,
+            fundamentalSymbols = fundamentalSymbols,
+            selectedFundamentalStock = selectedFundamentalStock,
+            selectedFundamentalDetails = selectedFundamentalDetails,
+            isLoadingFundamentalDetails = intelBundle.isLoadingFundamentalDetails
         )
     }.stateIn(
         scope = viewModelScope,
@@ -381,6 +445,41 @@ class WatchlistViewModel @Inject constructor(
         }
     }
 
+    fun refreshGlobalMarkets() {
+        viewModelScope.launch {
+            marketIntelligenceRepository.refreshAll()
+        }
+    }
+
+    fun openFundamentals(symbol: String) {
+        _selectedFundamentalSymbol.value = symbol
+        loadFundamentalDetails(symbol, forceRefresh = false)
+    }
+
+    fun refreshFundamentalDetails() {
+        val sym = _selectedFundamentalSymbol.value ?: return
+        loadFundamentalDetails(sym, forceRefresh = true)
+    }
+
+    fun closeFundamentals() {
+        _selectedFundamentalSymbol.value = null
+    }
+
+    private fun loadFundamentalDetails(symbol: String, forceRefresh: Boolean) {
+        val snap = marketIntelligenceRepository.findSnapshotBySymbol(symbol) ?: return
+        val key = snap.symbol.uppercase(Locale.US)
+        if (!forceRefresh && _fundamentalDetailsMap.value.containsKey(key)) return
+        viewModelScope.launch {
+            _isLoadingFundamentalDetails.value = true
+            try {
+                val details = marketIntelligenceRepository.fetchFundamentalDetails(snap, forceRefresh = forceRefresh)
+                _fundamentalDetailsMap.value = _fundamentalDetailsMap.value + (key to details)
+            } finally {
+                _isLoadingFundamentalDetails.value = false
+            }
+        }
+    }
+
     fun reconnectFeed() {
         viewModelScope.launch {
             marketDataRepository.reconnectActiveFeed()
@@ -404,6 +503,15 @@ class WatchlistViewModel @Inject constructor(
         val newsState: MarketNewsFeedState,
         val selectedSymbol: String?,
         val alerts: List<PriceAlert>
+    )
+
+    private data class MarketIntelBundle(
+        val globalMarkets: List<GlobalMarketQuote>,
+        val isRefreshing: Boolean,
+        val stocks: List<StockMarketSnapshot>,
+        val selectedFundamentalSymbol: String?,
+        val fundamentalDetailsMap: Map<String, LiveFundamentalDetails>,
+        val isLoadingFundamentalDetails: Boolean
     )
 
     private data class FeedHealthSnapshot(

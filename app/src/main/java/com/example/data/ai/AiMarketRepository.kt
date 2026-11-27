@@ -4,6 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.example.domain.engine.MarketClock
 import com.example.domain.engine.RiskMath
+import com.example.domain.ai.AiStrategyCoachPersona
+import com.example.domain.market.FiiDiiDashboardData
+import com.example.domain.market.GlobalMarketQuote
 import com.example.domain.model.AccountState
 import com.example.domain.model.Instrument
 import com.example.domain.model.OrderSide
@@ -99,6 +102,14 @@ interface AiMarketRepository {
         structureSummary: String
     ): Result<AiSignalSecondOpinion>
 
+    suspend fun validateChartPattern(
+        symbol: String,
+        timeframeLabel: String,
+        instrument: Instrument?,
+        pattern: com.example.domain.analysis.DetectedChartPattern,
+        recentCandles: List<Candle>
+    ): Result<AiSignalSecondOpinion>
+
     suspend fun auditOpenPositions(
         account: AccountState,
         positions: List<Position>,
@@ -112,6 +123,19 @@ interface AiMarketRepository {
         instruments: List<Instrument>,
         journalEntries: List<TradeJournalEntry>,
         activeSignals: List<TradeSignal>
+    ): Flow<AiUiState<String>>
+
+    fun streamStrategyCoach(
+        persona: AiStrategyCoachPersona,
+        question: String,
+        conversationHistory: List<Pair<Boolean, String>>,
+        account: AccountState,
+        positions: List<Position>,
+        instruments: List<Instrument>,
+        journalEntries: List<TradeJournalEntry>,
+        activeSignals: List<TradeSignal>,
+        globalMarkets: List<GlobalMarketQuote>,
+        fiiDii: FiiDiiDashboardData?
     ): Flow<AiUiState<String>>
 }
 
@@ -554,6 +578,43 @@ class FirebaseAiMarketRepository @Inject constructor(
         )
     }
 
+    override suspend fun validateChartPattern(
+        symbol: String,
+        timeframeLabel: String,
+        instrument: Instrument?,
+        pattern: com.example.domain.analysis.DetectedChartPattern,
+        recentCandles: List<Candle>
+    ): Result<AiSignalSecondOpinion> {
+        val candleLines = recentCandles.takeLast(16).joinToString("\n") { c ->
+            "O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f".format(c.open, c.high, c.low, c.close, c.volume)
+        }.ifBlank { "Candles warming up." }
+
+        val prompt = buildString {
+            appendLine("Validate this automatically detected technical chart pattern for breakout execution:")
+            appendLine("Symbol: $symbol | Timeframe: $timeframeLabel | IST: ${MarketClock.formatCurrentIstClock()}")
+            if (instrument != null) {
+                appendLine("Segment: ${instrument.segment.label} | LTP: ${RiskMath.formatPrice(instrument.ltp, instrument.segment)} | Change: ${instrument.changePercent}%")
+            }
+            appendLine("Detected Pattern: ${pattern.type.displayName} (${pattern.type.categoryLabel})")
+            appendLine("Direction: ${pattern.direction.name} | Status: ${pattern.status.label} | Geometric Confidence: ${pattern.confidenceScore}%")
+            appendLine("Breakout Level: %.2f | Measured Target: %.2f (+%.2f%%) | Invalidation/SL: %.2f | R:R = 1:%.2f".format(
+                pattern.breakoutLevel,
+                pattern.targetPrice,
+                pattern.projectedMovePercent,
+                pattern.invalidationPrice,
+                pattern.riskRewardRatio
+            ))
+            appendLine("Engine Note: ${pattern.summary} ${pattern.breakoutNote}")
+            appendLine("Recent OHLCV Candles:\n$candleLines")
+            appendLine("Evaluate pattern symmetry, false-breakout risk, volume confirmation, exact breakout trigger, and invalidation discipline.")
+        }
+        return runStructuredAnalysis(
+            prompt = prompt,
+            referenceId = "pattern_${symbol}_${pattern.id}",
+            symbol = symbol
+        )
+    }
+
     override suspend fun auditOpenPositions(
         account: AccountState,
         positions: List<Position>,
@@ -647,6 +708,85 @@ class FirebaseAiMarketRepository @Inject constructor(
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Firebase AI coach failed", e)
+            emit(AiUiState.Error(friendlyAiError(e)))
+        }
+    }
+
+    override fun streamStrategyCoach(
+        persona: AiStrategyCoachPersona,
+        question: String,
+        conversationHistory: List<Pair<Boolean, String>>,
+        account: AccountState,
+        positions: List<Position>,
+        instruments: List<Instrument>,
+        journalEntries: List<TradeJournalEntry>,
+        activeSignals: List<TradeSignal>,
+        globalMarkets: List<GlobalMarketQuote>,
+        fiiDii: FiiDiiDashboardData?
+    ): Flow<AiUiState<String>> = flow {
+        val cfg = aiConfigStore.getCurrent()
+        val prompt = buildStrategyCoachPrompt(
+            persona = persona,
+            question = question,
+            conversationHistory = conversationHistory,
+            account = account,
+            positions = positions,
+            instruments = instruments,
+            journalEntries = journalEntries,
+            activeSignals = activeSignals,
+            globalMarkets = globalMarkets,
+            fiiDii = fiiDii
+        )
+        emit(AiUiState.Loading)
+
+        if (cfg.provider != AiProvider.FIREBASE_AI_LOGIC) {
+            try {
+                val startMs = System.currentTimeMillis()
+                val text = withTimeout(TIMEOUT_MS) {
+                    callExternalProvider(cfg, prompt, expectJson = false)
+                }
+                markConnected(cfg, System.currentTimeMillis() - startMs)
+                emit(AiUiState.Success(text))
+            } catch (e: TimeoutCancellationException) {
+                emit(AiUiState.Error("${cfg.provider.shortLabel} strategy coach timed out after 60s."))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emit(AiUiState.Error(e.message ?: "${cfg.provider.shortLabel} strategy coach failed."))
+            }
+            return@flow
+        }
+
+        if (!ensureFirebaseInitialized(context)) {
+            emit(AiUiState.Error(FIREBASE_NOT_INITIALIZED_MSG))
+            return@flow
+        }
+
+        val acc = StringBuilder()
+        val startMs = System.currentTimeMillis()
+        try {
+            withTimeout(TIMEOUT_MS) {
+                getCoachModel(cfg.effectiveModel).generateContentStream(prompt).collect { chunk ->
+                    val piece = chunk.text.orEmpty()
+                    if (piece.isNotEmpty()) {
+                        acc.append(piece)
+                        emit(AiUiState.Streaming(acc.toString()))
+                    }
+                }
+            }
+            if (acc.isNotBlank()) {
+                markConnected(cfg, System.currentTimeMillis() - startMs)
+                emit(AiUiState.Success(acc.toString()))
+            } else {
+                emit(AiUiState.Error("Gemini returned an empty coaching response."))
+            }
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Strategy coach stream timed out", e)
+            emit(AiUiState.Error("AI Strategy Coach timed out after 60s. Please retry."))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Firebase AI strategy coach failed", e)
             emit(AiUiState.Error(friendlyAiError(e)))
         }
     }
@@ -950,6 +1090,53 @@ class FirebaseAiMarketRepository @Inject constructor(
             appendLine("\nRecent Closed Trades:\n$journalText")
             appendLine("\nTop Active Signals:\n$signalText")
             appendLine("\nRespond in concise bullet points with specific numbers from the data above and clear risk-management advice.")
+        }
+    }
+
+    private fun buildStrategyCoachPrompt(
+        persona: AiStrategyCoachPersona,
+        question: String,
+        conversationHistory: List<Pair<Boolean, String>>,
+        account: AccountState,
+        positions: List<Position>,
+        instruments: List<Instrument>,
+        journalEntries: List<TradeJournalEntry>,
+        activeSignals: List<TradeSignal>,
+        globalMarkets: List<GlobalMarketQuote>,
+        fiiDii: FiiDiiDashboardData?
+    ): String {
+        val baseContext = buildCoachPrompt(
+            question = question,
+            account = account,
+            positions = positions,
+            instruments = instruments,
+            journalEntries = journalEntries,
+            activeSignals = activeSignals
+        )
+        val globalLines = globalMarkets.take(8).joinToString(" | ") { q ->
+            "${q.symbol}: ${"%.1f".format(q.price)} (${"%+.2f%%".format(q.changePercent)})"
+        }.ifBlank { "Global indices loading." }
+
+        val fiiLine = fiiDii?.let { d ->
+            "Latest (${d.latest.dateLabel}): FII Net ₹${"%.0f".format(d.latest.fiiNetCr)} Cr (Buy ₹${"%.0f".format(d.latest.fiiBuyCr)} / Sell ₹${"%.0f".format(d.latest.fiiSellCr)}), " +
+                "DII Net ₹${"%.0f".format(d.latest.diiNetCr)} Cr (Buy ₹${"%.0f".format(d.latest.diiBuyCr)} / Sell ₹${"%.0f".format(d.latest.diiSellCr)}), " +
+                "Sentiment: ${d.sentimentLabel}"
+        } ?: "FII/DII data syncing."
+
+        val recentHistory = conversationHistory.takeLast(6).joinToString("\n") { (isUser, msg) ->
+            "${if (isUser) "Trader" else persona.shortTitle + " Coach"}: ${msg.take(360)}"
+        }
+
+        return buildString {
+            appendLine("ACTIVE COACH PERSONA: ${persona.title} [${persona.specialtyBadge}]")
+            appendLine(persona.personaInstruction)
+            appendLine("\nGLOBAL MARKET CUES:\n$globalLines")
+            appendLine("\nNSE INSTITUTIONAL MARKET FLOW (FII/DII):\n$fiiLine")
+            if (recentHistory.isNotBlank()) {
+                appendLine("\nRECENT COACHING CONVERSATION:\n$recentHistory")
+            }
+            appendLine("\n$baseContext")
+            appendLine("\nStructure your coaching reply with: (1) Direct Assessment, (2) Actionable Strategy Plan with exact levels/rules, and (3) Key Risk Guardrail.")
         }
     }
 

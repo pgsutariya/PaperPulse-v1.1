@@ -62,6 +62,7 @@ import com.example.ui.components.PnlCalendarHeatmapCard
 import com.example.ui.components.RiskManagementScorecardCard
 import com.example.ui.components.SearchGroundingBriefingCard
 import com.example.ui.components.SegmentBadge
+import com.example.ui.components.StrategyPerformanceBreakdownCard
 import com.example.ui.components.TradeCorrelationMatrixCard
 import com.example.ui.components.TradeSummaryReportCard
 import com.example.ui.components.TradeTagEditorDialog
@@ -112,12 +113,50 @@ fun JournalScreen(
             border = BorderStroke(1.dp, tradingColors.border)
         ) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                state.selectedTagFilter?.let { activeStrategy ->
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("summary_active_strategy_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Filtered: #$activeStrategy (${state.filteredEntries.size}/${state.entries.size} trades)",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = { viewModel.selectTagFilter(null) },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                modifier = Modifier.testTag("summary_clear_strategy_filter")
+                            ) {
+                                Text("Clear", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Column {
-                        Text("INDIA NET REALISED (₹)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = if (state.selectedTagFilter != null) "FILTERED NET REALISED (₹)" else "INDIA NET REALISED (₹)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         val netColor = if (state.netRealisedPnl >= BigDecimal.ZERO) tradingColors.bullish else tradingColors.bearish
                         Text(RiskMath.formatPortfolioInr(state.netRealisedPnl, signed = true), style = MonoPriceMedium, color = netColor)
                     }
@@ -137,7 +176,7 @@ fun JournalScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        text = "Win Rate: ${state.winRatePercent}% (${state.entries.size})",
+                        text = "Win Rate: ${state.winRatePercent}% (${state.filteredEntries.size})",
                         style = MonoPriceSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -192,11 +231,15 @@ fun JournalScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             JournalTab.entries.forEach { tab ->
-                val count = when (tab) {
-                    JournalTab.TRADES -> state.entries.size
-                    JournalTab.NEWS -> state.filteredNewsArticles.size
-                    JournalTab.BY_INSTRUMENT -> state.instrumentPerformance.size
-                    JournalTab.CAPITAL -> state.capitalTransactions.size
+                val tabLabel = when (tab) {
+                    JournalTab.TRADES -> if (state.selectedTagFilter != null) {
+                        "${tab.label} (${state.filteredEntries.size}/${state.entries.size})"
+                    } else {
+                        "${tab.label} (${state.entries.size})"
+                    }
+                    JournalTab.NEWS -> "${tab.label} (${state.filteredNewsArticles.size})"
+                    JournalTab.BY_INSTRUMENT -> "${tab.label} (${state.instrumentPerformance.size})"
+                    JournalTab.CAPITAL -> "${tab.label} (${state.capitalTransactions.size})"
                 }
                 FilterChip(
                     selected = selectedTab == tab,
@@ -206,7 +249,7 @@ fun JournalScreen(
                             viewModel.refreshNews(force = false)
                         }
                     },
-                    label = { Text("${tab.label} ($count)", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    label = { Text(tabLabel, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     modifier = Modifier.testTag("journal_tab_${tab.name.lowercase()}"),
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -230,6 +273,15 @@ fun JournalScreen(
                             totalTradeCount = state.entries.size,
                             tagCounts = state.tagCounts,
                             selectedTag = state.selectedTagFilter,
+                            onSelectTag = viewModel::selectTagFilter
+                        )
+                    }
+
+                    item(key = "strategy_performance_breakdown_card") {
+                        StrategyPerformanceBreakdownCard(
+                            strategies = state.strategyPerformance,
+                            selectedTag = state.selectedTagFilter,
+                            totalTradeCount = state.entries.size,
                             onSelectTag = viewModel::selectTagFilter
                         )
                     }
@@ -294,7 +346,7 @@ fun JournalScreen(
                             EmptyStatePanel(
                                 icon = Icons.Rounded.Book,
                                 title = "No closed trades yet",
-                                subtitle = "Closed positions appear here with custom tags (Breakout, Reversal, News), itemized brokerage & taxes, net P&L, and trade notes."
+                                subtitle = "Closed positions appear here with Strategy Tags (#Scalp, #TrendFollow, #Breakout), itemized brokerage & taxes, net P&L, and trade notes."
                             )
                         }
                     } else if (state.filteredEntries.isEmpty() && state.selectedTagFilter != null) {
@@ -302,7 +354,7 @@ fun JournalScreen(
                             EmptyStatePanel(
                                 icon = Icons.Rounded.LocalOffer,
                                 title = "No trades tagged #${state.selectedTagFilter}",
-                                subtitle = "Tap + Tag on any closed trade to label it as #${state.selectedTagFilter}, or tap Clear above to view all trades."
+                                subtitle = "Tap + Strategy on any closed trade to label it as #${state.selectedTagFilter}, or tap Clear above to view all trades."
                             )
                         }
                     } else {
@@ -372,12 +424,29 @@ fun JournalScreen(
                     }
                 }
                 JournalTab.BY_INSTRUMENT -> {
+                    item(key = "instrument_tab_strategy_filter") {
+                        TradeTagFilterBar(
+                            totalTradeCount = state.entries.size,
+                            tagCounts = state.tagCounts,
+                            selectedTag = state.selectedTagFilter,
+                            onSelectTag = viewModel::selectTagFilter
+                        )
+                    }
+
                     if (state.instrumentPerformance.isEmpty()) {
                         item(key = "instrument_perf_empty") {
                             EmptyStatePanel(
                                 icon = Icons.Rounded.Assessment,
-                                title = "No instrument performance yet",
-                                subtitle = "Close trades to track symbol-by-symbol Win Rate, Gross P&L, Charges, and Net P&L in ₹ (India) or $ (Crypto)."
+                                title = if (state.selectedTagFilter != null) {
+                                    "No symbols tagged #${state.selectedTagFilter}"
+                                } else {
+                                    "No instrument performance yet"
+                                },
+                                subtitle = if (state.selectedTagFilter != null) {
+                                    "Tap Clear above to see all symbols, or tag trades with #${state.selectedTagFilter} in the Trades tab."
+                                } else {
+                                    "Close trades to track symbol-by-symbol Win Rate, Gross P&L, Charges, and Net P&L in ₹ (India) or $ (Crypto)."
+                                }
                             )
                         }
                     } else {

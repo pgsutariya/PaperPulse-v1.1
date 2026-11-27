@@ -35,7 +35,8 @@ class AiRenkoSupertrendEvaluator(
             val closes = candles.map { it.close }
             val ema21 = TechnicalIndicators.ema(closes, 21)
             val ema50 = TechnicalIndicators.ema(closes, 50)
-            val snap = AiRenkoSupertrendEngine.compute(candles, ema21, ema50, config)
+            val activeConfig = if (config != AiRenkoConfig()) config else context.calibrationConfig.renkoConfig
+            val snap = AiRenkoSupertrendEngine.compute(candles, ema21, ema50, activeConfig)
 
             val lastIdx = candles.lastIndex
             val lastCandle = candles[lastIdx]

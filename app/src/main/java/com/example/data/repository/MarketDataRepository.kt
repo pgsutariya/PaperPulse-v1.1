@@ -71,4 +71,15 @@ interface MarketDataRepository {
     fun observeOptionTokenTicks(): Flow<TokenLiveTick> = emptyFlow()
 
     suspend fun refreshScripMaster(): Result<Int> = Result.success(0)
+
+    suspend fun ensureEquityInstrument(
+        symbol: String,
+        displayName: String,
+        ltp: BigDecimal,
+        previousClose: BigDecimal,
+        dayHigh: BigDecimal,
+        dayLow: BigDecimal,
+        volume: Long,
+        segment: MarketSegment = MarketSegment.NSE
+    ) = Unit
 }

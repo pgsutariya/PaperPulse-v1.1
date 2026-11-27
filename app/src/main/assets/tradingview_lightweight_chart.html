@@ -104,13 +104,19 @@
       let mainSeries = null;
       let markersController = null;
       let overlaySeriesList = [];
-      let lowerSeriesList = [];
+      let lowerHistogramSeries = null;
+      let lowerLineSeriesList = [];
       let priceLineHandles = [];
       let lowerPriceLineHandles = [];
       let lastPayload = null;
       let lastContextKey = "";
       let lastStyleKey = "";
       let lastLowerPaneKey = "";
+      let lastOverlaySpecKey = "";
+      let lastLowerSpecKey = "";
+      let paneRatioInitialized = false;
+      let lastContainerW = 0;
+      let lastContainerH = 0;
       let libraryLoaded = false;
 
       const hudTitle = document.getElementById("hud-title");
@@ -227,6 +233,25 @@
         }
       }
 
+      function lockPaneProportions(forceSetHeightFallback) {
+        if (!chart || !isV5() || typeof chart.panes !== "function") return;
+        try {
+          const panes = chart.panes();
+          if (!panes || panes.length < 2) return;
+          // Prefer idempotent stretch factors (76% main spot window / 24% volume-indicator pane)
+          if (typeof panes[0].setStretchFactor === "function" && typeof panes[1].setStretchFactor === "function") {
+            panes[0].setStretchFactor(3.15);
+            panes[1].setStretchFactor(1.0);
+            paneRatioInitialized = true;
+          } else if ((forceSetHeightFallback || !paneRatioInitialized) && typeof panes[1].setHeight === "function") {
+            const totalH = container.clientHeight || window.innerHeight || 480;
+            const lowerH = Math.min(116, Math.max(76, Math.round(totalH * 0.23)));
+            panes[1].setHeight(lowerH);
+            paneRatioInitialized = true;
+          }
+        } catch (e) {}
+      }
+
       function destroyChart() {
         if (chart) {
           try { chart.remove(); } catch (e) {}
@@ -235,9 +260,13 @@
         mainSeries = null;
         markersController = null;
         overlaySeriesList = [];
-        lowerSeriesList = [];
+        lowerHistogramSeries = null;
+        lowerLineSeriesList = [];
         priceLineHandles = [];
         lowerPriceLineHandles = [];
+        lastOverlaySpecKey = "";
+        lastLowerSpecKey = "";
+        paneRatioInitialized = false;
       }
 
       function createChartInstance(payload) {
@@ -251,9 +280,14 @@
           ? (LWC.PriceScaleMode ? LWC.PriceScaleMode.Logarithmic : 1)
           : (LWC.PriceScaleMode ? LWC.PriceScaleMode.Normal : 0);
 
+        const w = Math.max(200, container.clientWidth || window.innerWidth || 360);
+        const h = Math.max(240, container.clientHeight || window.innerHeight || 480);
+        lastContainerW = w;
+        lastContainerH = h;
+
         chart = LWC.createChart(container, {
-          width: container.clientWidth || window.innerWidth,
-          height: container.clientHeight || window.innerHeight,
+          width: w,
+          height: h,
           layout: {
             background: { type: LWC.ColorType ? LWC.ColorType.Solid : "solid", color: "#131722" },
             textColor: "#D1D4DC",
@@ -261,7 +295,7 @@
             panes: {
               separatorColor: "#2A2E39",
               separatorHoverColor: "#2962FF",
-              enableResize: true
+              enableResize: false
             }
           },
           grid: {
@@ -286,7 +320,7 @@
           rightPriceScale: {
             borderColor: "#2A2E39",
             mode: priceScaleMode,
-            scaleMargins: { top: 0.14, bottom: 0.08 }
+            scaleMargins: { top: 0.12, bottom: 0.06 }
           },
           timeScale: {
             borderColor: "#2A2E39",
@@ -329,26 +363,55 @@
         });
       }
 
-      function clearExtraSeries() {
+      function clearPriceLines() {
         priceLineHandles.forEach(function (h) {
           try { if (mainSeries) mainSeries.removePriceLine(h); } catch (e) {}
         });
         priceLineHandles = [];
+      }
 
+      function clearOverlaySeries() {
         overlaySeriesList.forEach(function (s) {
           try { chart.removeSeries(s); } catch (e) {}
         });
         overlaySeriesList = [];
+        lastOverlaySpecKey = "";
+      }
 
+      function clearLowerPriceLines() {
         lowerPriceLineHandles.forEach(function (item) {
           try { item.series.removePriceLine(item.line); } catch (e) {}
         });
         lowerPriceLineHandles = [];
+      }
 
-        lowerSeriesList.forEach(function (s) {
+      function clearLowerSeries() {
+        clearLowerPriceLines();
+        if (lowerHistogramSeries) {
+          try { chart.removeSeries(lowerHistogramSeries); } catch (e) {}
+          lowerHistogramSeries = null;
+        }
+        lowerLineSeriesList.forEach(function (s) {
           try { chart.removeSeries(s); } catch (e) {}
         });
-        lowerSeriesList = [];
+        lowerLineSeriesList = [];
+        lastLowerSpecKey = "";
+      }
+
+      function computeOverlaySpecKey(overlayLines) {
+        if (!Array.isArray(overlayLines) || overlayLines.length === 0) return "";
+        return overlayLines.map(function (ol) {
+          return (ol.color || "") + ":" + (ol.lineWidth || 2) + ":" + (ol.dashed ? "1" : "0");
+        }).join("|");
+      }
+
+      function computeLowerSpecKey(lp) {
+        if (!lp) return "NONE";
+        const hasHist = Array.isArray(lp.histogram) && lp.histogram.length > 0 ? "H1" : "H0";
+        const linesKey = (lp.lines || []).map(function (ll) {
+          return (ll.color || "") + ":" + (ll.lineWidth || 2) + ":" + (ll.dashed ? "1" : "0");
+        }).join(",");
+        return (lp.paneKey || "VOLUME") + "|" + hasHist + "|" + linesKey;
       }
 
       function renderPayload(payload) {
@@ -402,8 +465,16 @@
               borderVisible: false
             }, 0);
           }
+          // Keep main price scale cleanly framed in Pane 0
+          try {
+            if (mainSeries && typeof mainSeries.priceScale === "function") {
+              mainSeries.priceScale().applyOptions({
+                scaleMargins: isV5() ? { top: 0.12, bottom: 0.06 } : { top: 0.10, bottom: 0.28 }
+              });
+            }
+          } catch (e) {}
         } else {
-          // Update scale/crosshair options smoothly without recreating chart
+          // Update scale/crosshair options smoothly without touching panes or recreating series
           chart.applyOptions({
             crosshair: {
               mode: payload.magnetCrosshair
@@ -416,7 +487,6 @@
                 : (LWC.PriceScaleMode ? LWC.PriceScaleMode.Normal : 0)
             }
           });
-          clearExtraSeries();
         }
 
         // Main series data
@@ -430,12 +500,13 @@
           }));
         }
 
-        // Markers (BOS/CHoCH, Divergences, EMA Cross)
+        // Markers (BOS/CHoCH, Divergences, EMA Cross, Renko, Red Bar)
         applySeriesMarkers(mainSeries, payload.markers || []);
 
         // Price Lines (Pivots, SMC POIs, Liquidity, Setup Levels)
         const dashedStyle = LWC.LineStyle ? LWC.LineStyle.Dashed : 2;
         const solidStyle = LWC.LineStyle ? LWC.LineStyle.Solid : 0;
+        clearPriceLines();
         (payload.priceLines || []).forEach(function (pl) {
           const handle = mainSeries.createPriceLine({
             price: pl.price,
@@ -448,26 +519,42 @@
           priceLineHandles.push(handle);
         });
 
-        // Overlay indicator line series (EMA 9/21/50/200, VWAP & σ bands)
-        (payload.overlayLines || []).forEach(function (ol) {
-          const line = addTypedSeries("LineSeries", {
-            color: ol.color,
-            lineWidth: ol.lineWidth || 2,
-            lineStyle: ol.dashed ? dashedStyle : solidStyle,
-            priceLineVisible: false,
-            lastValueVisible: false,
-            crosshairMarkerVisible: false
-          }, 0);
-          if (line) {
-            line.setData(ol.data.map(function (pt) {
-              return { time: pt.time, value: pt.value };
-            }));
-            overlaySeriesList.push(line);
-          }
-        });
+        // Overlay indicator line series (update in-place when structure is unchanged!)
+        const overlayLines = payload.overlayLines || [];
+        const overlaySpecKey = computeOverlaySpecKey(overlayLines);
+        if (needsFullRebuild || overlaySpecKey !== lastOverlaySpecKey || overlaySeriesList.length !== overlayLines.length) {
+          clearOverlaySeries();
+          overlayLines.forEach(function (ol) {
+            const line = addTypedSeries("LineSeries", {
+              color: ol.color,
+              lineWidth: ol.lineWidth || 2,
+              lineStyle: ol.dashed ? dashedStyle : solidStyle,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              crosshairMarkerVisible: false
+            }, 0);
+            if (line) {
+              line.setData(ol.data.map(function (pt) {
+                return { time: pt.time, value: pt.value };
+              }));
+              overlaySeriesList.push(line);
+            }
+          });
+          lastOverlaySpecKey = overlaySpecKey;
+        } else {
+          overlayLines.forEach(function (ol, idx) {
+            const existing = overlaySeriesList[idx];
+            if (existing) {
+              existing.setData(ol.data.map(function (pt) {
+                return { time: pt.time, value: pt.value };
+              }));
+            }
+          });
+        }
 
-        // Lower Pane (native Pane 1 in v5; bottom price-scale overlay in v4 fallback)
+        // Lower Pane (Volume / RSI / MACD / CVD / ATR) — update in-place on live ticks so Pane 1 NEVER drifts!
         const lp = payload.lowerPane;
+        const lowerSpecKey = computeLowerSpecKey(lp);
         if (lp) {
           const useV5Pane = isV5();
           const targetPane = useV5Pane ? 1 : 0;
@@ -475,41 +562,73 @@
             priceScaleId: "lower_pane_v4",
             scaleMargins: { top: 0.78, bottom: 0.0 }
           };
+          const hasHist = Array.isArray(lp.histogram) && lp.histogram.length > 0;
+          const lpLines = lp.lines || [];
+          const needRebuildLower = needsFullRebuild || lowerSpecKey !== lastLowerSpecKey;
 
-          let anchorLowerSeries = null;
-
-          if (Array.isArray(lp.histogram) && lp.histogram.length > 0) {
-            const hist = addTypedSeries("HistogramSeries", Object.assign({
-              priceFormat: { type: "volume" },
-              priceLineVisible: false,
-              lastValueVisible: false
-            }, v4ScaleOpts), targetPane);
-            if (hist) {
-              hist.setData(lp.histogram.map(function (pt) {
-                return pt.color ? { time: pt.time, value: pt.value, color: pt.color } : { time: pt.time, value: pt.value };
-              }));
-              lowerSeriesList.push(hist);
-              anchorLowerSeries = hist;
+          if (needRebuildLower) {
+            clearLowerSeries();
+            if (hasHist) {
+              lowerHistogramSeries = addTypedSeries("HistogramSeries", Object.assign({
+                priceFormat: { type: "volume" },
+                priceLineVisible: false,
+                lastValueVisible: false
+              }, v4ScaleOpts), targetPane);
+              try {
+                if (useV5Pane && lowerHistogramSeries && typeof lowerHistogramSeries.priceScale === "function") {
+                  lowerHistogramSeries.priceScale().applyOptions({
+                    scaleMargins: { top: 0.18, bottom: 0.0 }
+                  });
+                }
+              } catch (e) {}
             }
+            lpLines.forEach(function (ll) {
+              const line = addTypedSeries("LineSeries", Object.assign({
+                color: ll.color,
+                lineWidth: ll.lineWidth || 2,
+                lineStyle: ll.dashed ? dashedStyle : solidStyle,
+                priceLineVisible: false,
+                lastValueVisible: true
+              }, v4ScaleOpts), targetPane);
+              if (line) {
+                try {
+                  if (useV5Pane && typeof line.priceScale === "function") {
+                    line.priceScale().applyOptions({
+                      scaleMargins: { top: 0.12, bottom: 0.08 }
+                    });
+                  }
+                } catch (e) {}
+                lowerLineSeriesList.push(line);
+              }
+            });
+            lastLowerSpecKey = lowerSpecKey;
+            if (!useV5Pane) {
+              try {
+                chart.priceScale("lower_pane_v4").applyOptions({
+                  scaleMargins: { top: 0.78, bottom: 0.0 }
+                });
+              } catch (e) {}
+            }
+            lockPaneProportions(true);
           }
 
-          (lp.lines || []).forEach(function (ll) {
-            const line = addTypedSeries("LineSeries", Object.assign({
-              color: ll.color,
-              lineWidth: ll.lineWidth || 2,
-              lineStyle: ll.dashed ? dashedStyle : solidStyle,
-              priceLineVisible: false,
-              lastValueVisible: true
-            }, v4ScaleOpts), targetPane);
+          // Always refresh data in-place (zero pane recreation / zero height drift)
+          if (lowerHistogramSeries && hasHist) {
+            lowerHistogramSeries.setData(lp.histogram.map(function (pt) {
+              return pt.color ? { time: pt.time, value: pt.value, color: pt.color } : { time: pt.time, value: pt.value };
+            }));
+          }
+          lpLines.forEach(function (ll, idx) {
+            const line = lowerLineSeriesList[idx];
             if (line) {
               line.setData(ll.data.map(function (pt) {
                 return { time: pt.time, value: pt.value };
               }));
-              lowerSeriesList.push(line);
-              if (!anchorLowerSeries) anchorLowerSeries = line;
             }
           });
 
+          const anchorLowerSeries = lowerHistogramSeries || lowerLineSeriesList[0] || null;
+          clearLowerPriceLines();
           if (anchorLowerSeries && Array.isArray(lp.priceLines)) {
             lp.priceLines.forEach(function (pl) {
               const handle = anchorLowerSeries.createPriceLine({
@@ -523,16 +642,8 @@
               lowerPriceLineHandles.push({ series: anchorLowerSeries, line: handle });
             });
           }
-
-          if (useV5Pane && typeof chart.panes === "function") {
-            try {
-              const panes = chart.panes();
-              if (panes && panes.length > 1 && typeof panes[1].setHeight === "function") {
-                const totalH = container.clientHeight || 480;
-                panes[1].setHeight(Math.max(88, Math.round(totalH * 0.25)));
-              }
-            } catch (e) {}
-          }
+        } else {
+          clearLowerSeries();
         }
 
         if (needsFullRebuild || !savedRange) {
@@ -592,15 +703,23 @@
         try {
           chart.timeScale().fitContent();
           chart.priceScale("right").applyOptions({ autoScale: true });
+          lockPaneProportions(true);
         } catch (e) {}
       };
 
       const resizeObserver = new ResizeObserver(function () {
-        if (chart && container.clientWidth > 0 && container.clientHeight > 0) {
-          chart.applyOptions({
-            width: container.clientWidth,
-            height: container.clientHeight
-          });
+        if (!chart) return;
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        if (w > 0 && h > 0 && (Math.abs(w - lastContainerW) >= 2 || Math.abs(h - lastContainerH) >= 2)) {
+          lastContainerW = w;
+          lastContainerH = h;
+          if (typeof chart.resize === "function") {
+            chart.resize(w, h);
+          } else {
+            chart.applyOptions({ width: w, height: h });
+          }
+          lockPaneProportions(false);
         }
       });
       resizeObserver.observe(container);

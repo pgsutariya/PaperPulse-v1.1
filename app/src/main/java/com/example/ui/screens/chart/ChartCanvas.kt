@@ -20,6 +20,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.analysis.ChartAnalysis
+import com.example.domain.analysis.ChartPatternType
 import com.example.domain.analysis.DivergenceKind
 import com.example.domain.analysis.EmaCrossSetup
 import com.example.domain.analysis.LiquiditySide
@@ -185,6 +186,8 @@ fun PriceChartCanvas(
     measureMode: Boolean = false,
     measureStartIndex: Int? = null,
     measureEndIndex: Int? = null,
+    selectedPatternId: String? = null,
+    onPatternTap: (String) -> Unit = {},
     onMeasureTap: (Int) -> Unit = {},
     onPinchZoom: (Float) -> Unit = {},
     onPanBars: (Int) -> Unit = {}
@@ -193,7 +196,7 @@ fun PriceChartCanvas(
     var crosshairIndex by remember(analysis.candles.size, measureMode) { mutableStateOf<Int?>(null) }
 
     val interactiveModifier = modifier
-        .pointerInput(measureMode, window.start, window.end) {
+        .pointerInput(measureMode, window.start, window.end, overlays.chartPatterns, analysis.chartPatterns) {
             detectTapGestures { offset ->
                 val axisW = AXIS_DP.dp.toPx()
                 val chartW = (size.width - axisW).coerceAtLeast(1f)
@@ -203,7 +206,16 @@ fun PriceChartCanvas(
                 if (measureMode) {
                     onMeasureTap(idx)
                 } else {
-                    crosshairIndex = if (crosshairIndex == idx) null else idx
+                    val hitPattern = if (overlays.chartPatterns) {
+                        analysis.chartPatterns.firstOrNull { pat ->
+                            idx in (pat.startIndex - 2)..(pat.endIndex + 4)
+                        }
+                    } else null
+                    if (hitPattern != null) {
+                        onPatternTap(hitPattern.id)
+                    } else {
+                        crosshairIndex = if (crosshairIndex == idx) null else idx
+                    }
                 }
             }
         }
@@ -626,6 +638,163 @@ fun PriceChartCanvas(
                         DivergenceKind.DELTA_BULLISH, DivergenceKind.DELTA_BEARISH -> "Δ div"
                     }
                     safeText(tm, tag, xOf(d.toIndex) + 2f, yOf(d.toPrice) + (if (d.kind.bullish) 2f else -13f), col, 8)
+                }
+        }
+
+        // AI-Driven Chart Pattern Visual Overlays (Flags, Wedges, Double Bottoms/Tops, Triangles)
+        if (overlays.chartPatterns && analysis.chartPatterns.isNotEmpty()) {
+            val patDash = PathEffect.dashPathEffect(floatArrayOf(8f, 5f))
+            val targetDash = PathEffect.dashPathEffect(floatArrayOf(4f, 6f))
+            analysis.chartPatterns
+                .filter { it.endIndex >= window.start && it.startIndex < window.end }
+                .forEach { pat ->
+                    val isSelected = pat.id == selectedPatternId
+                    val accent = if (pat.isBullish) Color(0xFF00E5A3) else Color(0xFFFF5C7C)
+                    val strokeW = if (isSelected) 2.6f else 1.8f
+
+                    val uLine = pat.upperLine
+                    val lLine = pat.lowerLine
+
+                    // Shaded geometric channel / wedge / triangle fill
+                    if (uLine != null && lLine != null) {
+                        val sIdx = max(min(uLine.startIndex, lLine.startIndex), window.start)
+                        val eIdx = min(max(uLine.endIndex, lLine.endIndex), window.end - 1)
+                        if (eIdx > sIdx) {
+                            val poly = Path().apply {
+                                moveTo(xOf(sIdx), yOf(uLine.valueAt(sIdx)))
+                                lineTo(xOf(eIdx), yOf(uLine.valueAt(eIdx)))
+                                lineTo(xOf(eIdx), yOf(lLine.valueAt(eIdx)))
+                                lineTo(xOf(sIdx), yOf(lLine.valueAt(sIdx)))
+                                close()
+                            }
+                            drawPath(poly, accent.copy(alpha = if (isSelected) 0.16f else 0.09f))
+                        }
+                    }
+
+                    // Upper & Lower trendlines
+                    uLine?.let { u ->
+                        val sx = xOf(u.startIndex.coerceIn(window.start, window.end - 1))
+                        val ex = xOf(u.endIndex.coerceIn(window.start, window.end - 1))
+                        val sy = yOf(u.valueAt(u.startIndex.coerceIn(window.start, window.end - 1)))
+                        val ey = yOf(u.valueAt(u.endIndex.coerceIn(window.start, window.end - 1)))
+                        drawLine(
+                            color = accent,
+                            start = Offset(sx, sy),
+                            end = Offset(ex, ey),
+                            strokeWidth = strokeW,
+                            pathEffect = if (pat.type == ChartPatternType.DOUBLE_BOTTOM) patDash else null
+                        )
+                    }
+                    lLine?.let { l ->
+                        val sx = xOf(l.startIndex.coerceIn(window.start, window.end - 1))
+                        val ex = xOf(l.endIndex.coerceIn(window.start, window.end - 1))
+                        val sy = yOf(l.valueAt(l.startIndex.coerceIn(window.start, window.end - 1)))
+                        val ey = yOf(l.valueAt(l.endIndex.coerceIn(window.start, window.end - 1)))
+                        drawLine(
+                            color = accent,
+                            start = Offset(sx, sy),
+                            end = Offset(ex, ey),
+                            strokeWidth = strokeW,
+                            pathEffect = if (pat.type == ChartPatternType.DOUBLE_TOP) patDash else null
+                        )
+                    }
+
+                    // Flagpole shaft (Flags) or W/M Zigzag path (Double Bottom / Top)
+                    if (pat.anchorPoints.size >= 2) {
+                        val drawZigzag = pat.type == ChartPatternType.DOUBLE_BOTTOM ||
+                            pat.type == ChartPatternType.DOUBLE_TOP ||
+                            pat.type == ChartPatternType.BULL_FLAG ||
+                            pat.type == ChartPatternType.BEAR_FLAG
+                        if (drawZigzag) {
+                            val zig = Path()
+                            val countToLink = if (pat.type == ChartPatternType.BULL_FLAG || pat.type == ChartPatternType.BEAR_FLAG) {
+                                2
+                            } else {
+                                pat.anchorPoints.size
+                            }
+                            var started = false
+                            for (aIdx in 0 until min(countToLink, pat.anchorPoints.size)) {
+                                val ap = pat.anchorPoints[aIdx]
+                                val px = xOf(ap.index.coerceIn(window.start, window.end - 1))
+                                val py = yOf(ap.price).coerceIn(topHudH, plotBottom)
+                                if (!started) {
+                                    zig.moveTo(px, py)
+                                    started = true
+                                } else {
+                                    zig.lineTo(px, py)
+                                }
+                            }
+                            drawPath(zig, accent.copy(alpha = 0.9f), style = Stroke(strokeW + 0.4f))
+                        }
+
+                        // Glowing pivot vertices
+                        pat.anchorPoints
+                            .filter { it.index in window.start until window.end }
+                            .forEach { ap ->
+                                val px = xOf(ap.index)
+                                val py = yOf(ap.price).coerceIn(topHudH + 4f, plotBottom - 4f)
+                                drawCircle(accent.copy(alpha = 0.30f), radius = 6.5f, center = Offset(px, py))
+                                drawCircle(accent, radius = 3.2f, center = Offset(px, py))
+                            }
+                    }
+
+                    // Breakout Level line extending to right price axis + BO axis pill
+                    val boFromX = xOf(pat.endIndex.coerceIn(window.start, window.end - 1))
+                    val boY = yOf(pat.breakoutLevel).coerceIn(topHudH + 8f, plotBottom - 8f)
+                    hLine(boY, boFromX, chartW, palette.amber.copy(alpha = 0.92f), width = if (isSelected) 1.8f else 1.3f, dashed = true)
+                    drawCircle(palette.amber, radius = 4f, center = Offset(boFromX, boY))
+                    drawAxisPricePill(
+                        tm = tm,
+                        chartW = chartW,
+                        axisW = axisW,
+                        yPos = boY,
+                        label = "BO ${fmtPrice(pat.breakoutLevel)}",
+                        bgColor = palette.amber,
+                        textColor = Color.Black
+                    )
+
+                    // Projected Measured-Move Target line (when inside visible price range)
+                    val tgtY = yOf(pat.targetPrice)
+                    if (tgtY in (topHudH + 8f)..(plotBottom - 8f)) {
+                        drawLine(
+                            color = accent.copy(alpha = 0.85f),
+                            start = Offset(boFromX, tgtY),
+                            end = Offset(chartW, tgtY),
+                            strokeWidth = 1.2f,
+                            pathEffect = targetDash
+                        )
+                        safeText(tm, "Tgt ${fmtPrice(pat.targetPrice)}", (chartW - 62f).coerceAtLeast(boFromX + 4f), tgtY - 12f, accent, 8, bold = true)
+                    }
+
+                    // On-canvas clickable Pattern Badge
+                    val midIdx = ((max(pat.startIndex, window.start) + min(pat.endIndex, window.end - 1)) / 2)
+                        .coerceIn(window.start, window.end - 1)
+                    val badgeX = (xOf(midIdx) - 48f).coerceIn(6f, (chartW - 112f).coerceAtLeast(6f))
+                    val anchorPrice = uLine?.valueAt(midIdx) ?: pat.breakoutLevel
+                    val badgeY = (yOf(anchorPrice) - 20f).coerceIn(topHudH + 4f, (plotBottom - 20f).coerceAtLeast(topHudH + 4f))
+                    val badgeText = "⚡ ${pat.type.shortBadge} ${pat.confidenceScore}%"
+                    drawRoundRect(
+                        color = if (isSelected) accent else Color(0xFF151B28).copy(alpha = 0.92f),
+                        topLeft = Offset(badgeX, badgeY),
+                        size = Size(106f, 16f),
+                        cornerRadius = CornerRadius(5f, 5f)
+                    )
+                    drawRoundRect(
+                        color = accent,
+                        topLeft = Offset(badgeX, badgeY),
+                        size = Size(106f, 16f),
+                        cornerRadius = CornerRadius(5f, 5f),
+                        style = Stroke(if (isSelected) 1.5f else 1f)
+                    )
+                    safeText(
+                        tm = tm,
+                        text = badgeText,
+                        x = badgeX + 5f,
+                        y = badgeY + 2f,
+                        color = if (isSelected) Color.Black else accent,
+                        sizeSp = 8,
+                        bold = true
+                    )
                 }
         }
 

@@ -4,18 +4,23 @@ import com.example.domain.analysis.TradingStyle
 import com.example.domain.model.InstrumentType
 import com.example.domain.signal.evaluators.AiRenkoSupertrendEvaluator
 import com.example.domain.signal.evaluators.AsrTradingEvaluator
+import com.example.domain.signal.evaluators.AstroCycleEvaluator
 import com.example.domain.signal.evaluators.BtstStbtEvaluator
 import com.example.domain.signal.evaluators.Confluence70Evaluator
+import com.example.domain.signal.evaluators.DataDrivenQuantEvaluator
+import com.example.domain.signal.evaluators.DoubleConfirmationEvaluator
 import com.example.domain.signal.evaluators.Ema50RsiMacdEvaluator
 import com.example.domain.signal.evaluators.EmaCrossRetestEvaluator
 import com.example.domain.signal.evaluators.IntradayOrbVwapEvaluator
 import com.example.domain.signal.evaluators.MomentumBreakoutEvaluator
 import com.example.domain.signal.evaluators.NclTradingEvaluator
 import com.example.domain.signal.evaluators.PivotBreakoutEvaluator
+import com.example.domain.signal.evaluators.PullbackSniperEvaluator
 import com.example.domain.signal.evaluators.QuantBreakoutEvaluator
 import com.example.domain.signal.evaluators.QuantMeanReversionEvaluator
 import com.example.domain.signal.evaluators.RedBarBreakoutEvaluator
 import com.example.domain.signal.evaluators.SmcIctEvaluator
+import com.example.domain.signal.evaluators.StockOptionsMomentumEvaluator
 import com.example.domain.signal.evaluators.TrapReversalEvaluator
 import com.example.domain.signal.evaluators.ReversalConfluenceEvaluator
 import com.example.domain.signal.evaluators.ScalpStrategyEvaluator
@@ -34,6 +39,13 @@ class CompositeSignalEngine(
     @Inject
     constructor() : this(
         listOf(
+            DoubleConfirmationEvaluator(),
+            PullbackSniperEvaluator(),
+            StockOptionsMomentumEvaluator(),
+            DataDrivenQuantEvaluator(),
+            AstroCycleEvaluator(),
+            AiRenkoSupertrendEvaluator(),
+            RedBarBreakoutEvaluator(),
             Confluence70Evaluator(),
             MomentumBreakoutEvaluator(),
             Ema50RsiMacdEvaluator(),
@@ -50,19 +62,40 @@ class CompositeSignalEngine(
             TrapReversalEvaluator(),
             PivotBreakoutEvaluator(),
             QuantMeanReversionEvaluator(),
-            QuantBreakoutEvaluator(),
-            AiRenkoSupertrendEvaluator(),
-            RedBarBreakoutEvaluator()
+            QuantBreakoutEvaluator()
         )
     )
 
     override fun evaluate(context: SignalContext): List<TradeSignal> {
+        val astroConfig = context.astroFilterConfig
+        val astroSnap = if (astroConfig.enabled) {
+            com.example.domain.analysis.AstroTradingEngine.compute(context.now)
+        } else {
+            null
+        }
         return evaluators
             .mapNotNull { evaluator ->
                 // One faulty evaluator (e.g. degenerate data) must never take down the whole scan.
                 runCatching { evaluator.evaluate(context) }.getOrNull()
             }
             .filter { signal -> isValidSignal(signal, context) }
+            .mapNotNull { signal ->
+                if (astroSnap == null) {
+                    signal
+                } else {
+                    val eval = com.example.domain.analysis.AstroTradingEngine.evaluateFilterMatch(
+                        snapshot = astroSnap,
+                        direction = signal.direction,
+                        config = astroConfig
+                    )
+                    if (!eval.passes) {
+                        null
+                    } else {
+                        val hasAstroNote = signal.reasons.any { it.contains("Astro", ignoreCase = true) }
+                        if (hasAstroNote) signal else signal.copy(reasons = signal.reasons + eval.detailReason)
+                    }
+                }
+            }
             .sortedWith(
                 compareByDescending<TradeSignal> { it.confidence.rank }
                     .thenByDescending { it.riskRewardRatio }

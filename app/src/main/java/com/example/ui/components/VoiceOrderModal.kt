@@ -69,10 +69,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.domain.engine.PriceAwareExecutionService
 import com.example.domain.engine.RiskMath
 import com.example.domain.model.Instrument
 import com.example.domain.model.InstrumentType
 import com.example.domain.model.OrderSide
+import com.example.domain.model.OrderType
 import com.example.domain.model.ProductType
 import com.example.domain.voice.ParsedVoiceOrder
 import com.example.domain.voice.VoiceOrderCommandParser
@@ -226,8 +228,10 @@ fun VoiceOrderBottomSheet(
         label = "mic_scale"
     )
 
+    val modalLock = rememberKeyboardAwareModalLock(isOpen = true)
+
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (modalLock.allowBackdropDismiss) onDismiss() },
         sheetState = sheetState,
         containerColor = MaterialTheme.colorScheme.surface
     ) {
@@ -353,6 +357,7 @@ fun VoiceOrderBottomSheet(
                 singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .guardGlobalHotkeysOnFocus()
                     .testTag("voice_order_transcript_input")
             )
 
@@ -398,8 +403,17 @@ fun VoiceOrderBottomSheet(
                     }
                 }
                 is VoiceOrderParseResult.Success -> {
-                    val order = res.order
+                    val baseOrder = res.order
+                    var refinedLimitPrice by remember(baseOrder.instrument.symbol, transcript) {
+                        mutableStateOf<BigDecimal?>(null)
+                    }
+                    val order = refinedLimitPrice?.let { lim ->
+                        baseOrder.copy(orderType = OrderType.LIMIT, limitPrice = lim)
+                    } ?: baseOrder
                     val inst = order.instrument
+                    val liveOrderBook = remember(inst.symbol, inst.ltp, inst.volume, inst.lastTickDirection) {
+                        PriceAwareExecutionService.buildOrderBookSnapshot(inst)
+                    }
                     val isBuy = order.side == OrderSide.BUY
                     val sideColor = if (isBuy) tradingColors.bullish else tradingColors.bearish
                     val sideBg = if (isBuy) tradingColors.bullishContainer else tradingColors.bearishContainer
@@ -489,6 +503,18 @@ fun VoiceOrderBottomSheet(
                             }
                         }
                     }
+
+                    // Live Market Depth inside Voice Order Ticket modal for 1-tap Limit refinement
+                    MarketDepthCard(
+                        orderBook = liveOrderBook,
+                        segment = inst.segment,
+                        selectedLimitPrice = order.limitPrice,
+                        onSelectPriceForLimit = { selectedPrice, _ ->
+                            refinedLimitPrice = RiskMath.roundToTick(selectedPrice, inst.tickSize)
+                            if (executionFeedback !is VoiceOrderExecutionFeedback.Idle) onResetFeedback()
+                        },
+                        compact = true
+                    )
 
                     // Execution Confirmation Feedback Banner inside the Modal
                     when (executionFeedback) {

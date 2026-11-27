@@ -26,11 +26,37 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
+import java.math.RoundingMode
 import javax.inject.Inject
+
+/**
+ * Isolated draft state for editing a specific open position's SL & Target.
+ * Held strictly by [positionId] outside [PositionsUiState] so 1-second live LTP ticks never
+ * reset typed prices, lose focus, or close the editor modal prematurely.
+ */
+data class PositionRiskEditorDraft(
+    val positionId: String,
+    val symbol: String,
+    val segment: MarketSegment,
+    val side: OrderSide,
+    val averageEntryPrice: BigDecimal,
+    val slText: String,
+    val targetText: String,
+    val tslEnabled: Boolean,
+    val tslMode: TrailMode,
+    val tslValueText: String,
+    val ttEnabled: Boolean,
+    val ttMode: TrailMode,
+    val ttValueText: String,
+    val isSaving: Boolean = false,
+    val validationError: String? = null
+)
 
 data class PositionWithLivePnl(
     val position: Position,
@@ -68,6 +94,8 @@ class PositionsViewModel @Inject constructor(
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
     private val _aiRiskAuditState = MutableStateFlow<AiUiState<AiSignalSecondOpinion>>(AiUiState.Idle)
+    private val _riskEditorDraft = MutableStateFlow<PositionRiskEditorDraft?>(null)
+    val riskEditorDraft: StateFlow<PositionRiskEditorDraft?> = _riskEditorDraft.asStateFlow()
 
     private var latestAuditSnapshot = AuditSnapshot()
 
@@ -172,6 +200,125 @@ class PositionsViewModel @Inject constructor(
         }
     }
 
+    fun openRiskEditor(positionId: String) {
+        val pos = uiState.value.items.firstOrNull { it.position.id == positionId }?.position ?: return
+        _riskEditorDraft.value = PositionRiskEditorDraft(
+            positionId = pos.id,
+            symbol = pos.symbol,
+            segment = pos.segment,
+            side = pos.side,
+            averageEntryPrice = pos.averageEntryPrice,
+            slText = pos.activeSlPrice?.toPlainString() ?: "",
+            targetText = pos.activeTargetPrice?.toPlainString() ?: "",
+            tslEnabled = pos.isTslEnabled,
+            tslMode = pos.tslTrailMode,
+            tslValueText = pos.tslTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8",
+            ttEnabled = pos.isTrailingTargetEnabled,
+            ttMode = pos.trailingTargetTrailMode,
+            ttValueText = pos.trailingTargetTrailValue.takeIf { it > BigDecimal.ZERO }?.toPlainString() ?: "0.8"
+        )
+    }
+
+    fun dismissRiskEditor() {
+        if (_riskEditorDraft.value?.isSaving == true) return
+        _riskEditorDraft.value = null
+    }
+
+    fun updateRiskEditorSl(text: String) {
+        _riskEditorDraft.update { it?.copy(slText = sanitizeDecimal(text), validationError = null) }
+    }
+
+    fun updateRiskEditorTarget(text: String) {
+        _riskEditorDraft.update { it?.copy(targetText = sanitizeDecimal(text), validationError = null) }
+    }
+
+    fun applyRiskEditorPreset(slPrice: BigDecimal? = null, targetPrice: BigDecimal? = null) {
+        _riskEditorDraft.update { cur ->
+            cur?.copy(
+                slText = slPrice?.setScale(2, RoundingMode.HALF_UP)?.toPlainString() ?: cur.slText,
+                targetText = targetPrice?.setScale(2, RoundingMode.HALF_UP)?.toPlainString() ?: cur.targetText,
+                validationError = null
+            )
+        }
+    }
+
+    fun toggleRiskEditorTsl(enabled: Boolean) {
+        _riskEditorDraft.update { it?.copy(tslEnabled = enabled, validationError = null) }
+    }
+
+    fun setRiskEditorTslMode(mode: TrailMode) {
+        _riskEditorDraft.update { it?.copy(tslMode = mode, validationError = null) }
+    }
+
+    fun updateRiskEditorTslValue(text: String) {
+        _riskEditorDraft.update { it?.copy(tslValueText = sanitizeDecimal(text), validationError = null) }
+    }
+
+    fun toggleRiskEditorTrailingTarget(enabled: Boolean) {
+        _riskEditorDraft.update { it?.copy(ttEnabled = enabled, validationError = null) }
+    }
+
+    fun setRiskEditorTrailingTargetMode(mode: TrailMode) {
+        _riskEditorDraft.update { it?.copy(ttMode = mode, validationError = null) }
+    }
+
+    fun updateRiskEditorTrailingTargetValue(text: String) {
+        _riskEditorDraft.update { it?.copy(ttValueText = sanitizeDecimal(text), validationError = null) }
+    }
+
+    fun saveRiskEditor() {
+        val draft = _riskEditorDraft.value ?: return
+        if (draft.isSaving) return
+
+        val isBuy = draft.side == OrderSide.BUY
+        val trimmedSl = draft.slText.trim()
+        val trimmedTgt = draft.targetText.trim()
+        val slVal = if (trimmedSl.isEmpty()) null else trimmedSl.toBigDecimalOrNull()
+        val tgtVal = if (trimmedTgt.isEmpty()) null else trimmedTgt.toBigDecimalOrNull()
+
+        val clientErr = when {
+            trimmedSl.isNotEmpty() && (slVal == null || slVal <= BigDecimal.ZERO) ->
+                "Enter a valid Stop Loss price greater than 0 (or leave blank to remove)."
+            trimmedTgt.isNotEmpty() && (tgtVal == null || tgtVal <= BigDecimal.ZERO) ->
+                "Enter a valid Target price greater than 0 (or leave blank to remove)."
+            slVal != null && tgtVal != null && isBuy && slVal >= tgtVal ->
+                "For a BUY trade, Stop Loss must be lower than Target."
+            slVal != null && tgtVal != null && !isBuy && slVal <= tgtVal ->
+                "For a SELL trade, Stop Loss must be higher than Target."
+            else -> null
+        }
+        if (clientErr != null) {
+            _riskEditorDraft.update { it?.copy(validationError = clientErr) }
+            return
+        }
+
+        val tslVal = draft.tslValueText.trim().toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO } ?: BigDecimal("1")
+        val ttVal = draft.ttValueText.trim().toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO } ?: BigDecimal("1")
+
+        _riskEditorDraft.update { it?.copy(isSaving = true, validationError = null) }
+        viewModelScope.launch {
+            val res = tradingRepository.updatePositionRiskControls(
+                positionId = draft.positionId,
+                newSlPrice = slVal,
+                newTargetPrice = tgtVal,
+                isTslEnabled = draft.tslEnabled,
+                tslMode = draft.tslMode,
+                tslValue = tslVal,
+                isTrailingTargetEnabled = draft.ttEnabled,
+                trailingTargetMode = draft.ttMode,
+                trailingTargetValue = ttVal
+            )
+            res.onSuccess {
+                _riskEditorDraft.value = null
+                _messages.emit("Updated SL/Target for ${draft.symbol}")
+            }.onFailure { err ->
+                val msg = err.message ?: "Failed to update risk controls"
+                _riskEditorDraft.update { it?.copy(isSaving = false, validationError = msg) }
+                _messages.emit(msg)
+            }
+        }
+    }
+
     fun saveInlineRiskControls(
         positionId: String,
         slPrice: BigDecimal?,
@@ -197,6 +344,14 @@ class PositionsViewModel @Inject constructor(
             )
             res.onSuccess { _messages.emit("Updated OCO risk controls") }
                 .onFailure { _messages.emit(it.message ?: "Failed to update risk controls") }
+        }
+    }
+
+    private fun sanitizeDecimal(input: String): String {
+        val filtered = input.filter { it.isDigit() || it == '.' }
+        val firstDot = filtered.indexOf('.')
+        return if (firstDot == -1) filtered else {
+            filtered.substring(0, firstDot + 1) + filtered.substring(firstDot + 1).replace(".", "")
         }
     }
 
